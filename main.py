@@ -211,6 +211,16 @@ class HeadlessBrowserPlugin(BasePlugin):
         self.vlm_model: str = cfg.get("vlm_model", "")
         self.vlm_describe_prompt: str = cfg.get("vlm_describe_prompt", "")
         self.vlm_timeout: int = cfg.get("vlm_timeout", 10)
+
+        # 浏览器来源策略
+        # auto=按顺序探测 chrome/msedge/chromium；bundled=跳过系统浏览器直接用内置 Chromium
+        self.browser_channel: str = cfg.get("browser_channel", "auto") or "auto"
+        # 默认开：直接使用用户真实浏览器的用户数据目录（继承登录态/书签等数据）
+        self.use_real_browser_profile: bool = bool(cfg.get("use_real_browser_profile", True))
+        # 高级选项：手动指定用户数据目录，留空则按系统+浏览器自动定位
+        self.custom_user_data_dir: str = (cfg.get("custom_user_data_dir") or "").strip()
+        # 次级方案：插件专用持久化 profile（登录态跨重启保留，不污染真实浏览器）
+        self.use_persistent_profile: bool = bool(cfg.get("use_persistent_profile", True))
         
         # 设置目录
         data_dir = ctx.get_plugin_data_dir()
@@ -229,6 +239,9 @@ class HeadlessBrowserPlugin(BasePlugin):
         self.upload_allowed_dirs = [str(d).strip() for d in _raw_dirs if str(d).strip()]
         
         # 浏览器实例
+        self._data_dir = data_dir
+        self._browser_lock = asyncio.Lock()
+        self._browser_desc = ""
         self._playwright = None
         self._browser = None
         self._context = None
@@ -272,146 +285,375 @@ class HeadlessBrowserPlugin(BasePlugin):
         await self._close_browser()
         logger.info("[HeadlessBrowser] 无头浏览器插件已卸载")
     
+    def _detect_default_browser_channel(self) -> str:
+        """尽力探测系统默认浏览器，返回 playwright channel 名；失败返回 'chrome' 作为首选尝试"""
+        try:
+            import platform
+            system = platform.system()
+            if system == "Windows":
+                import winreg
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                        r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice") as k:
+                        progid = winreg.QueryValueEx(k, "ProgId")[0].lower()
+                    if "chrome" in progid:
+                        return "chrome"
+                    if "edge" in progid or "msedge" in progid:
+                        return "msedge"
+                except Exception:
+                    pass
+            elif system == "Darwin":
+                import subprocess
+                try:
+                    out = subprocess.run(
+                        ["defaults", "read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"],
+                        capture_output=True, text=True, timeout=5).stdout.lower()
+                    # 粗略判断默认浏览器
+                    if "chrome" in out:
+                        return "chrome"
+                    if "edge" in out:
+                        return "msedge"
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return "chrome"
+
+    def _default_user_data_dir(self, channel: str) -> Optional[str]:
+        """按系统与浏览器类型返回真实用户数据目录；不存在则返回 None"""
+        import platform
+        system = platform.system()
+        home = Path.home()
+        candidates = {
+            "chrome": {
+                "Windows": Path(os.environ.get("LOCALAPPDATA", home / "AppData/Local")) / "Google/Chrome/User Data",
+                "Darwin": home / "Library/Application Support/Google/Chrome",
+                "Linux": home / ".config/google-chrome",
+            },
+            "msedge": {
+                "Windows": Path(os.environ.get("LOCALAPPDATA", home / "AppData/Local")) / "Microsoft/Edge/User Data",
+                "Darwin": home / "Library/Application Support/Microsoft Edge",
+                "Linux": home / ".config/microsoft-edge",
+            },
+            "chromium": {
+                "Windows": Path(os.environ.get("LOCALAPPDATA", home / "AppData/Local")) / "Chromium/User Data",
+                "Darwin": home / "Library/Application Support/Chromium",
+                "Linux": home / ".config/chromium",
+            },
+        }
+        path = candidates.get(channel, {}).get(system)
+        if path and path.is_dir():
+            return str(path)
+        return None
+
+    def _channel_try_order(self) -> list:
+        """根据 browser_channel 配置返回要尝试的 channel 顺序（None 表示内置 Chromium）"""
+        ch = (self.browser_channel or "auto").lower()
+        if ch == "auto":
+            # 优先尝试系统默认浏览器，再补其余
+            order = [self._detect_default_browser_channel(), "chrome", "msedge", "chromium"]
+            seen, result = set(), []
+            for c in order:
+                if c not in seen:
+                    seen.add(c)
+                    result.append(c)
+            return result
+        if ch == "bundled":
+            return [None]
+        return [ch]
+
+    def _build_launch_kwargs(self) -> dict:
+        """构建 launch 公共参数（含 Windows 可视模式参数）"""
+        launch_args = {
+            "headless": self.headless,
+            "downloads_path": self.download_dir,
+        }
+        if not self.headless:
+            import platform
+            if platform.system() == "Windows":
+                # Windows 可视模式需要的关键参数
+                launch_args["args"] = [
+                    "--start-maximized",
+                    "--window-position=100,100",
+                    "--window-size=1920,1080",
+                    "--force-device-scale-factor=1",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--disable-features=TranslateUI",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox"
+                ]
+                # 使用较慢的启动确保窗口可见
+                launch_args["slow_mo"] = 100
+                logger.info("[HeadlessBrowser] Windows 可视模式已启用")
+        return launch_args
+
+    def _build_context_options(self) -> dict:
+        """构建上下文参数（无头=固定视口，可视=跟随窗口）"""
+        context_options = {"accept_downloads": True}
+        if self.headless:
+            context_options["viewport"] = self.default_viewport
+        else:
+            context_options["viewport"] = None
+            context_options["no_viewport"] = True
+        if self.user_agent:
+            context_options["user_agent"] = self.user_agent
+        return context_options
+
+    async def _download_chromium(self):
+        """真正自动下载内置 Chromium（带验证），失败给出手动命令提示"""
+        import sys
+        logger.info("[HeadlessBrowser] 未找到可用浏览器，开始自动下载内置 Chromium...")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "playwright", "install", "chromium",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            tail = (out or b"").decode(errors="ignore")[-500:]
+            raise RuntimeError(
+                f"Chromium 自动下载失败（退出码 {proc.returncode}）: {tail}\n"
+                f"请手动运行: {sys.executable} -m playwright install chromium"
+            )
+        logger.info("[HeadlessBrowser] Chromium 下载完成")
+
     async def _ensure_browser(self):
-        """确保浏览器已启动"""
-        if self._browser is None:
+        """确保浏览器已启动。带并发锁与多级回退：真实浏览器profile → 插件持久profile → 系统channel → 自动下载内置Chromium"""
+        if self._browser is not None or self._context is not None:
+            return
+        async with self._browser_lock:
+            if self._browser is not None or self._context is not None:
+                return
             try:
                 from playwright.async_api import async_playwright
-                
-                self._playwright = await async_playwright().start()
-                
-                # Windows 可视模式需要额外参数
-                launch_args = {
-                    "headless": self.headless,
-                    "downloads_path": self.download_dir
-                }
-                
-                # 非无头模式下的特殊处理
-                if not self.headless:
-                    import platform
-                    if platform.system() == "Windows":
-                        # Windows 可视模式需要的关键参数
-                        launch_args["args"] = [
-                            "--start-maximized",
-                            "--window-position=100,100",
-                            "--window-size=1920,1080",
-                            "--force-device-scale-factor=1",
-                            "--disable-background-timer-throttling",
-                            "--disable-backgrounding-occluded-windows",
-                            "--disable-renderer-backgrounding",
-                            "--disable-features=TranslateUI",
-                            "--disable-extensions",
-                            "--disable-plugins",
-                            "--no-sandbox",
-                            "--disable-setuid-sandbox"
-                        ]
-                        # 使用较慢的启动确保窗口可见
-                        launch_args["slow_mo"] = 100
-                        logger.info("[HeadlessBrowser] Windows 可视模式已启用")
-                        logger.info(f"[HeadlessBrowser] 窗口参数: {launch_args['args']}")
-                
-                # 启动浏览器
-                logger.info(f"[HeadlessBrowser] 正在启动浏览器，headless={self.headless}")
-                self._browser = await self._playwright.chromium.launch(**launch_args)
-                logger.info(f"[HeadlessBrowser] 浏览器对象已创建: {self._browser is not None}")
-                
-                # 创建上下文 - 可视模式下不使用固定视口
-                context_options = {
-                    "accept_downloads": True
-                }
-                
-                # 无头模式下使用固定视口，可视模式下使用默认视口
-                if self.headless:
-                    context_options["viewport"] = self.default_viewport
-                else:
-                    # 可视模式下不设置固定视口，让浏览器使用实际窗口大小
-                    context_options["viewport"] = None
-                    context_options["no_viewport"] = True
-                
-                if self.user_agent:
-                    context_options["user_agent"] = self.user_agent
-                
-                logger.info(f"[HeadlessBrowser] 创建上下文，参数: {context_options}")
-                self._context = await self._browser.new_context(**context_options)
-                logger.info(f"[HeadlessBrowser] 上下文已创建: {self._context is not None}")
-                
-                # 创建页面
-                self._page = await self._context.new_page()
-                self._page.set_default_timeout(self.timeout * 1000)
-                
-                # 自动加载 cookie 目录下所有站点的 cookie 文件
-                cookies_dir = self.cookies_dir
-                os.makedirs(cookies_dir, exist_ok=True)
-                try:
-                    import glob, json
-                    cookie_files = sorted(glob.glob(os.path.join(cookies_dir, "*.json")))
-                    for cookie_file in cookie_files:
-                        try:
-                            with open(cookie_file, "r", encoding="utf-8") as f:
-                                cookies = json.load(f)
-                            # 兼容嵌套格式：如果数据在 cookies 字段内则提取
-                            if isinstance(cookies, dict) and 'cookies' in cookies:
-                                cookies = cookies['cookies']
-                            if not isinstance(cookies, list):
-                                cookies = [cookies]
-                            # sameSite 映射
-                            ss_map = {'strict': 'Strict', 'lax': 'Lax', 'none': 'None', 'no_restriction': 'None', 'unspecified': 'Lax'}
-                            pw_cookies = []
-                            for c in cookies:
-                                if not isinstance(c, dict):
-                                    continue
-                                if not all(k in c for k in ("name", "value", "domain")):
-                                    logger.warning(
-                                        "[HeadlessBrowser] cookie缺少必要字段，已跳过: 文件=%s，字段=%s",
-                                        os.path.basename(cookie_file),
-                                        sorted(c.keys()),
-                                    )
-                                    continue
-                                ss_raw = str(c.get('sameSite', 'Lax')).lower()
-                                ss = ss_map.get(ss_raw, 'Lax')
-                                cookie = {
-                                    'name': c['name'],
-                                    'value': c['value'],
-                                    'domain': c['domain'],
-                                    'path': c.get('path', '/'),
-                                    'secure': c.get('secure', False),
-                                    'httpOnly': c.get('httpOnly', False),
-                                    'sameSite': ss,
-                                }
-                                if c.get('expirationDate'):
-                                    cookie['expires'] = int(c['expirationDate'])
-                                pw_cookies.append(cookie)
-                            if pw_cookies:
-                                await self._context.add_cookies(pw_cookies)
-                                logger.info(f"[HeadlessBrowser] 已加载cookie: {os.path.basename(cookie_file)} ({len(pw_cookies)} 个)")
-                        except Exception as e:
-                            logger.warning(f"[HeadlessBrowser] 跳过cookie文件 {os.path.basename(cookie_file)}: {e}")
-                except Exception as e:
-                    logger.error(f"[HeadlessBrowser] 扫描cookie目录失败: {e}")
-                
-                logger.info("[HeadlessBrowser] 浏览器已启动")
             except ImportError:
-                raise ImportError("请先安装 Playwright: pip install playwright && playwright install chromium")
-            except Exception as e:
-                logger.error(f"[HeadlessBrowser] 启动浏览器失败: {e}")
+                raise RuntimeError(
+                    "未安装 Playwright 库，请先执行: pip install playwright"
+                    "（插件带 requirements.txt，重新安装插件可自动安装）"
+                )
+
+            self._playwright = await async_playwright().start()
+            launch_kwargs = self._build_launch_kwargs()
+            context_options = self._build_context_options()
+            channels = self._channel_try_order()
+            errors = []
+
+            try:
+                started = False
+
+                # 第1级：用户真实浏览器 + 真实用户数据目录（继承登录态）
+                if self.use_real_browser_profile:
+                    for ch in channels:
+                        if ch is None:
+                            continue
+                        user_dir = self.custom_user_data_dir or self._default_user_data_dir(ch)
+                        if not user_dir:
+                            errors.append(f"{ch}: 未找到用户数据目录")
+                            continue
+                        try:
+                            logger.info(f"[HeadlessBrowser] 尝试真实浏览器模式: channel={ch}, user_data_dir={user_dir}")
+                            kw = dict(launch_kwargs)
+                            kw.pop("downloads_path", None)  # persistent context 单独传
+                            self._context = await self._playwright.chromium.launch_persistent_context(
+                                user_dir, channel=ch, downloads_path=self.download_dir,
+                                **{**kw, **context_options})
+                            self._browser = self._context.browser  # persistent 模式下可能为 None
+                            self._browser_desc = f"真实浏览器 ({ch}) + 用户数据目录"
+                            logger.info(f"[HeadlessBrowser] 已接管真实浏览器: {ch}（继承用户数据）")
+                            started = True
+                            break
+                        except Exception as e:
+                            msg = str(e).splitlines()[0] if str(e) else repr(e)
+                            errors.append(f"{ch}(真实profile): {msg}")
+                            logger.warning(f"[HeadlessBrowser] 真实浏览器模式失败 [{ch}]: {msg}")
+                            if "user data directory is already in use" in str(e) or "ProcessSingleton" in str(e):
+                                logger.warning("[HeadlessBrowser] 提示：请先完全退出正在运行的该浏览器再试，或在配置中关闭 use_real_browser_profile")
+                            self._context = None
+
+                # 第2级：系统浏览器 + 插件专用持久化 profile
+                if not started and self.use_persistent_profile:
+                    profile_dir = str(Path(self._data_dir) / "browser_profile")
+                    os.makedirs(profile_dir, exist_ok=True)
+                    for ch in channels:
+                        try:
+                            logger.info(f"[HeadlessBrowser] 尝试插件持久化模式: channel={ch or 'bundled'}")
+                            kw = dict(launch_kwargs)
+                            kw.pop("downloads_path", None)
+                            launch_ch = {"channel": ch} if ch else {}
+                            self._context = await self._playwright.chromium.launch_persistent_context(
+                                profile_dir, downloads_path=self.download_dir,
+                                **{**kw, **launch_ch, **context_options})
+                            self._browser = self._context.browser
+                            self._browser_desc = f"{ch or '内置Chromium'} + 插件持久化profile"
+                            logger.info(f"[HeadlessBrowser] 已启动: {self._browser_desc}")
+                            started = True
+                            break
+                        except Exception as e:
+                            msg = str(e).splitlines()[0] if str(e) else repr(e)
+                            errors.append(f"{ch or 'bundled'}(插件profile): {msg}")
+                            logger.warning(f"[HeadlessBrowser] 插件持久化模式失败 [{ch or 'bundled'}]: {msg}")
+                            self._context = None
+
+                # 第3级：系统浏览器 channel 普通模式（无持久化）
+                if not started:
+                    for ch in channels:
+                        if ch is None:
+                            continue
+                        try:
+                            logger.info(f"[HeadlessBrowser] 尝试系统浏览器普通模式: channel={ch}")
+                            self._browser = await self._playwright.chromium.launch(channel=ch, **launch_kwargs)
+                            self._context = await self._browser.new_context(**context_options)
+                            self._browser_desc = f"系统浏览器 ({ch})"
+                            logger.info(f"[HeadlessBrowser] 已启动: {self._browser_desc}")
+                            started = True
+                            break
+                        except Exception as e:
+                            msg = str(e).splitlines()[0] if str(e) else repr(e)
+                            errors.append(f"{ch}: {msg}")
+                            logger.warning(f"[HeadlessBrowser] 系统浏览器启动失败 [{ch}]: {msg}")
+
+                # 第4级：自动下载内置 Chromium
+                if not started:
+                    await self._download_chromium()
+                    try:
+                        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+                        self._context = await self._browser.new_context(**context_options)
+                        self._browser_desc = "内置 Chromium（自动下载）"
+                        logger.info("[HeadlessBrowser] 内置 Chromium 启动验证通过")
+                        started = True
+                    except Exception as e:
+                        errors.append(f"bundled: {e}")
+                        raise RuntimeError(f"内置 Chromium 安装后仍无法启动: {e}")
+
+                if not started:
+                    raise RuntimeError("所有浏览器启动方式均失败")
+
+                # 创建/复用页面
+                if self._context.pages:
+                    self._page = self._context.pages[0]
+                else:
+                    self._page = await self._context.new_page()
+                self._page.set_default_timeout(self.timeout * 1000)
+
+                # 自动加载 cookie 目录下所有站点的 cookie 文件
+                await self._load_cookies()
+
+                logger.info(f"[HeadlessBrowser] 浏览器已启动: {self._browser_desc}")
+            except Exception:
+                # 启动失败时清理半成品状态
+                await self._close_browser()
+                err_lines = "\n".join(f"  - {e}" for e in errors[-6:])
+                logger.error(f"[HeadlessBrowser] 启动浏览器失败，各级尝试结果:\n{err_lines}")
                 raise
-    
+
+    async def _require_browser(self) -> Optional[str]:
+        """启动浏览器并把失败转成给 LLM 的友好提示；成功返回 None"""
+        try:
+            await self._ensure_browser()
+            return None
+        except Exception as e:
+            msg = str(e).splitlines()[0] if str(e) else repr(e)
+            return (f"❌ 浏览器启动失败: {msg}\n"
+                    f"提示：插件会自动依次尝试 真实浏览器→插件持久profile→系统浏览器→自动下载Chromium；"
+                    f"如使用真实浏览器模式，请先完全退出正在运行的该浏览器。详细原因见插件日志。")
+
+    async def _load_cookies(self):
+        """自动加载 cookie 目录下所有站点的 cookie 文件"""
+        cookies_dir = self.cookies_dir
+        os.makedirs(cookies_dir, exist_ok=True)
+        try:
+            import glob, json
+            cookie_files = sorted(glob.glob(os.path.join(cookies_dir, "*.json")))
+            for cookie_file in cookie_files:
+                try:
+                    with open(cookie_file, "r", encoding="utf-8") as f:
+                        cookies = json.load(f)
+                    # 兼容嵌套格式：如果数据在 cookies 字段内则提取
+                    if isinstance(cookies, dict) and 'cookies' in cookies:
+                        cookies = cookies['cookies']
+                    if not isinstance(cookies, list):
+                        cookies = [cookies]
+                    # sameSite 映射
+                    ss_map = {'strict': 'Strict', 'lax': 'Lax', 'none': 'None', 'no_restriction': 'None', 'unspecified': 'Lax'}
+                    pw_cookies = []
+                    for c in cookies:
+                        if not isinstance(c, dict):
+                            continue
+                        if not all(k in c for k in ("name", "value", "domain")):
+                            logger.warning(
+                                "[HeadlessBrowser] cookie缺少必要字段，已跳过: 文件=%s，字段=%s",
+                                os.path.basename(cookie_file),
+                                sorted(c.keys()),
+                            )
+                            continue
+                        ss_raw = str(c.get('sameSite', 'Lax')).lower()
+                        ss = ss_map.get(ss_raw, 'Lax')
+                        cookie = {
+                            'name': c['name'],
+                            'value': c['value'],
+                            'domain': c['domain'],
+                            'path': c.get('path', '/'),
+                            'secure': c.get('secure', False),
+                            'httpOnly': c.get('httpOnly', False),
+                            'sameSite': ss,
+                        }
+                        try:
+                            if c.get('expirationDate'):
+                                cookie['expires'] = int(float(c['expirationDate']))
+                        except (ValueError, TypeError):
+                            pass
+                        pw_cookies.append(cookie)
+                    if pw_cookies:
+                        await self._context.add_cookies(pw_cookies)
+                        logger.info(f"[HeadlessBrowser] 已加载cookie: {os.path.basename(cookie_file)} ({len(pw_cookies)} 个)")
+                except Exception as e:
+                    logger.warning(f"[HeadlessBrowser] 跳过cookie文件 {os.path.basename(cookie_file)}: {e}")
+        except Exception as e:
+            logger.error(f"[HeadlessBrowser] 扫描cookie目录失败: {e}")
+
     async def _close_browser(self):
-        """关闭浏览器"""
+        """关闭浏览器（每步独立保护，保证尽量清理）"""
         if self._page:
-            await self._page.close()
+            try:
+                await self._page.close()
+            except Exception as e:
+                logger.debug(f"[HeadlessBrowser] 关闭页面失败: {e}")
             self._page = None
         if self._context:
-            await self._context.close()
+            try:
+                await self._context.close()
+            except Exception as e:
+                logger.debug(f"[HeadlessBrowser] 关闭上下文失败: {e}")
             self._context = None
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception as e:
+                logger.debug(f"[HeadlessBrowser] 关闭浏览器失败: {e}")
             self._browser = None
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception as e:
+                logger.debug(f"[HeadlessBrowser] 停止playwright失败: {e}")
             self._playwright = None
         logger.info("[HeadlessBrowser] 浏览器已关闭")
     
+    def _is_path_allowed(self, resolved_path: str) -> bool:
+        """路径白名单校验（upload_allow_any_path=True 时直接放行）"""
+        if self.upload_allow_any_path:
+            return True
+        for d in self.upload_allowed_dirs:
+            root = os.path.realpath(d)
+            try:
+                if os.path.commonpath((root, resolved_path)) == root:
+                    return True
+            except ValueError:
+                continue
+        return False
+
     def _generate_filename(self, prefix: str = "screenshot", ext: str = "png") -> str:
         """生成带时间戳的文件名"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -673,7 +915,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def navigate(self, event, url: str, wait_until: str = "networkidle") -> str:
         """访问指定URL"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.goto(url, wait_until=wait_until)
             title = await self._page.title()
@@ -696,7 +940,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def screenshot(self, event, selector: str = "", filename: str = "", full_page: bool = False, send_now: bool = False) -> str:
         """截图并返回图片"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         
         try:
             # 生成文件名
@@ -797,7 +1043,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def click(self, event, selector: str, button: str = "left", count: int = 1) -> str:
         """点击页面元素"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.click(selector, button=button, click_count=count)
             return f"✅ 已点击元素: {selector}"
@@ -819,7 +1067,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def fill(self, event, selector: str, value: str, clear_first: bool = True) -> str:
         """填写表单字段"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             if clear_first:
                 await self._page.fill(selector, value)
@@ -846,7 +1096,9 @@ class HeadlessBrowserPlugin(BasePlugin):
         上传文件到文件输入框，使用 Playwright setInputFiles 绕过系统文件对话框。
         默认允许上传任意目录；可通过配置关闭并限定可上传目录，避免本地敏感文件被外传。
         """
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             # 文件必须存在且为常规文件
             resolved = os.path.realpath(file_path)
@@ -854,18 +1106,8 @@ class HeadlessBrowserPlugin(BasePlugin):
                 return f"❌ 文件不存在或不是常规文件: {file_path}"
 
             # 路径限制：默认放开（upload_allow_any_path=True）；关闭后仅允许白名单目录
-            if not self.upload_allow_any_path:
-                allowed = False
-                for d in self.upload_allowed_dirs:
-                    root = os.path.realpath(d)
-                    try:
-                        if os.path.commonpath((root, resolved)) == root:
-                            allowed = True
-                            break
-                    except ValueError:
-                        continue
-                if not allowed:
-                    return f"❌ 出于安全考虑，仅允许上传以下目录中的文件: {', '.join(self.upload_allowed_dirs)}"
+            if not self._is_path_allowed(resolved):
+                return f"❌ 出于安全考虑，仅允许上传以下目录中的文件: {', '.join(self.upload_allowed_dirs)}"
 
             # 使用 Playwright 的 set_input_files 上传文件（绕过系统文件对话框）
             await self._page.set_input_files(selector, resolved)
@@ -886,7 +1128,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def get_text(self, event, selector: str = "", max_length: int = 3000) -> str:
         """获取页面文本内容"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             if selector:
                 element = await self._page.query_selector(selector)
@@ -914,7 +1158,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def get_info(self, event) -> str:
         """获取页面基本信息"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             title = await self._page.title()
             url = self._page.url
@@ -936,7 +1182,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def scroll(self, event, direction: str, amount: int = 800) -> str:
         """滚动页面"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             if direction == "down":
                 await self._page.evaluate(f"window.scrollBy(0, {amount})")
@@ -961,7 +1209,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def go_back(self, event) -> str:
         """返回上一页"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.go_back()
             return f"✅ 已返回上一页\n📄 当前页面: {await self._page.title()}"
@@ -978,7 +1228,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def refresh(self, event) -> str:
         """刷新页面"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.reload()
             return f"✅ 页面已刷新\n📄 当前页面: {await self._page.title()}"
@@ -998,7 +1250,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def execute_js(self, event, script: str) -> str:
         """执行JavaScript代码"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             result = await self._page.evaluate(script)
             return f"✅ JavaScript执行结果:\n{result}"
@@ -1022,14 +1276,27 @@ class HeadlessBrowserPlugin(BasePlugin):
         try:
             import aiohttp
             
-            # 确定文件名
+            # 确定文件名（净化，防止路径穿越）
             if not filename:
                 filename = os.path.basename(url.split("?")[0]) or f"download_{int(time.time())}"
+            filename = os.path.basename(filename.replace("\\", "/")) or f"download_{int(time.time())}"
             
             filepath = os.path.join(self.download_dir, filename)
             
+            # 尽量带上浏览器会话的 cookie 与 UA（登录态资源才能下）；浏览器未启动则静默跳过
+            headers = {}
+            cookies = {}
+            try:
+                if self._context is not None:
+                    for c in await self._context.cookies(url):
+                        cookies[c["name"]] = c["value"]
+                    if self.user_agent:
+                        headers["User-Agent"] = self.user_agent
+            except Exception:
+                pass
+            
             # 下载文件
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=headers, cookies=cookies) as session:
                 async with session.get(url) as response:
                     if response.status == 200:
                         content = await response.read()
@@ -1063,7 +1330,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def wait(self, event, seconds: int = 1, selector: str = "") -> str:
         """等待"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             if selector:
                 await self._page.wait_for_selector(selector)
@@ -1122,7 +1391,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def test_visible(self, event) -> str:
         """测试浏览器是否可见"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             # 创建一个本地测试页面
             test_html = """<!DOCTYPE html>
@@ -1193,7 +1464,9 @@ class HeadlessBrowserPlugin(BasePlugin):
             "",
             f"操作系统: {platform.system()} {platform.release()}",
             f"无头模式: {self.headless}",
-            f"浏览器已启动: {self._browser is not None}",
+            f"浏览器已启动: {self._browser is not None or self._context is not None}",
+            f"浏览器来源: {self._browser_desc or '未启动'}",
+            f"真实浏览器模式: {'开启' if self.use_real_browser_profile else '关闭'}",
             f"页面已创建: {self._page is not None}",
         ]
         
@@ -1369,10 +1642,13 @@ class HeadlessBrowserPlugin(BasePlugin):
         }
     )
     async def send_file(self, event, filepath: str, as_image: bool = False) -> str:
-        """发送文件给用户"""
+        """发送文件给用户（受路径白名单限制，防止本地敏感文件被外传）"""
         try:
             if not os.path.exists(filepath):
                 return f"❌ 文件不存在: {filepath}"
+            resolved = os.path.realpath(filepath)
+            if not self._is_path_allowed(resolved):
+                return f"❌ 出于安全考虑，仅允许发送以下目录中的文件: {', '.join(self.upload_allowed_dirs)}（或在配置中开启 upload_allow_any_path）"
             
             file_size = os.path.getsize(filepath)
             filename = os.path.basename(filepath)
@@ -1407,7 +1683,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def keyboard_type(self, event, text: str, delay: int = 0) -> str:
         """模拟键盘输入文本"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.keyboard.type(text, delay=delay)
             return f"✅ 已输入文本: {text[:50]}{'...' if len(text) > 50 else ''}"
@@ -1427,7 +1705,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def keyboard_press(self, event, key: str) -> str:
         """模拟按键"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.keyboard.press(key)
             return f"✅ 已按下按键: {key}"
@@ -1448,7 +1728,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def keyboard_down_up(self, event, action: str, key: str) -> str:
         """模拟按键按下/释放"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             if action == "down":
                 await self._page.keyboard.down(key)
@@ -1474,7 +1756,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def mouse_move(self, event, x: int, y: int, steps: int = 1) -> str:
         """模拟鼠标移动"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.mouse.move(x, y, steps=steps)
             return f"✅ 鼠标已移动到: ({x}, {y})"
@@ -1496,7 +1780,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def mouse_click(self, event, x: int = None, y: int = None, button: str = "left", click_count: int = 1) -> str:
         """模拟鼠标点击"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             if x is not None and y is not None:
                 # 先移动鼠标到指定位置，再点击
@@ -1529,7 +1815,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def mouse_down_up(self, event, action: str, button: str = "left") -> str:
         """模拟鼠标按下/释放"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             if action == "down":
                 await self._page.mouse.down(button=button)
@@ -1553,7 +1841,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def mouse_wheel(self, event, delta_x: int = 0, delta_y: int = 0) -> str:
         """模拟鼠标滚轮"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.mouse.wheel(delta_x, delta_y)
             direction = "下" if delta_y > 0 else "上" if delta_y < 0 else ""
@@ -1579,7 +1869,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def mouse_drag(self, event, start_x: int, start_y: int, end_x: int, end_y: int, button: str = "left", steps: int = 10) -> str:
         """模拟鼠标拖拽"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             # 移动到起始位置
             await self._page.mouse.move(start_x, start_y)
@@ -1611,7 +1903,9 @@ class HeadlessBrowserPlugin(BasePlugin):
     )
     async def hover(self, event, selector: str) -> str:
         """悬停在元素上"""
-        await self._ensure_browser()
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             await self._page.hover(selector)
             return f"✅ 已悬停在元素: {selector}"

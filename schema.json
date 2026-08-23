@@ -1,8 +1,35 @@
 {
   "headless": {
-    "type": "boolean",
+    "type": "switch",
     "default": true,
     "hint": "是否以无头模式运行浏览器（true=后台运行，false=可见窗口）"
+  },
+  "browser_channel": {
+    "type": "enum",
+    "options": [
+      "auto",
+      "chrome",
+      "msedge",
+      "chromium",
+      "bundled"
+    ],
+    "default": "auto",
+    "hint": "浏览器来源：auto=自动探测（优先系统默认浏览器，依次尝试 Chrome→Edge→Chromium→内置下载）；chrome/msedge/chromium=指定系统浏览器；bundled=只用内置 Chromium"
+  },
+  "use_real_browser_profile": {
+    "type": "switch",
+    "default": true,
+    "hint": "【默认开】直接使用你真实浏览器的用户数据目录，继承登录状态/书签等全部数据。注意：使用前需完全退出该浏览器（否则会提示用户数据目录被占用并自动回退）；自动化操作将以你的真实账号身份执行，请知悉风险"
+  },
+  "custom_user_data_dir": {
+    "type": "string",
+    "default": "",
+    "hint": "高级选项：手动指定浏览器用户数据目录（User Data 目录），留空则按系统和浏览器类型自动定位。仅在开启真实浏览器模式时生效"
+  },
+  "use_persistent_profile": {
+    "type": "switch",
+    "default": true,
+    "hint": "次级方案：真实浏览器不可用时，使用插件专用持久化 profile（登录一次后跨重启保留，不污染真实浏览器）。关闭则回退为每次全新会话"
   },
   "default_viewport": {
     "type": "string",
@@ -31,7 +58,10 @@
   },
   "auto_send_screenshot": {
     "type": "enum",
-    "options": ["auto", "manual"],
+    "options": [
+      "auto",
+      "manual"
+    ],
     "default": "auto",
     "hint": "截图后图片发送方式：auto=自动发送给用户，manual=由AI决定何时发送（AI可以查看截图后再决定是否发送）"
   },
@@ -78,7 +108,10 @@
   },
   "upload_allowed_dirs": {
     "type": "list",
-    "default": ["data/files", "data/temp"],
+    "default": [
+      "data/files",
+      "data/temp"
+    ],
     "hint": "允许上传的目录白名单（每行一个，相对路径基于插件运行目录），仅在upload_allow_any_path为false时生效"
   }
 }

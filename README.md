@@ -1,22 +1,38 @@
-# 无头浏览器插件 (Headless Browser Plugin) 1.1.0
+# 无头浏览器插件 (Headless Browser Plugin) 1.2.0
 
 让 KiraAI 能够控制无头浏览器进行网页浏览、截图、下载、上传等操作，支持自动加载 cookie 文件实现各账号的半持久化登录。
 
 ## 功能特性
 
 - 🌐 **浏览器控制**: 访问网页、点击元素、填写表单、滚动页面
+- 🖥️ **真实浏览器接管**: 默认直接使用本机默认浏览器及其真实用户数据，登录态开箱即用；多级回退，无浏览器时自动下载内置 Chromium
 - 📸 **截图功能**: 截取页面或元素，自动发送给 AI 查看
 - 📁 **文件管理**: 下载文件、保存截图、发送文件给用户
 - 🔧 **JS执行**: 在页面中执行 JavaScript 代码
 - 🍪 **Cookie管理**: 自动加载 `data/files/cookie/` 目录下所有网站的 Cookie 文件，多站点独立存储，分享插件时安全隔离
 - ⚙️ **灵活配置**: 支持无头/可视模式、自定义视口、User-Agent 等
 
-## 安装依赖（重要！第二行必须手动在cmd内输入，无法通过requirements.txt自动安装！）
+## 安装依赖
 
-```bash
-pip install playwright aiohttp
-playwright install chromium
-```
+插件自带 `requirements.txt`，安装/重载插件时 KiraAI 会自动执行 `pip install playwright aiohttp`，**无需手动安装 pip 依赖**。
+
+浏览器本体也无需手动准备——插件启动时按以下顺序自动选择（见下节"浏览器来源"），前三级都找不到时会**自动下载内置 Chromium**。
+
+> 老版本手动执行过 `playwright install chromium` 的用户不受影响。
+
+## 浏览器来源（v1.2.0 新机制）
+
+插件启动浏览器时按优先级依次尝试，全部失败会自动下载内置 Chromium：
+
+1. **真实浏览器模式（默认开，`use_real_browser_profile`）**：直接使用你本机的默认浏览器（自动探测 Chrome → Edge → Chromium）及其**真实用户数据目录**，完整继承你已登录的账号、书签等数据。
+   - ⚠️ 使用前请**完全退出正在运行的该浏览器**（用户数据目录被占用会自动回退到下一级）；
+   - ⚠️ 自动化操作将以你的**真实账号身份**执行，请注意隐私与安全风险，不需要时可在配置中关闭；
+   - 高级用户可用 `custom_user_data_dir` 手动指定用户数据目录。
+2. **插件持久化 profile（默认开，`use_persistent_profile`）**：插件专用浏览器数据目录（登录一次后跨重启保留），不污染真实浏览器。
+3. **系统浏览器普通模式**：用系统已装的 Chrome/Edge/Chromium 开一个全新会话。
+4. **自动下载内置 Chromium**：以上都不可用时自动执行 `playwright install chromium` 并验证启动。
+
+当前实际使用的来源会写入日志，也可用 `browser_debug` 工具查看。
 
 ## 配置说明
 
@@ -24,7 +40,11 @@ playwright install chromium
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `headless` | boolean | `true` | 是否以无头模式运行（后台运行） |
+| `headless` | switch | `true` | 是否以无头模式运行（后台运行） |
+| `browser_channel` | enum | `auto` | 浏览器来源：`auto`=自动探测（优先系统默认浏览器）；`chrome`/`msedge`/`chromium`=指定；`bundled`=只用内置 Chromium |
+| `use_real_browser_profile` | switch | `true` | 使用真实浏览器的用户数据目录（继承登录态）。使用前需完全退出该浏览器，操作以真实账号身份执行 |
+| `custom_user_data_dir` | string | - | 手动指定用户数据目录（留空自动定位），仅真实浏览器模式生效 |
+| `use_persistent_profile` | switch | `true` | 真实浏览器不可用时使用插件专用持久化 profile（登录跨重启保留） |
 | `default_viewport` | string | `1920x1080` | 浏览器视口大小 |
 | `screenshot_dir` | string | `插件数据目录/screenshots` | 截图保存路径 |
 | `download_dir` | string | `插件数据目录/downloads` | 文件下载路径 |
@@ -390,6 +410,29 @@ playwright install chromium
 - 先截图查看页面结构
 - 检查 CSS 选择器是否正确
 - 等待页面完全加载后再操作
+
+## 更新日志
+
+<details>
+<summary>点击展开</summary>
+
+### v1.2.0（2026-08-23）
+- 新增：浏览器来源四级回退——默认接管本机真实浏览器及其用户数据目录（继承登录态），依次回退 插件持久化 profile → 系统浏览器普通模式 → 自动下载内置 Chromium（此前下载只能手动执行）
+- 新增：`browser_channel`（auto/chrome/msedge/chromium/bundled）、`use_real_browser_profile`（默认开）、`custom_user_data_dir`、`use_persistent_profile`（默认开）配置项
+- 新增：`requirements.txt`，pip 依赖由 KiraAI 自动安装，无需手动 pip install
+- 修复：浏览器启动加并发锁，避免多工具同时触发重复启动
+- 修复：关闭浏览器时单步异常不再中断后续清理
+- 安全：`browser_send_file` 纳入上传路径白名单限制，防止任意本地文件被外传
+- 安全：`browser_download` 文件名净化，防止路径穿越写出下载目录
+- 优化：`browser_download` 自动携带浏览器会话的 Cookie 与 User-Agent，可下载登录态资源
+- 优化：浏览器启动失败时工具返回友好中文提示（含回退链说明），不再把异常堆栈抛给 AI
+- 优化：`browser_debug` 显示当前浏览器来源；cookie 过期时间解析更健壮；配置项类型统一为 switch
+- 新增：插件图标（适配 KiraAI WebUI 插件列表显示）
+
+### v1.1.0
+- 历史版本：无头/可视模式、截图+VLM 描述、cookie 自动加载、下载/上传、键鼠模拟等
+
+</details>
 
 ## 许可证
 
