@@ -410,7 +410,15 @@ class HeadlessBrowserPlugin(BasePlugin):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        out, _ = await proc.communicate()
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(
+                "Chromium 自动下载超时（600 秒）\n"
+                f"请检查网络后重试，或手动运行: {sys.executable} -m playwright install chromium"
+            )
         if proc.returncode != 0:
             tail = (out or b"").decode(errors="ignore")[-500:]
             raise RuntimeError(
@@ -514,13 +522,24 @@ class HeadlessBrowserPlugin(BasePlugin):
                             errors.append(f"{ch}: {msg}")
                             logger.warning(f"[HeadlessBrowser] 系统浏览器启动失败 [{ch}]: {msg}")
 
-                # 第4级：自动下载内置 Chromium
+                # 第4级：自动下载内置 Chromium（开启持久化时复用插件 profile，登录态不丢）
                 if not started:
                     await self._download_chromium()
                     try:
-                        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-                        self._context = await self._browser.new_context(**context_options)
-                        self._browser_desc = "内置 Chromium（自动下载）"
+                        if self.use_persistent_profile:
+                            profile_dir = str(Path(self._data_dir) / "browser_profile")
+                            os.makedirs(profile_dir, exist_ok=True)
+                            kw = dict(launch_kwargs)
+                            kw.pop("downloads_path", None)
+                            self._context = await self._playwright.chromium.launch_persistent_context(
+                                profile_dir, downloads_path=self.download_dir,
+                                **{**kw, **context_options})
+                            self._browser = self._context.browser
+                            self._browser_desc = "内置 Chromium（自动下载）+ 插件持久化profile"
+                        else:
+                            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+                            self._context = await self._browser.new_context(**context_options)
+                            self._browser_desc = "内置 Chromium（自动下载）"
                         logger.info("[HeadlessBrowser] 内置 Chromium 启动验证通过")
                         started = True
                     except Exception as e:
@@ -1283,20 +1302,25 @@ class HeadlessBrowserPlugin(BasePlugin):
             
             filepath = os.path.join(self.download_dir, filename)
             
-            # 尽量带上浏览器会话的 cookie 与 UA（登录态资源才能下）；浏览器未启动则静默跳过
+            # 尽量带上浏览器会话的 cookie 与 UA（登录态资源才能下）；浏览器未启动则跳过
+            # 安全：cookie 按目标 URL 域名隔离存放，跨域重定向不会携带原站 cookie
             headers = {}
-            cookies = {}
+            jar = None
             try:
                 if self._context is not None:
-                    for c in await self._context.cookies(url):
-                        cookies[c["name"]] = c["value"]
+                    from yarl import URL as _YarlURL
+                    jar = aiohttp.CookieJar(unsafe=False)
+                    scoped = {c["name"]: c["value"] for c in await self._context.cookies(url)}
+                    if scoped:
+                        jar.update_cookies(scoped, response_url=_YarlURL(url))
                     if self.user_agent:
                         headers["User-Agent"] = self.user_agent
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[HeadlessBrowser] 获取下载用 cookie 失败（将匿名下载）: {e}")
+                jar = None
             
             # 下载文件
-            async with aiohttp.ClientSession(headers=headers, cookies=cookies) as session:
+            async with aiohttp.ClientSession(headers=headers, cookie_jar=jar) as session:
                 async with session.get(url) as response:
                     if response.status == 200:
                         content = await response.read()
