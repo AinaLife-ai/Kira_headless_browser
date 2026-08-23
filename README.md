@@ -428,7 +428,7 @@ playwright install chromium
 - 优化：浏览器启动失败时工具返回友好中文提示（含回退链说明），不再把异常堆栈抛给 AI
 - 优化：`browser_debug` 显示当前浏览器来源；cookie 过期时间解析更健壮；配置项类型统一为 switch
 - 新增：插件图标（适配 KiraAI WebUI 插件列表显示）
-- 修复（按 CodeRabbit 审查意见）：Chromium 自动下载增加 600 秒超时保护；下载的内置 Chromium 复用插件持久化 profile（登录态不丢）；下载文件时 Cookie 按目标域名隔离存放（防跨域重定向泄露）；aiohttp 最低版本提升至 3.14.3（修复旧版本多个安全漏洞）
+- 修复（按 CodeRabbit 审查意见）：Chromium 自动下载增加 600 秒超时保护；下载的内置 Chromium 复用插件持久化 profile（登录态不丢）；下载文件时 Cookie 按目标域名隔离存放（防跨域重定向泄露）；aiohttp 最低版本提升至 3.14.3（修复旧版本多个安全漏洞）；browser_download 启动前先确保浏览器就绪（登录态资源才能携带会话 cookie 下载）
 
 ### v1.1.0
 - 历史版本：无头/可视模式、截图+VLM 描述、cookie 自动加载、下载/上传、键鼠模拟等

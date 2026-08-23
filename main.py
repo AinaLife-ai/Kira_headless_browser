@@ -1291,7 +1291,10 @@ class HeadlessBrowserPlugin(BasePlugin):
         }
     )
     async def download(self, event, url: str, filename: str = "") -> str:
-        """下载文件"""
+        """下载文件（先确保浏览器启动，登录态资源才能携带会话 cookie 下载）"""
+        _browser_err = await self._require_browser()
+        if _browser_err:
+            return _browser_err
         try:
             import aiohttp
             
