@@ -146,7 +146,7 @@
     "name": "Auto Describe Screenshot",
     "type": "boolean",
     "default": true,
-    "hint": "是否使用VLM自动描述截图内容（仅在auto_send为auto时生效）",
+    "hint": "Whether to automatically describe the screenshot content using VLM (only effective when auto_send is set to auto)",
     "locales": {
       "zh": {
         "name": "自动描述截图",
