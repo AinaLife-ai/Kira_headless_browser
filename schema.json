@@ -1,11 +1,19 @@
 {
   "headless": {
+    "name": "Headless Mode",
     "type": "switch",
     "default": true,
-    "hint": "是否以无头模式运行浏览器（true=后台运行，false=可见窗口）"
+    "hint": "Whether to run the browser in headless mode (background or visible window)",
+    "locales": {
+      "zh": {
+        "name": "无头模式",
+        "hint": "是否以无头模式运行浏览器（后台运行 or 窗口可见）"
+      }
+    }
   },
   "browser_channel": {
-    "type": "enum",
+    "name": "Browser Channel",
+    "type": "string",
     "options": [
       "auto",
       "chrome",
@@ -14,104 +22,236 @@
       "bundled"
     ],
     "default": "auto",
-    "hint": "浏览器来源：auto=自动探测（优先系统默认浏览器，依次尝试 Chrome→Edge→Chromium→内置下载）；chrome/msedge/chromium=指定系统浏览器；bundled=只用内置 Chromium"
+    "hint": "Browser source: auto=automatic detection (prefer system default browser, try Chrome→Edge→Chromium→built-in download in order); chrome/msedge/chromium=specify system browser; bundled=use only built-in Chromium",
+    "locales": {
+      "zh": {
+        "name": "浏览器来源",
+        "hint": "浏览器来源：auto=自动探测（优先系统默认浏览器，依次尝试 Chrome→Edge→Chromium→内置下载）；chrome/msedge/chromium=指定系统浏览器；bundled=只用内置 Chromium"
+      }
+    }
   },
   "use_real_browser_profile": {
+    "name": "Use Real Browser Profile",
     "type": "switch",
     "default": true,
-    "hint": "【默认开】直接使用你真实浏览器的用户数据目录，继承登录状态/书签等全部数据。注意：使用前需完全退出该浏览器（否则会提示用户数据目录被占用并自动回退）；自动化操作将以你的真实账号身份执行，请知悉风险"
+    "hint": "[Default ON] Directly use your real browser's user data directory, inheriting all data such as login status/bookmarks. Note: You must completely exit the browser before using (otherwise it will prompt that the user data directory is occupied and automatically roll back); automated operations will be executed in your real account identity, please be aware of the risks.",
+    "locales": {
+      "zh": {
+        "name": "使用真实浏览器配置文件",
+        "hint": "【默认开】直接使用你真实浏览器的用户数据目录，继承登录状态/书签等全部数据。注意：使用前需完全退出该浏览器（否则会提示用户数据目录被占用并自动回退）；自动化操作将以你的真实账号身份执行，请知悉风险"
+      }
+    }
   },
   "custom_user_data_dir": {
+    "name": "Custom User Data Directory",
     "type": "string",
     "default": "",
-    "hint": "高级选项：手动指定浏览器用户数据目录（User Data 目录），留空则按系统和浏览器类型自动定位。仅在开启真实浏览器模式时生效"
+    "hint": "Advanced option: Manually specify the browser user data directory (User Data directory), leave empty to automatically locate based on system and browser type. Only effective when real browser mode is enabled.",
+    "locales": {
+      "zh": {
+        "name": "自定义用户数据目录",
+        "hint": "高级选项：手动指定浏览器用户数据目录（User Data 目录），留空则按系统和浏览器类型自动定位。仅在开启真实浏览器模式时生效"
+      }
+    }
   },
   "use_persistent_profile": {
+    "name": "Use Persistent Profile",
     "type": "switch",
     "default": true,
-    "hint": "次级方案：真实浏览器不可用时，使用插件专用持久化 profile（登录一次后跨重启保留，不污染真实浏览器）。关闭则回退为每次全新会话"
+    "hint": "Secondary option: When the real browser is unavailable, use the plugin's dedicated persistent profile (login once and retain across restarts, without polluting the real browser). If turned off, it will revert to a new session each time.",
+    "locales": {
+      "zh": {
+        "name": "使用持久化配置文件",
+        "hint": "次级方案：真实浏览器不可用时，使用插件专用持久化 profile（登录一次后跨重启保留，不污染真实浏览器）。关闭则回退为每次全新会话"
+      }
+    }
   },
   "default_viewport": {
+    "name": "Default Viewport",
     "type": "string",
     "default": "1920x1080",
-    "hint": "默认视口大小，格式：宽度x高度，例如 1920x1080"
+    "hint": "Default viewport size, format: widthxheight, e.g., 1920x1080",
+    "locales": {
+      "zh": {
+        "name": "默认视口大小",
+        "hint": "默认视口大小，格式：宽度x高度，例如 1920x1080"
+      }
+    }
   },
   "screenshot_dir": {
+    "name": "Screenshot Directory",
     "type": "string",
     "default": "",
-    "hint": "截图保存目录（留空使用默认目录）"
+    "hint": "Screenshot save directory (leave empty to use default directory)",
+    "locales": {
+      "zh": {
+        "name": "截图目录",
+        "hint": "截图保存目录（留空使用默认目录）"
+      }
+    }
   },
   "download_dir": {
+    "name": "Download Directory",
     "type": "string",
     "default": "",
-    "hint": "文件下载目录（留空使用默认目录）"
+    "hint": "File download directory (leave empty to use default directory)",
+    "locales": {
+      "zh": {
+        "name": "下载目录",
+        "hint": "文件下载目录（留空使用默认目录）"
+      }
+    }
   },
   "user_agent": {
+    "name": "Custom User-Agent",
     "type": "string",
     "default": "",
-    "hint": "自定义 User-Agent（留空使用默认）"
+    "hint": "Custom User-Agent (leave empty to use default)",
+    "locales": {
+      "zh": {
+        "name": "自定义 User-Agent",
+        "hint": "自定义 User-Agent（留空使用默认）"
+      }
+    }
   },
   "timeout": {
+    "name": "Page Load Timeout",
     "type": "integer",
     "default": 60,
-    "hint": "页面加载超时时间（秒），建议60秒以上"
+    "hint": "Page load timeout (seconds), recommended 60 seconds or more",
+    "locales": {
+      "zh": {
+        "name": "页面加载超时",
+        "hint": "页面加载超时时间（秒），建议60秒以上"
+      }
+    }
   },
   "auto_send_screenshot": {
-    "type": "enum",
+    "name": "Auto Send Screenshot",
+    "type": "string",
     "options": [
       "auto",
       "manual"
     ],
     "default": "auto",
-    "hint": "截图后图片发送方式：auto=自动发送给用户，manual=由AI决定何时发送（AI可以查看截图后再决定是否发送）"
+    "hint": "Screenshot send method after capture: auto=automatically send to user, manual=decide by AI when to send (AI can view screenshot before deciding whether to send)",
+    "locales": {
+      "zh": {
+        "name": "截图发送方式",
+        "hint": "截图后发送方式：auto=自动发送给用户，manual=由AI决定何时发送（AI可在决定是否发送前查看截图）"
+      }
+    }
   },
   "auto_describe_screenshot": {
+    "name": "Auto Describe Screenshot",
     "type": "boolean",
     "default": true,
-    "hint": "是否使用VLM自动描述截图内容（仅在auto_send为auto时生效）"
+    "hint": "是否使用VLM自动描述截图内容（仅在auto_send为auto时生效）",
+    "locales": {
+      "zh": {
+        "name": "自动描述截图",
+        "hint": "是否使用VLM自动描述截图内容（仅在auto_send为auto时生效）"
+      }
+    }
   },
   "vlm_model": {
+    "name": "VLM Model",
     "type": "model_select",
     "model_type": "llm",
     "default": "",
-    "hint": "选择用于分析截图的视觉模型（VLM），从已配置的大语言模型中选择。必须选择支持视觉的模型（如 Qwen-VL、GPT-4o、Claude-3 等）"
+    "hint": "Select the visual model (VLM) used to analyze screenshots, choose from the configured large language models. Must select a model that supports vision (e.g., Qwen-VL, GPT-4o, Claude-3, etc.)",
+    "locales": {
+      "zh": {
+        "name": "VLM 模型",
+        "hint": "选择用于分析截图的视觉模型（VLM），从已配置的大语言模型中选择。必须选择支持视觉的模型（如 Qwen-VL、GPT-4o、Claude-3 等）"
+      }
+    }
   },
   "vlm_describe_prompt": {
+    "name": "VLM Describe Prompt",
     "type": "string",
     "default": "",
-    "hint": "自定义VLM提示词（可选）。如果填写，将覆盖默认提示词。建议包含：1.页面基本信息 2.可交互元素清单 3.当前状态 4.关键内容 5.建议的下一步操作 6.坐标参考"
+    "hint": "Custom VLM prompt (optional). If filled, it will override the default prompt. Recommended to include: 1. Page basic information 2. Interactable elements list 3. Current status 4. Key content 5. Suggested next steps 6. Coordinate reference",
+    "locales": {
+      "zh": {
+        "name": "VLM 描述提示词",
+        "hint": "自定义VLM提示词（可选）。如果填写，将覆盖默认提示词。建议包含：1.页面基本信息 2.可交互元素清单 3.当前状态 4.关键内容 5.建议的下一步操作 6.坐标参考"
+      }
+    }
   },
   "vlm_timeout": {
+    "name": "VLM Timeout",
     "type": "integer",
     "default": 10,
-    "hint": "VLM描述超时时间（秒），超过此时间将跳过描述"
+    "hint": "VLM description timeout (seconds), if exceeded, the description will be skipped",
+    "locales": {
+      "zh": {
+        "name": "VLM 超时时间",
+        "hint": "VLM描述超时时间（秒），超过此时间将跳过描述"
+      }
+    }
   },
   "screenshot_max_count": {
+    "name": "Screenshot Max Count",
     "type": "integer",
     "default": 50,
-    "hint": "截图文件最大保留数量，超出后会自动删除最旧的截图（默认50张）"
+    "hint": "Maximum number of screenshot files to retain, older screenshots will be automatically deleted (default is 50)",
+    "locales": {
+      "zh": {
+        "name": "截图最大数量",
+        "hint": "截图文件最大保留数量，超出后会自动删除最旧的截图（默认50张）"
+      }
+    }
   },
   "screenshot_auto_clean": {
+    "name": "Screenshot Auto Clean",
     "type": "boolean",
     "default": true,
-    "hint": "是否自动清理旧截图文件（true=开启自动清理，false=关闭）"
+    "hint": "Whether to automatically clean up old screenshot files (true=enable auto clean, false=disable)",
+    "locales": {
+      "zh": {
+        "name": "截图自动清理",
+        "hint": "是否自动清理旧截图文件（true=开启自动清理，false=关闭）"
+      }
+    }
   },
   "cookies_dir": {
+    "name": "Cookies Directory",
     "type": "string",
     "default": "data/files/cookie",
-    "hint": "Cookie文件存放目录，存放各网站的cookie JSON文件。插件启动时自动加载此目录下所有.json格式的cookie文件（如 chatgpt.json、claude.json 等）。目录不存在会自动创建，分享插件时此目录独立在外，不随插件打包，安全隔离。"
+    "hint": "Cookie file storage directory, stores cookie JSON files for each website. The plugin automatically loads all .json format cookie files in this directory when starting (e.g., chatgpt.json, claude.json, etc.). If the directory does not exist, it will be created automatically. When sharing the plugin, this directory is kept separate and not packaged with the plugin for security isolation.",
+    "locales": {
+      "zh": {
+        "name": "Cookie目录",
+        "hint": "Cookie文件存放目录，存放各网站的cookie JSON文件。插件启动时自动加载此目录下所有.json格式的cookie文件（如 chatgpt.json、claude.json 等）。目录不存在会自动创建，分享插件时此目录独立在外，不随插件打包，安全隔离。"
+      }
+    }
   },
   "upload_allow_any_path": {
+    "name": "Upload Any Path",
     "type": "switch",
     "default": true,
-    "hint": "是否允许上传任意目录的文件（true=允许上传任何路径的文件，false=仅允许上传upload_allowed_dirs中配置的目录内的文件）"
+    "hint": "Whether to allow uploading files from any directory (true=allow uploading files from any path, false=only allow uploading files from directories configured in upload_allowed_dirs)",
+    "locales": {
+      "zh": {
+        "name": "上传任意路径",
+        "hint": "是否允许上传任意目录的文件（true=允许上传任何路径的文件，false=仅允许上传upload_allowed_dirs中配置的目录内的文件）"
+      }
+    }
   },
   "upload_allowed_dirs": {
+    "name": "Upload Allowed Directories",
     "type": "list",
     "default": [
       "data/files",
       "data/temp"
     ],
-    "hint": "允许上传的目录白名单（每行一个，相对路径基于插件运行目录），仅在upload_allow_any_path为false时生效"
+    "hint": "Allowed directories for file uploads (one per line, relative paths based on the plugin's working directory), only effective when upload_allow_any_path is false",
+    "locales": {
+      "zh": {
+        "name": "上传允许的目录",
+        "hint": "允许上传的目录白名单（每行一个，相对路径基于插件运行目录），仅在upload_allow_any_path为false时生效"
+      }
+    }
   }
 }
