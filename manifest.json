@@ -1,13 +1,15 @@
 {
-    "display_name": "无头浏览器",
+    "display_name": "Headless Browser",
     "plugin_id": "headless_browser",
-    "uninstallable": true,
-    "version": "1.2.0",
+    "version": "1.2.1",
     "icon": "icon.png",
     "author": "nyx+znq19",
-    "description": "让 AI 能够控制浏览器进行网页浏览、截图、下载、上传等操作。默认接管本地真实浏览器（继承登录态），逐级回退到插件持久 profile / 系统浏览器 / 自动下载内置 Chromium",
+    "description": "A headless browser plugin that allows AI to control a browser for web browsing, screenshots, downloads, uploads, and more. It defaults to taking over the local real browser (inheriting login state), with fallback options to plugin persistent profile / system browser / auto-download built-in Chromium.",
     "repo": "https://github.com/Qixuan112/Kira_headless_browser",
-    "exclude": [
-        "data/files/cookie/"
-    ]
+    "locales": {
+        "zh": {
+            "display_name": "无头浏览器",
+            "description": "让 AI 能够控制浏览器进行网页浏览、截图、下载、上传等操作。默认接管本地真实浏览器（继承登录态），逐级回退到插件持久 profile / 系统浏览器 / 自动下载内置 Chromium"
+        }
+    }
 }
