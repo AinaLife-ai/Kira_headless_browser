@@ -68,9 +68,14 @@ def _tool_enum(src: str, tool: str) -> set[str]:
     # 装饰器参数到右括号结束（这里用"到 async def"作为上界更稳）
     fn = src.find("async def ", i)
     seg = src[start:fn if fn > 0 else i + 3000]
+    # ⚠️ 只取 **action / mode 属性自己的** enum。
+    #    原先把这个工具段里**所有** enum 并起来，于是某个被删掉的 action
+    #    只要还留在别的参数 enum 里，C1 就检测不出这次删除。
     out = set()
-    for mm in re.finditer(r'"enum":\s*\[([^\]]*)\]', seg):
-        out |= set(re.findall(r'"([a-z_]+)"', mm.group(1)))
+    for prop in ("action", "mode"):
+        mm = re.search(rf'"{prop}":\s*\{{[^}}]*?"enum":\s*\[([^\]]*)\]', seg)
+        if mm:
+            out |= set(re.findall(r'"([a-z_]+)"', mm.group(1)))
     return out
 
 

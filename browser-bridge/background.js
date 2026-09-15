@@ -23,7 +23,7 @@ import {
   state, sendRaw, sendResult, sendEvent, sendChunk,
   resolveTab, assertInjectable, callContent, detectBrowser,
   askUser, confirmTimeoutMs, resolveConfirm,
-  PRIVILEGED_COMMANDS, confirmPromptFor,
+  NEEDS_CONFIRM_COMMANDS, confirmPromptFor,
 } from "./shared.js";
 import {
   getInfo, goBack, refresh, hover, keyPress, keyDownUp,
@@ -333,7 +333,7 @@ async function runCommand(id, name, params) {
     //    之前只在 navigate/click/type 里各写一次，导致 exec_js / upload /
     //    cookie_set 等高危命令完全绕过确认 —— 用户明明开了「写操作需确认」，
     //    扩展却静默执行了 JS、传了文件、改了 cookie。
-    if (params && params.require_confirm && PRIVILEGED_COMMANDS.has(name)) {
+    if (params && params.require_confirm && NEEDS_CONFIRM_COMMANDS.has(name)) {
       const [title, message] = confirmPromptFor(name, params);
       const ok = await askUser(title, message, {
         command: name,

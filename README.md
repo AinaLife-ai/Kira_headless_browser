@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.10
+# 浏览器插件 (Browser Plugin) 2.1.11
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -183,7 +183,7 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 | `op_timeout_ratio` | number | `0.8` | 仅在上项打开时生效 |
 | `action_timeout` | integer | `20` | 点击/输入等交互的超时（秒） |
 | `idle_close_seconds` | integer | `300` | 空闲这么久后自动关闭无头浏览器，释放 CPU 和内存。`0`=不关 |
-| `screenshot_dir` | string | 插件数据目录/screenshots | 截图保存路径 |
+| `screenshot_dir` | string | 插件数据目录/data/temp | 截图保存路径 |
 | `download_dir` | string | 插件数据目录/downloads | 下载保存路径 |
 | `screenshot_max_count` | integer | `50` | 截图最多保留张数（元素截图也计入清理） |
 | `screenshot_auto_clean` | switch | `true` | 自动清理旧截图 |
@@ -470,6 +470,44 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.11（2026-09-15）
+
+**按 CodeRabbit 第九轮审查修复 8 项**（含 2 个安全项）：
+
+- 🔴 **面板存在 XSS**：`bridge.py` 会把扩展上报的事件数据**原样转发**，
+  `main.py` 存进 `confirm_log`，而 `web/index.html` 把 `action`/`command`
+  和 `reason` **拼进 `conflog.innerHTML`** —— 持有 bridge token 的一方
+  可以注入 `<img onerror=...>`，在**已认证的面板**里执行脚本。
+  `allowed_domains` / `blocked_domains` 也走同一个注入点。
+  → 全部改用 DOM 节点 + `textContent` 渲染，不再拼 HTML 字符串。
+- 🔴 **`cookie_get` 导出可以绕过用户确认**：它只读、所以不在
+  `WRITE_COMMANDS` 里（正确 —— 不能破坏只读模式/域名白名单的判定），
+  但导出的是 `chrome.cookies.getAll` 的**真实取值** = 登录态，
+  却因为不在确认集合里被静默放行。
+  → 两侧各加一个**「只读但敏感」确认集**（`CONFIRM_ONLY_CMDS` /
+  `CONFIRM_ONLY_COMMANDS`），确认判定改用「写操作 ∪ 只读敏感」，
+  并补上专门的确认文案。
+- **`evaluate` 把脚本异常当成功返回**：注入的包装器会把脚本自身的异常
+  吞成 `{ __error: "..." }`，而 `first.error` 只反映
+  `chrome.userScripts.execute` 这一层失败 → 脚本抛错时命令被记为**成功**。
+  这与 `shared.js` 里 `callContent` 把 `__error` 当错误的做法不一致。
+  → 在 `evaluate` 里把 `__error` 翻成抛出的异常。
+- **无坐标点击不触发双击**：坐标路径传了 `click_count`，无坐标路径仍在
+  循环 `down`/`up`（每次 clickCount 都是 1）→ `dblclick` 永远不触发。
+  → 两条路径统一传 `click_count`。
+- **弹窗会显示「可读取到 undefined 个标签页」**：`tab_count` 只在
+  `listTabs()` 成功时才有，且那个错误被吞掉。→ 渲染前判空。
+- **README 的 `screenshot_dir` 默认值写错**：schema 是空串表示"用
+  `data/temp`"，`main.py` 与 `HeadlessBackend` 都按 `data/temp` 兜底，
+  但 README 指向了别的目录。→ 改为 `data/temp`。
+
+**回归套件 2 项**：
+- `_tool_enum()` 会把该工具段里**所有** enum 并起来 → 某个被删掉的
+  action 只要还留在别的参数 enum 里，C1 就检测不出来。
+  → 只提取 `action` / `mode` 属性自己的 enum。
+- C3 只搜索 `main.py`，而 `headless_backend.py` 也是配置消费者
+  → 那里的默认值写错不会被发现。→ 两个文件一起查。
 
 ### v2.1.10（2026-09-15）
 

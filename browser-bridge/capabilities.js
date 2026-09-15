@@ -117,7 +117,16 @@ async function execJs(params) {
 
   const first = (results && results[0]) || {};
   if (first.error) throw new Error("执行出错：" + first.error);
-  return { url: tab.url, result: first.result ?? null };
+  // ⚠️ 注入的包装器会把**脚本自身的异常**吞成 `{ __error: "..." }` 返回
+  //    （见上面的 wrap）。first.error 只能反映 chrome.userScripts.execute
+  //    这一层失败，脚本抛错时 first.error 是空的 —— 若不在这里翻出来，
+  //    就会以"成功"回给插件（sendResult(id, true, ...)），
+  //    和 shared.js 里 callContent 把 __error 当错误的做法**不一致**。
+  const res = first.result ?? null;
+  if (res && typeof res === "object" && "__error" in res) {
+    throw new Error(String(res.__error));
+  }
+  return { url: tab.url, result: res };
 }
 
 // ─── 2. 上传文件（内容由插件分块送来）──────────────────────────────────

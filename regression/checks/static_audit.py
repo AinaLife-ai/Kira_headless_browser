@@ -331,8 +331,38 @@ def run(r) -> None:
     r.ok("C15 MV3 里不用 DOM API（FileReader）",
          "FileReader" not in _cap_code,
          "Service Worker 里没有 FileReader，用了就是 ReferenceError")
+    # ⚠️ 判定必须用「写操作 ∪ 只读敏感」的**并集**，而且 cookie_get
+    #    必须在确认集合里 —— 否则导出登录态会被静默放行。
+    shared = src("browser-bridge/shared.js")
     r.ok("C16 二次确认集中在 runCommand（高危命令不绕过）",
-         "PRIVILEGED_COMMANDS" in bg and "PRIVILEGED_COMMANDS.has(name)" in bg)
+         "NEEDS_CONFIRM_COMMANDS" in bg
+         and "NEEDS_CONFIRM_COMMANDS.has(name)" in bg
+         and "PRIVILEGED_COMMANDS" in shared
+         and "CONFIRM_ONLY_COMMANDS" in shared
+         and re.search(r'CONFIRM_ONLY_COMMANDS\s*=\s*new Set\(\s*\[\s*"cookie_get"',
+                       shared) is not None,
+         "确认集需为并集，且 cookie_get 必须在只读敏感集里")
+    # ⚠️ evaluate 必须把注入包装器吞掉的 `__error` **翻成异常**，
+    #    否则脚本抛错会被当成"命令成功"上报给插件。
+    r.ok("C16b evaluate 把 __error 转成抛出（脚本异常不算成功）",
+         "__error" in _cap_code
+         and re.search(r'"__error"\s+in\s+\w+', _cap_code) is not None
+         and "throw" in _cap_code,
+         "必须检测结果里的 __error 并 throw")
+
+    # ⚠️ 面板渲染事件数据/域名时必须用 textContent，不能拼 innerHTML
+    #    （这些字段来自持有 bridge token 的一方，是注入口 CWE-79）。
+    web = src("web/index.html")
+    _sinks = re.findall(r'\$\(["\'](?:conflog|domains)["\']\)\.innerHTML\s*=\s*([^;]+)',
+                        web)
+    r.ok("C16c 面板不用 innerHTML 拼事件数据（XSS）",
+         all(("" == x.strip()) or x.strip().startswith('"') and len(x.strip()) <= 4
+             for x in _sinks),
+         f"conflog/domains 的 innerHTML 赋值必须清空或纯静态：{_sinks}")
+    r.ok("C16d 面板用 textContent 渲染不受控字段",
+         web.count("textContent") >= 6 and "_renderDomains" in web,
+         "事件记录与域名列表都要走 DOM 节点")
+
     r.ok("C17 截图前校验标签是否在前台",
          "tab.active" in bg and "不能截" not in bg)
 

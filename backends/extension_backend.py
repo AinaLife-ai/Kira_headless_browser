@@ -64,6 +64,13 @@ class ExtensionBackend(Backend):
     async def close(self) -> None:
         await self._bridge.close()
 
+    #: **只读但敏感**、必须经用户确认的命令。
+    #  cookie_get 会把 chrome.cookies.getAll 的**实际取值**回传给插件，
+    #  虽然它不改状态（因此不属写操作、不受只读模式与域名白名单约束），
+    #  但导出会话 Cookie 等同于交出登录态 —— 开了「写操作需确认」时，
+    #  用户理应看到"要导出 Cookie"这一条并亲自批准，而不是被静默放行。
+    CONFIRM_ONLY_CMDS = {"cookie_get"}
+
     #: 需要用户确认的命令（与扩展侧 shared.js 的 PRIVILEGED_COMMANDS 对齐）
     WRITE_CMDS = {
         "navigate", "click", "type", "scroll",
@@ -81,7 +88,7 @@ class ExtensionBackend(Backend):
         # ⚠️ 二次确认必须在这里统一下发。
         #    之前插件侧从不传 require_confirm，导致「写操作需用户确认」这个
         #    配置项**完全不生效** —— 扩展那边实现好了却永远收不到开关。
-        if self.require_confirm and cmd in self.WRITE_CMDS:
+        if self.require_confirm and cmd in (self.WRITE_CMDS | self.CONFIRM_ONLY_CMDS):
             p.setdefault("require_confirm", True)
             p.setdefault("confirm_timeout", self.confirm_timeout)
         try:

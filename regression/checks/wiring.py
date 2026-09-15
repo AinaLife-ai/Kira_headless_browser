@@ -116,23 +116,36 @@ def run(r) -> None:
     # C3 代码里的默认值必须与 schema 一致
     #    （"默认值分裂"：schema 写 true、代码写 false，谁都没注意）
     import re as _re2
+    # ⚠️ 必须检查**所有**读配置的地方，不能只看 main.py。
+    #    headless_backend.py 也直接读 cfg（如 screenshot_dir），
+    #    那里写错默认值同样不会被发现。
+    config_sources = [("main.py", main),
+                      ("backends/headless_backend.py",
+                       src("backends/headless_backend.py"))]
     mismatch = []
     for key, item in sch.items():
         if isinstance(item.get("default"), bool):
-            m2 = _re2.search(rf'cfg\.get\(\s*"{key}",\s*(True|False)', main)
-            if m2 and (m2.group(1) == "True") != item["default"]:
-                mismatch.append(f"{key}: schema={item['default']} 代码={m2.group(1)}")
+            for name, body in config_sources:
+                for m2 in _re2.finditer(
+                        rf'cfg\.get\(\s*"{key}",\s*(True|False)', body):
+                    if (m2.group(1) == "True") != item["default"]:
+                        mismatch.append(
+                            f"{key}: schema={item['default']} "
+                            f"代码={m2.group(1)} @{name}")
         elif isinstance(item.get("default"), int) and not isinstance(item.get("default"), bool):
             # 值可能是表达式（如 `2 * 1024 ** 3`），截到逗号再求值
-            m2 = _re2.search(rf'cfg\.get\(\s*"{key}",\s*([^,)]+)', main)
-            if m2:
-                expr = m2.group(1).strip()
-                try:
-                    val = int(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307
-                except Exception:
-                    val = None
-                if val is not None and val != item["default"]:
-                    mismatch.append(f"{key}: schema={item['default']} 代码={expr}")
+            for name, body in config_sources:
+                for m2 in _re2.finditer(
+                        rf'cfg\.get\(\s*"{key}",\s*([^,)]+)', body):
+                    expr = m2.group(1).strip()
+                    try:
+                        val = int(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307
+                    except Exception:
+                        val = None
+                    if val is not None and val != item["default"]:
+                        mismatch.append(
+                            f"{key}: schema={item['default']} "
+                            f"代码={expr} @{name}")
     r.ok("C3 布尔/整数配置的默认值与 schema 一致", not mismatch,
          f"不一致={mismatch or '无'}")
 

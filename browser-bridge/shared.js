@@ -196,11 +196,30 @@ export const PRIVILEGED_COMMANDS = new Set([
   "activate_tab", "close_tab", "mouse_move",
 ]);
 
+/**
+ * 只读但**敏感**、同样需要用户确认的命令。
+ *
+ * ⚠️ 单独一个集合：cookie_get 只是读，不能塞进 PRIVILEGED_COMMANDS
+ *    （那会把它误当成写操作，破坏只读模式/域名白名单的判定）；
+ *    但导出的是 chrome.cookies.getAll 的**真实取值** = 登录态，
+ *    用户应当看到"要导出 Cookie"并亲自批准。
+ */
+export const CONFIRM_ONLY_COMMANDS = new Set(["cookie_get"]);
+
+/** 需要用户确认的全部命令（写操作 + 只读敏感） */
+export const NEEDS_CONFIRM_COMMANDS = new Set([
+  ...PRIVILEGED_COMMANDS, ...CONFIRM_ONLY_COMMANDS,
+]);
+
 /** 生成给用户看的确认文案 */
 export function confirmPromptFor(name, params) {
   switch (name) {
     case "navigate":
       return ["跳转页面", `AI 想让浏览器打开：\n${params.url}`];
+    case "cookie_get":
+      return ["导出 Cookie",
+              `AI 想读取并导出当前站点（${params.url || "当前页"}）的 Cookie。\n`
+              + "这等于把登录态交给 AI，请确认是否允许。"];
     case "click":
       return ["点击元素",
         `AI 想点击页面上的：${params.selector || params.text || `第 ${params.index} 个元素`}`];

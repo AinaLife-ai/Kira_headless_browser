@@ -213,15 +213,10 @@ async function refresh() {
       ? ("最近浏览：" + (ls.tab_title || "") + " — " + ls.tab_url)
       : "暂无浏览记录";
 
-    const ad = p.allowed_domains || [];
-    const bd = p.blocked_domains || [];
-    $("domains").innerHTML =
-      "<div><b>白名单</b>：" + (ad.length ? "<code>" + ad.join("</code>, <code>") + "</code>" : "（空，不限制）") + "</div>" +
-      "<div style='margin-top:6px'><b>黑名单</b>：" + (bd.length ? "<code>" + bd.join("</code>, <code>") + "</code>" : "（空）") + "</div>" +
-      "<div style='margin-top:6px'><b>永久拦截</b>：<code>本机地址</code></div>" +
-      "<div class='hint'>黑名单优先级最高，读和写都会被拒绝。白名单非空时，写操作仅限白名单域名。" +
-      "指向本机的地址（<code>localhost</code> / <code>127.0.0.1</code> / <code>[::1]</code> / " +
-      "<code>0.0.0.0</code> / 十进制 IP 等各种写法）无条件拒绝，避免 AI 操作到 KiraAI 自身的服务。</div>";
+    // ⚠️ allowed_domains / blocked_domains 同样来自配置，可能含任意字符，
+    //    一律用 DOM 节点渲染（见下方 _renderDomains），不再拼 HTML 字符串。
+    $("domains").innerHTML = "";
+    _renderDomains($("domains"), p.allowed_domains, p.blocked_domains);
 
     let warn = "";
     if (!p.read_only && !ad.length) {
@@ -233,23 +228,52 @@ async function refresh() {
     $("safety").textContent = warn;
 
     // 确认记录
-    const clog = s.confirm_log || [];
+    // ⚠️ 这些字段（action/command/reason）来自 bridge 上报的**事件数据**，
+    //    持有 bridge token 的一方可以自由构造。原先直接拼进 innerHTML →
+    //    注入 <img onerror=...> 之类即可在已认证的面板里执行脚本（CWE-79）。
+    //    → 一律用 DOM 节点 + textContent 渲染，绝不再拼字符串。
+    const clog = Array.isArray(s.confirm_log) ? s.confirm_log : [];
+    const clogBox = $("conflog");
+    clogBox.textContent = "";
     if (!clog.length) {
-      $("conflog").innerHTML = "<div class='hint'>暂无记录</div>";
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "暂无记录";
+      clogBox.appendChild(hint);
     } else {
-      $("conflog").innerHTML = clog.map(function (c) {
-        const t = new Date((c.ts || 0) * 1000).toLocaleTimeString();
-        const ok = c.allowed;
-        const tag = ok ? "<span class='tag rw'>允许</span>" : "<span class='tag ro'>拒绝</span>";
-        const what = (c.action || c.command || "").toString();
-        const why = c.reason && c.reason !== "approved" && c.reason !== "denied"
-          ? " <span class='hint'>(" + c.reason + ")</span>" : "";
-        return "<div style='margin:4px 0'>" + tag + " <code>" + t + "</code> " +
-          what + why + "</div>";
-      }).join("");
+      clog.forEach(function (c) {
+        const row = document.createElement("div");
+        row.style.margin = "4px 0";
+
+        const tag = document.createElement("span");
+        tag.className = c.allowed ? "tag rw" : "tag ro";
+        tag.textContent = c.allowed ? "允许" : "拒绝";
+        row.appendChild(tag);
+
+        const time = document.createElement("code");
+        time.textContent = new Date((c.ts || 0) * 1000).toLocaleTimeString();
+        row.appendChild(document.createTextNode(" "));
+        row.appendChild(time);
+
+        const what = document.createTextNode(
+          " " + String(c.action || c.command || ""));
+        row.appendChild(what);
+
+        if (c.reason && c.reason !== "approved" && c.reason !== "denied") {
+          const why = document.createElement("span");
+          why.className = "hint";
+          why.textContent = " (" + String(c.reason) + ")";
+          row.appendChild(why);
+        }
+        clogBox.appendChild(row);
+      });
     }
 
-    $("wspath").innerHTML = "WebSocket 路径：<code>" + (b.ws_path || "/ws/plugin/headless_browser/bridge") + "</code>（扩展已自动使用）";
+    // ⚠️ ws_path 是固定回退值、非攻击者可控，但仍统一走 textContent
+    const wspathBox = $("wspath");
+    wspathBox.textContent = "WebSocket 路径："
+      + (b.ws_path || "/ws/plugin/headless_browser/bridge")
+      + "（扩展已自动使用）";
 
   } catch (e) {
     $("conn").innerHTML = '<span class="dot off"></span>读取失败';
@@ -260,6 +284,58 @@ async function refresh() {
 // 重新生成的「两段式确认」状态（第一下变确认态，第二下才真签）
 let _regenArmed = false;
 let _regenTimer = null;
+
+/**
+ * 渲染域名白/黑名单 —— **全程用 DOM 节点与 textContent**。
+ *
+ * 这些值来自配置、内容不受控（可能含 `<` `&` 或引号），
+ * 拼进 innerHTML 就是一个注入口（CWE-79）。
+ */
+function _renderDomains(box, allowedRaw, blockedRaw) {
+  const allowed = Array.isArray(allowedRaw) ? allowedRaw : [];
+  const blocked = Array.isArray(blockedRaw) ? blockedRaw : [];
+
+  function listRow(label, items, emptyText) {
+    const row = document.createElement("div");
+    const b = document.createElement("b");
+    b.textContent = label + "：";
+    row.appendChild(b);
+    if (items.length) {
+      items.forEach(function (item, idx) {
+        if (idx) row.appendChild(document.createTextNode(", "));
+        const code = document.createElement("code");
+        code.textContent = String(item);
+        row.appendChild(code);
+      });
+    } else {
+      row.appendChild(document.createTextNode(emptyText));
+    }
+    return row;
+  }
+
+  box.appendChild(listRow("白名单", allowed, "（空，不限制）"));
+  const r2 = listRow("黑名单", blocked, "（空）");
+  r2.style.marginTop = "6px";
+  box.appendChild(r2);
+
+  const r3 = document.createElement("div");
+  r3.style.marginTop = "6px";
+  const b3 = document.createElement("b");
+  b3.textContent = "永久拦截：";
+  const c3 = document.createElement("code");
+  c3.textContent = "本机地址";
+  r3.appendChild(b3);
+  r3.appendChild(c3);
+  box.appendChild(r3);
+
+  const hint = document.createElement("div");
+  hint.className = "hint";
+  hint.textContent =
+    "黑名单优先级最高，读和写都会被拒绝。白名单非空时，写操作仅限白名单域名。"
+    + "指向本机的地址（localhost / 127.0.0.1 / [::1] / 0.0.0.0 / 十进制 IP "
+    + "等各种写法）无条件拒绝，避免 AI 操作到 KiraAI 自身的服务。";
+  box.appendChild(hint);
+}
 
 function _resetRegenBtn(quiet) {
   _regenArmed = false;

@@ -114,7 +114,12 @@ $("btnTest").addEventListener("click", async () => {
   setStatus("正在测试…");
   const r = await chrome.runtime.sendMessage({ action: "test_ping" });
   if (r.ok) {
-    setStatus(`链路正常，可读取到 ${r.tab_count} 个标签页`);
+    // tab_count 只在 listTabs() 成功时才有；它失败时 background 会把错误
+    // 吞掉，这里就会渲染出"可读取到 undefined 个标签页"。
+    const n = (typeof r.tab_count === "number") ? r.tab_count : null;
+    setStatus(n === null
+      ? "链路正常（标签页数量读取失败）"
+      : `链路正常，可读取到 ${n} 个标签页`);
   } else {
     setStatus("测试失败：" + (r.error || "未知错误"), true);
   }

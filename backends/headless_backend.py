@@ -1039,9 +1039,16 @@ class HeadlessBackend(Backend):
                                                       button=button, click_count=n),
                                "坐标点击")
             else:
-                for _ in range(n):
-                    await self._op(self._page.mouse.down(button=button), "按下鼠标")
-                    await self._op(self._page.mouse.up(button=button), "释放鼠标")
+                # ⚠️ 无坐标时也**必须传 click_count**：
+                #    单纯循环 down/up 每次的 clickCount 都是 1，
+                #    页面收到的是"两次独立单击"而不是一次双击 →
+                #    `dblclick` 永远不触发（和上面注释说的问题同一个）。
+                for i in range(n):
+                    cc = i + 1
+                    await self._op(self._page.mouse.down(button=button,
+                                                         click_count=cc), "按下鼠标")
+                    await self._op(self._page.mouse.up(button=button,
+                                                       click_count=cc), "释放鼠标")
             await asyncio.sleep(0.2)
             return OpResult(data={"ok": True, "navigated": False,
                                   "url": self._page.url}, backend=self.name)
