@@ -52,7 +52,14 @@ CMD_TYPE = "type"
 
 #: 扩展桥补齐的能力（原本只有无头后端能做）
 CMD_EXEC_JS = "exec_js"          # 在页面里执行任意 JS（走 chrome.userScripts）
-CMD_UPLOAD = "upload"            # 把本地文件塞进 input[type=file]
+CMD_UPLOAD = "upload"            # 开始上传：建立 upload 会话，返回 upload_id
+#: 上传分块 / 收尾 / 中止 —— 与下载方向对称。
+#  ⚠️ 为什么要拆成多条消息：单条 WS 帧有硬上限（uvicorn 默认 16 MiB，
+#     且超限会**断开整个连接**）。把整份文件塞进一条消息，
+#     文件一超过 ~12 MiB（base64 放大 4/3）就必然断线。
+CMD_UPLOAD_CHUNK = "upload_chunk"
+CMD_UPLOAD_FINISH = "upload_finish"
+CMD_UPLOAD_ABORT = "upload_abort"
 CMD_DOWNLOAD = "download"        # 用浏览器会话抓取 URL，分块回传
 CMD_COOKIE_GET = "cookie_get"    # 导出当前站点的 cookie
 CMD_COOKIE_SET = "cookie_set"    # 写入 cookie（跨后端打通登录态）
@@ -110,6 +117,7 @@ ALL_COMMANDS = frozenset({
     CMD_SCREENSHOT, CMD_WAIT_FOR,
 }) | WRITE_COMMANDS | READ_EXTRA | frozenset({
     CMD_EXEC_JS, CMD_UPLOAD, CMD_DOWNLOAD, CMD_COOKIE_SET,
+    CMD_UPLOAD_CHUNK, CMD_UPLOAD_FINISH, CMD_UPLOAD_ABORT,
     CMD_GET_INFO, CMD_GO_BACK, CMD_REFRESH, CMD_HOVER,
     CMD_KEY_PRESS, CMD_KEY_DOWN, CMD_KEY_UP,
     CMD_MOUSE_MOVE, CMD_MOUSE_CLICK, CMD_MOUSE_DOWN, CMD_MOUSE_UP,

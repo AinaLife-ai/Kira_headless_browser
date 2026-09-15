@@ -180,8 +180,14 @@ def _mk_fake_bridge(P):
                                                 "domain": ".a"}]},
                 P.CMD_COOKIE_SET: {"ok": 1, "written": 1, "skipped": 0,
                                    "failed": 0, "total": 1},
-                P.CMD_UPLOAD: {"ok": True, "url": "https://a/", "name": "f",
-                               "size": 1, "path": "/x/f"},
+                # 上传现在是**分块流式**的：upload 只建立会话，
+                # upload_chunk 逐块送，upload_finish 才返回最终字段。
+                P.CMD_UPLOAD: {"ok": True, "url": "https://a/",
+                               "upload_id": "up_test"},
+                P.CMD_UPLOAD_CHUNK: {"ok": True, "received": 1},
+                P.CMD_UPLOAD_FINISH: {"ok": True, "url": "https://a/", "name": "f",
+                                      "size": 1, "path": "/x/f"},
+                P.CMD_UPLOAD_ABORT: {"ok": True},
                 P.CMD_DOWNLOAD: {"ok": True, "url": "https://a/",
                                  "mime": "text/plain", "bytes": 5,
                                  "path": "/tmp/x", "size": 5},

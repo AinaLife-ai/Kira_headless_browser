@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.14
+# 浏览器插件 (Browser Plugin) 2.1.15
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -190,7 +190,7 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 | `download_auto_clean` | switch | `true` | 自动清理下载目录 |
 | `download_max_count` | integer | `100` | 下载目录最多保留文件数 |
 | `download_max_bytes` | integer | `2147483648` | 单个下载大小上限（2GB）。下载是**流式落盘**，无论多大都不占内存 |
-| `upload_max_bytes` | integer | `33554432` | 上传大小上限（32MB）。整个文件要放进**一条** WebSocket 消息（base64 ×1.33 + json 副本），超过 `ExtensionBackend.MAX_UPLOAD_BYTES` 会被自动钳制 |
+| `upload_max_bytes` | integer | `67108864` | 上传大小上限（64MB）。上传走**分块流式**，单帧恒定 ~340KB、不受 16MiB 帧上限约束；实际约束是扩展常驻内存（≈文件 ×2.7）。超过 `ExtensionBackend.MAX_UPLOAD_BYTES` 会被自动钳制 |
 | `upload_allow_any_path` | switch | `true` | 是否允许上传任意路径的文件（**默认开**，本插件定位是给 bot 完整浏览能力）。关掉后只允许 `upload_allowed_dirs` 里的目录 |
 | `upload_allowed_dirs` | list | `["data/files","data/temp"]` | 上传目录白名单（仅在上项关闭时生效）。用 realpath 归一，可防 `../` 穿越 |
 
@@ -470,6 +470,51 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.15（2026-09-15）
+
+**上传改为分块流式 —— 顺带发现"单帧 16MiB 硬上限"这个隐藏约束**。
+
+问："上传上限真不能大一点吗？"
+
+查下来发现，之前配的 32MB **本身就发不出去**：
+
+- KiraAI 用 **uvicorn**，其 `ws_max_size` 默认 **16 MiB**，
+  框架**没有覆盖**它（`webui/app.py` 的 `uvicorn.Config` 里没这个参数）。
+- 实测：整条帧超过 16 MiB → 对端回 `1009 (message too big)` 并
+  **关闭整个 WebSocket 连接**。也就是说一次超大上传会**把连接打断**，
+  连带后面所有命令一起崩，而不只是这一次上传失败。
+- 而 base64 会放大 4/3 —— 所以"一条消息"能承载的文件上限其实只有
+  **~12 MiB**。之前配的 32MB、以及更早的 200MB，全都发不出去。
+
+**修法**：把上传改成**分块流式**（和下载方向对称）——
+`upload` 只建立会话拿 `upload_id`，之后每块单独一条 `upload_chunk`
+消息，`upload_finish` 时才在扩展侧拼成 `File` 塞进 `input[type=file]`；
+中途失败用 `upload_abort` 丢弃。
+
+实测对比（真实 uvicorn，默认配置）：
+
+| 文件 | 旧做法（一条消息） | 新做法（分块流式） |
+|---|---|---|
+| 30 MiB | ❌ `ConnectionClosedError` | ✅ 完整传输，base64 校验一致 |
+| 100 MiB | ❌ `ConnectionClosedError` | ✅ 完整传输，base64 校验一致 |
+
+**那么现在上限由什么决定？内存。** 扩展侧要攒下全部分块的 base64
+才能拼出一个完整 `File`，实测堆增量 ≈ 文件大小 × 2.67：
+
+| 文件 | 扩展侧堆增量 |
+|---|---|
+| 32 MB | 85 MB |
+| **64 MB** | **171 MB** |
+| 100 MB | 267 MB |
+| 200 MB | 532 MB |
+
+MV3 的 Service Worker 常驻内存有限，200MB 那档有被系统回收的风险。
+→ 默认取 **64MB**（帧尺寸已不再是约束，内存是）。
+
+新增守卫 **C16f**（不许把整份文件塞进单条消息）、**C16g**
+（扩展侧必须真的实现分块接收/收尾/中止 —— 查**函数定义**，
+不能只查名字，否则 export 名单会让它"看起来存在"）。
 
 ### v2.1.14（2026-09-15）
 

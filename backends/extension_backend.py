@@ -27,15 +27,18 @@ class ExtensionBackend(Backend):
     name = "extension"
     is_user_browser = True
 
-    #: 上传大小上限（默认 **32MB**）。
-    #  ⚠️ 整个文件的内容是**一次性**放进 `chunks` 列表、随**一条** WebSocket
-    #     消息发出去的。base64 会放大 1.33 倍，`json.dumps` 再复制一份 ——
-    #     按 200MB 算，光 base64 就 267MB，序列化后峰值 >500MB，
-    #     而且单帧 267MB 本身也会被协议端拒绝。
-    #     扩展侧要拼一个完整 File 才不改这个"整包发"的流程，
-    #     所以上限必须落在"单条消息能扛住"的范围里。
-    #     真需要传大文件，应改成**分多条 chunk 消息**、由扩展侧边收边拼。
-    MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+    #: 上传大小上限（默认 **64MB**）。
+    #
+    #  **帧尺寸**：不再是约束。上传已改成**分块流式**（每块一条消息，
+    #  单帧恒定 ~340KB），所以文件多大都不会撞上 uvicorn 的 16MiB
+    #  ws_max_size —— 实测 100MB 也能完整传输且 base64 校验一致。
+    #
+    #  **内存**才是现在的约束。扩展侧要攒下全部分块的 base64 才能拼出
+    #  一个完整 File，实测堆增量 ≈ 文件大小 × 2.67：
+    #      32MB → 85MB ；64MB → 171MB ；100MB → 267MB ；200MB → 532MB
+    #  MV3 的 Service Worker 常驻内存有限，200MB 那档有被系统回收的风险，
+    #  所以默认取 64MB。要更大就调 upload_max_bytes（上限由这里钳制）。
+    MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
     def __init__(self, bridge, protocol, max_upload_bytes=None,
                  max_download_bytes=None, download_timeout=None,
@@ -267,26 +270,69 @@ class ExtensionBackend(Backend):
             #    整体不再是合法 base64，`atob` 会抛 InvalidCharacterError。
             #    256*1024 % 3 = 1 → 必须改。
             step = 255 * 1024          # 261120 % 3 == 0
-            chunks = []
-            with open(resolved, "rb") as f:
-                while True:
-                    block = f.read(step)
-                    if not block:
-                        break
-                    chunks.append(base64.b64encode(block).decode())
-            # 仍然一次下发（扩展侧需要一个完整 File 才能塞进 input.files），
-            # 但插件侧不再额外留一份 raw 副本；上限由 upload_max_bytes 控制。
+
+            # ⚠️⚠️ 这里过去是"把整个文件编成 chunks、塞进**一条** WebSocket
+            #       消息发出去"。那是错的，而且后果比"上传失败"严重得多：
+            #
+            #   uvicorn 的 ws_max_size 默认 **16 MiB**，KiraAI 没有覆盖它。
+            #   实测：整条帧超过 16 MiB → 对端直接 1009 (message too big)
+            #   并**关闭整个 WebSocket 连接**。也就是说一次超大上传会把
+            #   连接打断，连带后面所有命令一起崩，而不只是这一次失败。
+            #
+            #   而且 base64 要放大 4/3，所以"文件大小"的上限其实只有
+            #   ~12 MiB —— 之前配的 32MB 默认值根本发不出去。
+            #
+            # → 改成**按分块逐条消息发**（和下载的 MSG_CHUNK 对称）：
+            #   每块单独一个 upload_chunk 消息，扩展侧边收边拼。
+            #   这样单帧大小恒定（~340KB），内存和帧尺寸都与文件大小无关。
             r = await self._send(self._P.CMD_UPLOAD, {
                 "selector": selector, "name": name,
-                "mime": _guess_mime(name), "chunks": chunks, "limit": self.max_upload_bytes,
+                "mime": _guess_mime(name),
+                "path": resolved,
+                "size": size, "chunk_size": step,
+                "limit": self.max_upload_bytes,
             }, timeout=max(60.0, size / (1024 * 1024) * 3))
             if not r.ok:
                 return r
             d = dict(r.data or {}) if isinstance(r.data, dict) else {}
-            # 与无头后端字段对齐
-            d.setdefault("path", resolved)
-            d.setdefault("size", size)
-            return OpResult(data=d, backend=self.name)
+            uid = str(d.get("upload_id") or "")
+            if not uid:
+                return OpResult.fail(
+                    "扩展没有返回 upload_id（版本不匹配？请更新扩展后重试）",
+                    self.name)
+            # 逐块推送。任一块失败就立刻中止，并把已收的部分丢掉。
+            try:
+                with open(resolved, "rb") as f:
+                    idx = 0
+                    while True:
+                        block = f.read(step)
+                        if not block:
+                            break
+                        chunk_b64 = base64.b64encode(block).decode()
+                        cr = await self._send(self._P.CMD_UPLOAD_CHUNK, {
+                            "upload_id": uid, "index": idx, "data": chunk_b64,
+                        }, timeout=max(30.0, len(chunk_b64) / (256 * 1024) * 5))
+                        if not cr.ok:
+                            await self._send(self._P.CMD_UPLOAD_ABORT,
+                                             {"upload_id": uid}, timeout=10.0)
+                            return cr
+                        idx += 1
+            except Exception as e:
+                try:
+                    await self._send(self._P.CMD_UPLOAD_ABORT,
+                                     {"upload_id": uid}, timeout=10.0)
+                except Exception:
+                    pass
+                return OpResult.fail(f"上传分块发送失败: {e}", self.name)
+            # 收尾：扩展侧此时才构造 File 并塞进 input[type=file]
+            fr = await self._send(self._P.CMD_UPLOAD_FINISH,
+                                  {"upload_id": uid}, timeout=120.0)
+            if not fr.ok:
+                return fr
+            d2 = dict(fr.data or {}) if isinstance(fr.data, dict) else {}
+            d2.setdefault("path", resolved)
+            d2.setdefault("size", size)
+            return OpResult(data=d2, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"上传失败: {e}", self.name)
 

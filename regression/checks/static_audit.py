@@ -336,6 +336,28 @@ def run(r) -> None:
     r.ok("C15 MV3 里不用 DOM API（FileReader）",
          "FileReader" not in _cap_code,
          "Service Worker 里没有 FileReader，用了就是 ReferenceError")
+    # ⚠️ 单条 WebSocket 帧有**硬上限**：KiraAI 用 uvicorn，其 ws_max_size
+    #    默认 16 MiB，且框架没有覆盖它。实测：整条帧超过 16 MiB 时对端回
+    #    1009 并**关闭整个连接** —— 一次超大上传会把连接打断，
+    #    连带后面所有命令一起崩，而不只是这一条失败。
+    #    任何"把整份文件塞进一条消息"的做法都会踩这个坑。
+    _eb_code = src("backends/extension_backend.py")
+    r.ok("C16f 上传不把整份文件塞进单条 WS 消息（16MiB 帧上限）",
+         "CMD_UPLOAD_CHUNK" in _eb_code
+         and "chunks\": chunks" not in _eb_code
+         and "\"chunks\": chunks" not in _eb_code,
+         "必须走分块流式；一次性下发 chunks 会在文件 >~12MiB 时断开连接")
+
+    # 扩展侧要有对应的分块接收器。
+    # ⚠️ 必须查**函数定义**，不能只查名字是否出现 ——
+    #    名字在 export 名单里也会出现，函数体被删了照样"存在"。
+    _cap2 = ext_file("capabilities.js")
+    _missing_fn = [k for k in ("uploadChunk", "uploadFinish", "uploadAbort")
+                   if f"async function {k}(" not in _cap2]
+    r.ok("C16g 扩展侧真的实现了分块接收/收尾/中止",
+         not _missing_fn,
+         f"缺函数定义={_missing_fn or '无'}")
+
     # ⚠️ 判定必须用「写操作 ∪ 只读敏感」的**并集**，而且 cookie_get
     #    必须在确认集合里 —— 否则导出登录态会被静默放行。
     shared = src("browser-bridge/shared.js")

@@ -46,6 +46,11 @@ export const CMD = {
   TYPE: "type",
   EXEC_JS: "exec_js",
   UPLOAD: "upload",
+  // 上传分块 / 收尾 / 中止 —— 与下载方向对称（见 capabilities.js 的说明：
+  // 单条 WS 帧有 16 MiB 硬上限，塞不下整份文件，超限还会断开连接）
+  UPLOAD_CHUNK: "upload_chunk",
+  UPLOAD_FINISH: "upload_finish",
+  UPLOAD_ABORT: "upload_abort",
   DOWNLOAD: "download",
   COOKIE_GET: "cookie_get",
   COOKIE_SET: "cookie_set",

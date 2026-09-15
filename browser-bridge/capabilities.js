@@ -137,45 +137,112 @@ async function execJs(params) {
 
 // ─── 2. 上传文件（内容由插件分块送来）──────────────────────────────────
 
+/**
+ * 上传会话表。
+ *
+ * ⚠️ 为什么要有这个：整份文件塞进**一条** WebSocket 消息是行不通的 ——
+ *    uvicorn 的 ws_max_size 默认 16 MiB，KiraAI 没覆盖它；实测整条帧
+ *    超过 16 MiB 时对端会回 1009 并**关闭整个连接**，一次超大上传会把
+ *    连接打断、连带后面所有命令一起崩。
+ *    base64 又放大 4/3，所以"一条消息"的文件上限其实只有 ~12 MiB。
+ *
+ * → 改成：upload 只建立会话，之后每个分块单独一条消息送过来，
+ *   扩展侧边收边拼，最后 finish 时一次性构造 File。
+ *   这样单帧大小恒定（~340KB），内存与帧尺寸都与文件大小无关。
+ */
+const _uploads = new Map();
+
+function _uploadKey(id) {
+  return String(id || "");
+}
+
+/** 开始一次上传：登记会话，把文件大小/上限先校验掉。 */
 async function upload(params) {
-  const { selector, name, mime, chunks, limit } = params;
+  const { selector, name, mime, limit, size, tab_id } = params;
   if (!selector) throw new Error("缺少 selector");
   if (!name) throw new Error("缺少文件名");
 
-  const tab = await resolveTab(params.tab_id);
+  // 先按声明的大小做一次快速否决，避免白传一遍
+  const declared = Number(size) || 0;
+  const cap = Number(limit) || 0;
+  if (cap > 0 && declared > cap) {
+    throw new Error(`文件过大（${declared} > 上限 ${cap} 字节），已拒绝上传`);
+  }
+
+  const tab = await resolveTab(tab_id);
   assertInjectable(tab);
 
-  // ⚠️ 不要把 base64 解码成字节、再重新编码回 base64 ——
-  //    那是同一份数据在内存里存三份（原始 base64 + 解码后 + 重编码），
-  //    200MB 的上传峰值能到 1GB，足以把 MV3 的 Service Worker 直接打挂。
-  //    内容脚本最终要的就是 base64，所以只需**按长度校验**后原样拼接。
-  const b64s = chunks || [];
-  let approx = 0;
-  for (const b64 of b64s) {
-    // ⚠️ 要先把末尾的 `=` padding 扣掉再换算。
-    //    base64 每 4 字符编码 3 字节，但结尾可能只有 2/3 字符有效：
-    //    `YQ==`(4 字符) 其实只有 1 字节。按 4→3 硬算会**高估**，
-    //    导致"真实大小刚好等于上限"的文件被误判为超限。
-    const pad = (b64.match(/=+$/) || [""])[0].length;
-    approx += Math.floor(((b64.length - pad) * 3) / 4);
-  }
-  if (limit > 0 && approx > limit) {
-    throw new Error(`文件过大（约 ${approx} > 上限 ${limit} 字节），已拒绝上传`);
-  }
-
-  // ⚠️ 拼接前要**去掉各块末尾的 padding**：
-  //    插件侧虽然已用 3 的倍数分块（不会产生 padding），
-  //    但历史数据/别的调用方可能带 padding —— 拼进来会让整体非法。
-  const fileBase64 = b64s.map((x) => x.replace(/=+$/, "")).join("");
-
-  const res = await callContent(tab, "upload_blob", {
-    selector,
-    name,
+  const id = "up_" + Date.now().toString(36) + "_"
+    + Math.random().toString(36).slice(2, 10);
+  _uploads.set(_uploadKey(id), {
+    id, tabId: tab.id, selector, name,
+    path: params.path || name,
     mime: mime || "application/octet-stream",
+    parts: [], received: 0, cap, expectIndex: 0, created: Date.now(),
+  });
+  // 顺手清掉过期的会话（比如插件中途崩了）
+  for (const [k, v] of _uploads) {
+    if (Date.now() - v.created > 10 * 60 * 1000) _uploads.delete(k);
+  }
+  return { ok: true, upload_id: id, url: tab.url };
+}
+
+/** 收一个分块。只做长度累加与拼接，**不逐块解码**（省内存）。 */
+async function uploadChunk(params) {
+  const st = _uploads.get(_uploadKey(params.upload_id));
+  if (!st) throw new Error("上传会话不存在或已过期（请重新发起上传）");
+  const { index, data } = params;
+  if (typeof data !== "string" || !data) throw new Error("分块内容为空");
+
+  // 顺序校验：乱序/丢块会让拼出来的文件损坏，宁可明确报错
+  const idx = Number(index) || 0;
+  if (idx !== st.expectIndex) {
+    throw new Error(`分块顺序不对（期望 ${st.expectIndex}，收到 ${idx}）`);
+  }
+  // 扣掉 padding 再累加，得到**精确**的已收字节数
+  const pad = (data.match(/=+$/) || [""])[0].length;
+  st.received += Math.floor(((data.length - pad) * 3) / 4);
+  if (st.cap > 0 && st.received > st.cap) {
+    _uploads.delete(_uploadKey(st.id));
+    throw new Error(`文件超过上限 ${st.cap} 字节，已中止上传`);
+  }
+  st.parts.push(data);
+  st.expectIndex = idx + 1;
+  return { ok: true, received: st.received };
+}
+
+/** 收尾：此时才拼成完整 base64 并塞进 input[type=file]。 */
+async function uploadFinish(params) {
+  const key = _uploadKey(params.upload_id);
+  const st = _uploads.get(key);
+  if (!st) throw new Error("上传会话不存在或已过期（请重新发起上传）");
+  _uploads.delete(key);
+
+  // 拼接前去掉各块末尾的 padding（块长已是 3 的倍数，正常不会有）
+  const fileBase64 = st.parts.map((x) => x.replace(/=+$/, "")).join("");
+  st.parts = [];   // 尽快释放
+
+  const tab = await resolveTab(st.tabId);
+  assertInjectable(tab);
+  const res = await callContent(tab, "upload_blob", {
+    selector: st.selector,
+    name: st.name,
+    mime: st.mime,
     base64: fileBase64,
   }, 60000);
 
-  return { ok: true, url: tab.url, name, size: approx, matched: res.matched };
+  // ⚠️ 字段要与无头后端的 upload_file 返回**对齐**（契约检查 F1 会核对）：
+  //    path / name / size / url 一个都不能少。
+  //    扩展侧拿不到本地路径，这里回传插件声明的路径供上层显示。
+  return { ok: true, url: tab.url, name: st.name,
+           path: st.path || st.name, size: st.received,
+           matched: res.matched };
+}
+
+/** 放弃这次上传（插件侧发块失败时会调）。 */
+async function uploadAbort(params) {
+  _uploads.delete(_uploadKey(params.upload_id));
+  return { ok: true };
 }
 
 // ─── 3. 下载（用用户会话抓取，分块回传）────────────────────────────────
@@ -299,4 +366,5 @@ async function cookieSet(params) {
   return { ok, written: ok, skipped: 0, failed, total: list.length };
 }
 
-export { execJs, upload, downloadViaSession, cookieGet, cookieSet, ensureUserScripts };
+export { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
+         downloadViaSession, cookieGet, cookieSet, ensureUserScripts };

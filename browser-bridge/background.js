@@ -18,7 +18,8 @@ import {
   buildWsUrl, KEEPALIVE_ALARM, KEEPALIVE_PERIOD_MINUTES, RECONNECT_DELAYS, STORE,
   DEFAULT_CONFIRM_TIMEOUT_MS,
 } from "./protocol.js";
-import { execJs, upload, downloadViaSession, cookieGet, cookieSet } from "./capabilities.js";
+import { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
+         downloadViaSession, cookieGet, cookieSet } from "./capabilities.js";
 import {
   state, sendRaw, sendResult, sendEvent, sendChunk,
   resolveTab, assertInjectable, callContent, detectBrowser,
@@ -385,7 +386,10 @@ async function execute(name, params) {
     case CMD.CLICK:        return await click(params);
     case CMD.TYPE:         return await typeText(params);
     case CMD.EXEC_JS:      return await execJs(params);
-    case CMD.UPLOAD:       return await upload(params);
+    case CMD.UPLOAD:        return await upload(params);
+    case CMD.UPLOAD_CHUNK:  return await uploadChunk(params);
+    case CMD.UPLOAD_FINISH: return await uploadFinish(params);
+    case CMD.UPLOAD_ABORT:  return await uploadAbort(params);
     case CMD.COOKIE_GET:   return await cookieGet(params);
     case CMD.COOKIE_SET:   return await cookieSet(params);
     case CMD.GET_INFO:     return await getInfo(params);

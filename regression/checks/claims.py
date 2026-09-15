@@ -24,8 +24,12 @@ CLAIMS = [
      "browser-bridge/protocol.js", r"_expandV6"),
     ("上传分块大小是 3 的倍数",
      "backends/extension_backend.py", r"255 \* 1024"),
-    ("拼接 base64 前去掉各块 padding",
-     "browser-bridge/capabilities.js", r"b64s\.map"),
+    ("拼接 base64 前去掉各块 padding（分块流式版）",
+     "browser-bridge/capabilities.js", r'parts\.map\(\(x\) => x\.replace'),
+    ("上传改为分块流式（单帧恒定，不受 16MiB 帧上限约束）",
+     "browser-bridge/capabilities.js", r"_uploads"),
+    ("插件侧逐块发送上传内容",
+     "backends/extension_backend.py", r"CMD_UPLOAD_CHUNK"),
     ("无头下载带 cookie 时不自动跟随重定向",
      "backends/headless_backend.py", r"allow_redirects=False"),
     ("下载列表不返回绝对路径",
@@ -36,8 +40,8 @@ CLAIMS = [
      "web/index.html", r"_renderDomains"),
     ("cookie_get 在「只读但敏感」确认集里",
      "browser-bridge/shared.js", r"CONFIRM_ONLY_COMMANDS"),
-    ("上传上限不超过单条消息能扛的范围",
-     "backends/extension_backend.py", r"MAX_UPLOAD_BYTES = 32 \* 1024 \* 1024"),
+    ("上传上限由硬顶钳制（分块流式后约束变成内存）",
+     "backends/extension_backend.py", r"MAX_UPLOAD_BYTES = 64 \* 1024 \* 1024"),
     ("上传超时/页面超时不会被换后端重试（indeterminate）",
      "backends/base.py", r"indeterminate"),
     ("buildWsUrl 接受 http/https 写法",
@@ -61,7 +65,7 @@ def _check_upload_defaults(r):
     import json
     import re
     bad = []
-    ceiling = 32 * 1024 * 1024
+    ceiling = 64 * 1024 * 1024
 
     sch = json.loads((PLUGIN_DIR / "schema.json").read_text(encoding="utf-8"))
     d = (sch.get("upload_max_bytes") or {}).get("default")
