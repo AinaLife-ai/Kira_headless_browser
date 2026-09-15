@@ -452,15 +452,26 @@
       const before = window.scrollY;
       const step = Number(amount) || Math.round(window.innerHeight * 0.85);
 
+      // ⚠️ 用瞬时滚动（behavior:"auto"），不要 smooth。
+      //    smooth 是**异步动画**：函数立刻返回，但页面还在慢慢滚。
+      //    调用方拿到 "已滚动" 后紧接着截图/取文本，拿到的还是旧位置；
+      //    而且原来的实现无条件回 changed:true —— 就算已经在底部、
+      //    根本没动，也报告"变了"，会让 AI 误判。
       switch (direction) {
-        case "up":     window.scrollBy({ top: -step, behavior: "smooth" }); break;
-        case "down":   window.scrollBy({ top: step, behavior: "smooth" }); break;
-        case "top":    window.scrollTo({ top: 0, behavior: "smooth" }); break;
-        case "bottom": window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); break;
+        case "up":     window.scrollBy({ top: -step, behavior: "auto" }); break;
+        case "down":   window.scrollBy({ top: step, behavior: "auto" }); break;
+        case "top":    window.scrollTo({ top: 0, behavior: "auto" }); break;
+        case "bottom": window.scrollTo({ top: document.body.scrollHeight, behavior: "auto" }); break;
         default: return fail(`未知滚动方向：${direction}`);
       }
 
-      return { changed: true, before };
+      const after = window.scrollY;
+      return {
+        changed: Math.abs(after - before) > 1,   // 真实位移，不是"我调用了就变了"
+        before,
+        after,
+        at_bottom: after + window.innerHeight >= document.body.scrollHeight - 2,
+      };
     },
 
     click(payload) {

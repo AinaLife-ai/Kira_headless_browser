@@ -208,6 +208,9 @@ class BrowserPlugin(BasePlugin):
                 max_upload_bytes=self.upload_max_bytes or None,
                 max_download_bytes=int(self._headless_cfg.get("download_max_bytes") or 0) or None,
                 download_timeout=self.download_timeout,
+                content_page_size=self._headless_cfg.get("content_page_size", 8000),
+                require_confirm=self.require_confirm,
+                confirm_timeout=CONFIRM_WAIT_SECONDS,
             ))
         if self.headless_enabled:
             self.router.register(self._headless)
@@ -282,6 +285,12 @@ class BrowserPlugin(BasePlugin):
                 # 首次成功调用：如果扩展没连上，顺手把安装引导捎给用户
                 # （只带一次，不刷屏）
                 return self._attach_setup_notice(out)
+            if getattr(res, "declined", False):
+                # ⚠️ 用户明确拒绝了，**立刻停手**，绝不换后端重试。
+                #    否则会出现「我点了拒绝，结果插件换条路把事情做了」——
+                #    这比没有确认机制更糟，因为它让人以为自己拦住了。
+                logger.info(f"[{method}] 用户拒绝了本次操作，已终止（不再尝试其它后端）")
+                return f"🚫 {res.error}。已按你的决定终止，没有改用其它方式执行。"
             last_err = res.error
             tried.append(f"{backend.display}: {res.error}")
             logger.warning(f"[{method}] {backend.display} 失败：{res.error}")
@@ -401,12 +410,68 @@ class BrowserPlugin(BasePlugin):
             return f"✅ JavaScript 执行结果:\n{d.get('result')} {tag}"
         if method == "get_text":
             return f"📄 页面文本内容:\n{d.get('content', '')}\n{tag}"
+        # ── 以下这些如果落到默认分支，模型就看不到结果了 ──
+        # 尤其 cookie_get：导出的是**数据**，必须回传内容，
+        # 否则 browser_cookie(action="export") 等于白跑一趟。
+        if method == "cookie_get":
+            cookies = d.get("cookies") or []
+            if not cookies:
+                return f"没有可导出的 cookie（{d.get('url', '')}）{tag}"
+            import json as _json
+            return (f"🍪 已导出 {len(cookies)} 条 cookie（{d.get('url', '')}）{tag}\n"
+                    f"{_json.dumps(cookies, ensure_ascii=False)}\n\n"
+                    f"提示：可用 browser_cookie(action=\"import\", cookies=[...]) "
+                    f"写入另一个后端，这样降级到无头时不用重新登录。")
+        if method == "cookie_set":
+            return (f"🍪 已写入 {d.get('written', 0)} 条 cookie"
+                    + (f"，跳过 {d['skipped']} 条（缺字段）" if d.get("skipped") else "")
+                    + f" {tag}")
+        if method == "get_info":
+            return f"📄 标题: {d.get('title', '')}\n🔗 URL: {d.get('url', '')} {tag}"
+        if method == "list_files":
+            files = d.get("files") or []
+            if not files:
+                return f"目录里没有文件（{d.get('dir', '')}）{tag}"
+            lines = [f"📁 {d.get('dir', '')}（共 {len(files)} 个）{tag}"]
+            for f_ in files:
+                lines.append(f"- {f_.get('name')}  {f_.get('size', 0)} 字节")
+            return "\n".join(lines)
+        if method in ("go_back", "refresh"):
+            what = "返回上一页" if method == "go_back" else "刷新页面"
+            return f"✅ 已{what}\n📄 当前页面: {d.get('url', '')} {tag}"
+        if method == "hover":
+            return f"✅ 已悬停 {tag}"
+        if method == "upload_file":
+            return (f"✅ 已上传文件到页面: {os.path.basename(d.get('path', ''))} {tag}")
         if method == "click":
-            return f"✅ 已点击 {tag}"
+            extra = ""
+            if d.get("navigated"):
+                extra = f"，页面已跳转到 {d.get('url')}"
+            elif d.get("changed"):
+                extra = "，页面内容已变化"
+            return f"✅ 已点击{extra} {tag}"
         if method == "type_text":
-            return f"✅ 已输入内容 {tag}"
+            tail = "，并已提交" if d.get("submitted") else ""
+            return f"✅ 已输入内容{tail} {tag}"
         if method == "scroll":
             return f"✅ 已滚动 {tag}"
+        if method == "keyboard_press":
+            return f"✅ 已按键 {tag}"
+        if method == "keyboard_down_up":
+            return f"✅ 键盘操作完成 {tag}"
+        if method == "keyboard_type":
+            return f"✅ 已用键盘输入文本 {tag}"
+        if method == "mouse_move":
+            return f"✅ 鼠标已移动到 ({d.get('x')}, {d.get('y')}) {tag}"
+        if method == "mouse_click":
+            extra = f"，页面已跳转到 {d.get('url')}" if d.get("navigated") else ""
+            return f"✅ 已在坐标处点击{extra} {tag}"
+        if method == "mouse_down_up":
+            return f"✅ 鼠标按键操作完成 {tag}"
+        if method == "mouse_wheel":
+            return f"✅ 已滚动滚轮 {tag}"
+        if method == "mouse_drag":
+            return f"✅ 已完成拖拽 {tag}"
         return f"✅ 完成 {tag}"
 
     # ══════════════════════════════════════════════════════════════════

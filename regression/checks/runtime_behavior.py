@@ -213,6 +213,24 @@ def run(r) -> None:
         def display(self):
             return "无头浏览器"
 
+    # ── R9 页面操作串行化 ───────────────────────────────────────────
+    hbsrc = open(PLUGIN_DIR / "backends" / "headless_backend.py",
+                 encoding="utf-8").read()
+    r.ok("R9 页面操作有独立互斥锁（并发工具调用不会互相踩）",
+         "_op_lock" in hbsrc and "async with self._op_lock" in hbsrc,
+         "模型一轮里并发调 navigate+click 时，共用同一张页面")
+
+    # ── R10 扩展 scroll 用瞬时行为 ──────────────────────────────────
+    cjs = open(PLUGIN_DIR / "browser-bridge" / "content.js",
+               encoding="utf-8").read()
+    seg = cjs.split("scroll(payload) {")[1][:1200]
+    # 只看真正的代码，注释里提到 smooth 是正常的（说明为什么不用它）
+    seg_code = "\n".join(ln for ln in seg.splitlines()
+                         if not ln.strip().startswith(("//", "*", "/*")))
+    r.ok("R10 扩展 scroll 用瞬时滚动（smooth 是异步的会读到旧位置）",
+         'behavior: "auto"' in seg_code and "smooth" not in seg_code,
+         "且返回真实位移而不是无条件 changed:true")
+
     ext = FakeExt(True)
     router = rt.BackendRouter("auto")
     router.register(ext)

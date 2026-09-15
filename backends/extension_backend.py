@@ -32,13 +32,18 @@ class ExtensionBackend(Backend):
 
     def __init__(self, bridge, protocol, max_upload_bytes=None,
                  max_download_bytes=None, download_timeout=None,
-                 content_page_size=8000):
+                 content_page_size=8000,
+                 require_confirm=False, confirm_timeout=45):
         self._bridge = bridge
         self._P = protocol
         self.max_upload_bytes = int(max_upload_bytes or self.MAX_UPLOAD_BYTES)
         self.max_download_bytes = max_download_bytes or 2 * 1024 ** 3
         self.download_timeout = download_timeout or 600.0
         self.content_page_size = int(content_page_size or 8000)
+        # 二次确认：由插件把这两个值随命令下发，扩展侧才弹通知。
+        # （配置项存在、扩展也实现了，但如果不在这里传下去，整套确认就是死的）
+        self.require_confirm = bool(require_confirm)
+        self.confirm_timeout = int(confirm_timeout or 45)
 
     # ─── Backend 接口 ────────────────────────────────────────────────
 
@@ -59,11 +64,30 @@ class ExtensionBackend(Backend):
     async def close(self) -> None:
         await self._bridge.close()
 
+    #: 需要用户确认的命令（与扩展侧 shared.js 的 PRIVILEGED_COMMANDS 对齐）
+    WRITE_CMDS = {
+        "navigate", "click", "type", "scroll",
+        "exec_js", "upload", "download", "cookie_set",
+        "go_back", "refresh", "hover",
+        "key_press", "key_down", "key_up",
+        "mouse_click", "mouse_down", "mouse_up", "mouse_wheel", "mouse_drag",
+    }
+
     async def _send(self, cmd: str, params: Optional[dict] = None, timeout=None,
                     cmd_id: str = None) -> OpResult:
+        p = dict(params or {})
+        # ⚠️ 二次确认必须在这里统一下发。
+        #    之前插件侧从不传 require_confirm，导致「写操作需用户确认」这个
+        #    配置项**完全不生效** —— 扩展那边实现好了却永远收不到开关。
+        if self.require_confirm and cmd in self.WRITE_CMDS:
+            p.setdefault("require_confirm", True)
+            p.setdefault("confirm_timeout", self.confirm_timeout)
         try:
-            data = await self._bridge.send_command(cmd, params or {},
+            data = await self._bridge.send_command(cmd, p,
                                                    timeout=timeout, cmd_id=cmd_id)
+            if isinstance(data, dict) and data.get("declined"):
+                # 用 declined 而不是普通 fail —— 调用方据此**禁止**换后端重试
+                return OpResult.declined_by_user(self.name)
             return OpResult(data=data, backend=self.name)
         except Exception as e:
             return OpResult.fail(str(e), self.name)

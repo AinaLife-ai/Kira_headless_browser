@@ -535,7 +535,22 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 // ─── 生命周期与保活 ──────────────────────────────────────────────────────────
 
-chrome.runtime.onInstalled.addListener(async () => {
+// ⚠️ 这三个回调都是 async，必须自己兜住异常。
+//    MV3 的 background 是 Service Worker：回调里抛出的
+//    unhandled rejection 会被当成 worker 级错误，可能直接把 worker 干掉，
+//    表现就是"扩展莫名其妙掉线了"。
+async function safeRun(label, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    console.error(`[KiraBridge] ${label} 失败`, e);
+    try {
+      await setStatus({ connected: false, error: `${label} 失败：${e.message || e}` });
+    } catch (_) {}
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => safeRun("onInstalled", async () => {
   chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
   const cfg = await getConfig();
   if (cfg.token && cfg.autoConnect) {
@@ -543,19 +558,19 @@ chrome.runtime.onInstalled.addListener(async () => {
   } else {
     await setStatus({ connected: false, error: "尚未配置令牌" });
   }
-});
+}));
 
-chrome.runtime.onStartup.addListener(async () => {
+chrome.runtime.onStartup.addListener(() => safeRun("onStartup", async () => {
   chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
   const cfg = await getConfig();
   if (cfg.token && cfg.autoConnect) {
     await connect();
   }
-});
+}));
 
-chrome.alarms.onAlarm.addListener(async (alarm) => {
+chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
-    await ensureAlive();
+    return safeRun("keepalive", ensureAlive);
   }
 });
 
@@ -606,15 +621,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // SW 启动时确保 alarm 存在（被回收后重启会走到这里）
-(async () => {
+safeRun("bootstrap", async () => {
   const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
   if (!existing) {
     chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
   }
   const cfg = await getConfig();
   if (cfg.token && cfg.autoConnect) {
-    connect();
+    await connect();
   }
-})();
+});
 
 console.log("[KiraBridge] Service Worker 已启动");

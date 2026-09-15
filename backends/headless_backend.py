@@ -110,7 +110,12 @@ class HeadlessBackend(Backend):
         self._page = None
         self._own_page = None
         self._playwright = None
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()          # 保护「启动浏览器」
+        # ⚠️ 另有一把锁保护**页面操作**。
+        #    模型可以在同一轮里并发调多个工具（比如同时 navigate + click），
+        #    而它们共用同一张 self._page。不串行化的话，
+        #    page.goto 还没完成就会有人在上面 click，页面状态直接错乱。
+        self._op_lock = asyncio.Lock()
         self._desc = ""
         self._idle_task = None
         self._popup_hooked = False
@@ -496,11 +501,13 @@ class HeadlessBackend(Backend):
             await self._ensure_page()
 
     async def _op(self, coro, what: str, timeout: Optional[float] = None):
+        """执行一次页面操作。**串行化** —— 同一张页面上不允许并发操作。"""
         limit = timeout if timeout is not None else self.op_timeout
         try:
-            if limit and limit > 0:
-                return await asyncio.wait_for(coro, timeout=limit)
-            return await coro
+            async with self._op_lock:
+                if limit and limit > 0:
+                    return await asyncio.wait_for(coro, timeout=limit)
+                return await coro
         except asyncio.TimeoutError:
             self._touch()
             raise RuntimeError(
