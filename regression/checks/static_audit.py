@@ -167,9 +167,17 @@ def run(r) -> None:
         for sym in sorted(SHARED_SYMBOLS):
             if sym in have:
                 continue
-            # 只在"真的当标识符用了"时报（避开对象键与字符串）
-            if re.search(rf'(?<![\w.$]){re.escape(sym)}\s*\(', code):
-                unresolved.append(f"{f_} 用了 {sym}() 但没 import")
+            # ⚠️ 不能只看 `sym(` —— 那样会漏掉：
+            #      * 成员访问（`MSG.PING` / `CMD.DOWNLOAD`）
+            #      * 当值传递（回调、数组元素）
+            #    这些同样是"未声明的标识符"，运行时照样 ReferenceError，
+            #    而 node --check 不会报（它不查未定义标识符）。
+            if re.search(rf'(?<![\w.$]){re.escape(sym)}\s*[.(]', code) \
+                    or re.search(rf'(?<![\w.$]){re.escape(sym)}\b(?!\s*:)', code):
+                # 排除它自己被声明的情况（函数/变量声明、解构赋值）
+                if re.search(rf'(?:function|const|let|var)\s+{re.escape(sym)}\b', code):
+                    continue
+                unresolved.append(f"{f_} 用了 {sym} 但没 import")
     r.ok("A13b 从 shared/protocol 用到的符号都 import 了",
          not unresolved, f"未 import={unresolved or '无'}")
 

@@ -135,8 +135,11 @@ def run(r) -> None:
         return
 
     # runner 必须放在 js/ 目录里，否则 Node 找不到同级的 node_modules。
-    # 文件名以 _ 开头，已被 .gitignore 覆盖，不会误提交。
-    runner = JS_DIR / "_click_runner.mjs"
+    # ⚠️ 用**唯一文件名** —— 固定名字在并行执行时会互相删掉
+    #    （一个进程在另一个启动 Node 之前把文件删了 → 随机失败）。
+    #    以 _ 开头，已被 .gitignore 覆盖，不会误提交。
+    import os as _os2
+    runner = JS_DIR / f"_click_runner_{_os2.getpid()}.mjs"
     runner.write_text(RUNNER, encoding="utf-8")
     import os as _os
     env = {

@@ -71,6 +71,8 @@ class ExtensionBackend(Backend):
         "go_back", "refresh", "hover",
         "key_press", "key_down", "key_up",
         "mouse_click", "mouse_down", "mouse_up", "mouse_wheel", "mouse_drag",
+        # 与扩展侧 shared.js 的 PRIVILEGED_COMMANDS 保持**逐字一致**
+        "activate_tab", "close_tab", "mouse_move",
     }
 
     async def _send(self, cmd: str, params: Optional[dict] = None, timeout=None,

@@ -37,7 +37,9 @@ def _all_files(include_regression: bool = False):
         if not p.is_file():
             continue
         rel = p.relative_to(PLUGIN_DIR)
-        if "__pycache__" in rel.parts or ".git" in rel.parts:
+        # ⚠️ 不要在这里剔除 __pycache__ —— 剔了的话 D1/D2 就永远查不到它们，
+        #    那两条检查等于形同虚设。让它们进清单，由 D1/D2 去判红。
+        if ".git" in rel.parts:
             continue
         if not include_regression and rel.parts and rel.parts[0] in REGRESSION_DIRS:
             continue

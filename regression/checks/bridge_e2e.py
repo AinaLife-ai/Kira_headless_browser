@@ -119,6 +119,7 @@ def run(r) -> None:
 
     results = {}
     _procs = []          # 持有子进程引用，避免被 GC 提前回收
+    _server_holder = {}  # 供外层 finally 关服务
 
     async def main():
         import websockets
@@ -152,8 +153,11 @@ def run(r) -> None:
 
         # ⚠️ 端口写死会撞车（并行跑/被别的程序占用）→ E0 直接失败。
         #    绑 0 让系统分配空闲端口，再从 server.sockets 读回来。
+        # 整个"起服务 + 起子进程"的过程包在 try/finally 里：
+        # 中途任何断言抛错都能把 node 进程与服务清干净，不留孤儿。
         server = await websockets.serve(handler, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
+        _server_holder["server"] = server
         # 持有引用直到结束：Popen 被 GC 回收会提前杀掉子进程
         proc = subprocess.Popen(["node", str(client_path), str(port)],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -244,6 +248,24 @@ def run(r) -> None:
         r.ok("E0 端到端脚本可运行", False, f"{type(e).__name__}: {e}")
         return
     finally:
+        # ⚠️ 任何失败路径都要收干净：断言抛错时 main() 会提前退出，
+        #    node 子进程可能还活着、WebSocket 还开着。
+        for _p in _procs:
+            if _p.poll() is None:
+                try:
+                    _p.terminate()
+                    _p.wait(timeout=3)
+                except Exception:
+                    try:
+                        _p.kill()
+                    except Exception:
+                        pass
+        _srv = _server_holder.get("server")
+        if _srv is not None:
+            try:
+                _srv.close()
+            except Exception:
+                pass
         # 清掉临时客户端脚本，避免污染文件清点
         try:
             client_path.unlink()

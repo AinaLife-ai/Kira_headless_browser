@@ -214,8 +214,15 @@ class FakePage:
 
     # --- events -----------------------------------------------------------
     def _die_by_itself(self):
-        """Simulate the user closing this tab in a real browser window."""
+        """Simulate the user closing this tab in a real browser window.
+
+        这也是一次"页面关闭"，必须计入 STATS —— 契约是"每次关闭都计数"，
+        漏了会让基于计数的断言失准。
+        """
+        if self._closed:
+            return
         self._closed = True
+        STATS["pages_closed"] += 1
         if self in self._ctx.pages:
             self._ctx.pages.remove(self)
 

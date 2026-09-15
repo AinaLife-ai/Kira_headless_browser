@@ -268,6 +268,10 @@ async function handleMessage(raw) {
 
     case MSG.PING:
       sendRaw({ type: MSG.PONG, ts: Date.now() });
+      // 若 popup 正在做链路验证，这一次真实往返就是证据
+      if (typeof state.probe === "function") {
+        try { state.probe(); } catch (_) {}
+      }
       break;
 
     case MSG.CMD:
@@ -649,13 +653,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             sendResponse({ ok: false, error: "未连接到 KiraAI（请先点连接）" });
             break;
           }
-          const tabs = await listTabs();
-          sendResponse({
-            ok: true,
-            tab_count: tabs.tab_count,
-            socket: "OPEN",
-            note: "已在扩展侧执行一次真实命令；若插件面板显示未连接，说明链路不通",
-          });
+          // ⚠️ 只检查 readyState + 调本地 listTabs() 是**不够**的：
+          //    `listTabs()` 完全在扩展本地跑（chrome.tabs.query），
+          //    根本没经过 WebSocket。socket 开着但应用层坏了
+          //    （插件侧 handler 没注册、协议版本不匹配）时，
+          //    弹窗照样显示"链路正常"。
+          //
+          //    真正能证明链路通的是**收到服务端发来的 ping 并回 pong** ——
+          //    这需要"socket 可收 + 对端在跑 + 我们可发"三者同时成立。
+          //    做法：发一条 probe，等服务端心跳 ping 到达并触发 pong。
+          const okRtt = await probeServerRoundTrip(5000);
+          sendResponse(okRtt);
         } catch (e) {
           sendResponse({ ok: false, error: e.message });
         }

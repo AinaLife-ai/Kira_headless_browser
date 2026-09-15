@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ..harness import PLUGIN_DIR, load_module, section, src
 
 TITLE = "安全规则（域名 / 本机地址）"
@@ -83,21 +85,33 @@ def run(r) -> None:
     # 令牌放在 query string 里，明文 ws:// 到远程主机会把它暴露在网络上
     pjs = src("browser-bridge/protocol.js")
     r.ok("B2.1 有回环判定函数", "isLoopbackHost" in pjs)
-    r.ok("B2.2 非回环且非 allowInsecure 时抛错（不静默发明文）",
-         "allowInsecure" in pjs and "拒绝以明文 ws://" in pjs,
-         "把令牌明文发到远程 = 泄露整个浏览器桥权限")
-    ok_line = "const scheme = loopback ? \"ws\" : \"wss\";" in pjs
-    r.ok("B2.3 按回环与否选择 ws/wss", ok_line)
+    # 默认：本机 ws、其它主机 wss（远程能正常连，且令牌加密）
+    r.ok("B2.2 非回环主机默认用 wss（令牌在 query 里必须加密）",
+         'loopback ? "ws" : "wss"' in pjs,
+         "远程主机能被正常连上，且默认走 wss")
+    # 只在**显式**要求明文连非本机时才拒绝
+    r.ok("B2.3 显式 ws:// 连非本机时拒绝（不静默发明文）",
+         'scheme === "ws" && !loopback' in pjs and "拒绝以明文 ws://" in pjs)
+    # 用户填 wss://xxx 时要能解析出 scheme（否则连不上远程）
+    r.ok("B2.4 支持用户在地址里写 ws:// / wss://",
+         r"^(wss?):\/\/" in pjs or "wss?:" in pjs)
     # 扩展下载不允许跟随重定向（跨协议会带出 cookie）
     cap = src("browser-bridge/capabilities.js")
-    r.ok("B2.4 下载不跟随重定向（杜绝跨协议带 cookie）",
+    r.ok("B2.5 下载不跟随重定向（杜绝跨协议带 cookie）",
          'redirect: "error"' in cap)
-    # 不把本机绝对路径回传给服务
+    # [12] 不把本机绝对路径回传给服务。
+    # ⚠️ 别用"子串在不在一起"这种脆弱判据 —— 格式化一下就能绕过。
+    #    改成提取 listFiles 里的 map 对象字面量，检查它的**键**里有没有 path。
     cmds = src("browser-bridge/commands.js")
-    r.ok("B2.5 下载列表不返回绝对路径",
-         "d.filename," not in cmds.replace(" ", "").replace("\n", "")
-         or "path: d.filename" not in cmds,
-         "绝对路径含用户名与本地目录结构，且扩展侧本来也用不了")
+    fn = cmds.find("async function listFiles(")
+    seg = cmds[fn:fn + 1600] if fn > 0 else ""
+    # 取出 map((d) => ({ ... })) 里的返回字段
+    keys = set()
+    for mm in re.finditer(r'size\s*:|mtime\s*:|name\s*:|path\s*:', seg):
+        keys.add(mm.group(0).strip().rstrip(":"))
+    r.ok("B2.6 下载列表不返回绝对路径（键里没有 path）",
+         "path" not in keys and "name" in keys,
+         f"listFiles 返回的字段={sorted(keys)}")
 
     section("C. check_url 整体行为")
     # 黑名单优先

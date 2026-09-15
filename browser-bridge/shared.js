@@ -17,6 +17,8 @@ export const state = {
   intentionalClose: false,
   userDisconnected: false,
   lastError: "",
+  /** popup 做链路验证时挂的一次性回调（收到服务端 ping 时触发） */
+  probe: null,
 };
 
 // ─── 发送 ──────────────────────────────────────────────────────────────
@@ -187,6 +189,11 @@ export const PRIVILEGED_COMMANDS = new Set([
   "go_back", "refresh", "hover",
   "key_press", "key_down", "key_up",
   "mouse_click", "mouse_down", "mouse_up", "mouse_wheel", "mouse_drag",
+  // ⚠️ 下面三个也是写操作，之前漏了 —— 开了「写操作需确认」时
+  //    它们会被静默放行：AI 能在用户没批准的情况下**切走/关掉标签页**、
+  //    或模拟鼠标移动（可能触发拖拽类交互）。
+  //    这份清单必须与 Python 侧 protocol.py 的 WRITE_COMMANDS 保持同步。
+  "activate_tab", "close_tab", "mouse_move",
 ]);
 
 /** 生成给用户看的确认文案 */

@@ -101,17 +101,30 @@ function isLoopbackHost(h) {
  *    如果用户填的是远程主机又想用 ws://，这里直接抛错，
  *    而不是悄悄把令牌明文发出去。
  */
-export function buildWsUrl(host, port, token, { allowInsecure = false } = {}) {
-  const h = (host || DEFAULT_HOST).trim();
+export function buildWsUrl(host, port, token) {
+  const raw = (host || DEFAULT_HOST).trim();
   const p = String(port || DEFAULT_PORT).trim();
+
+  // 解析出 scheme（用户可能填 `ws://h` / `wss://h` / 裸主机名）
+  let scheme = "";
+  let h = raw;
+  const m = /^(wss?):\/\//i.exec(raw);
+  if (m) {
+    scheme = m[1].toLowerCase();
+    h = raw.slice(m[0].length);
+  }
+  h = h.replace(/\/.*$/, "").replace(/:\d+$/, "");   // 去掉可能的路径/端口
+
   const loopback = isLoopbackHost(h);
-  if (!loopback && !allowInsecure) {
+  // 默认：本机用 ws（不出网卡），其它主机用 wss（令牌在 query 里，必须加密）
+  if (!scheme) scheme = loopback ? "ws" : "wss";
+  // 唯一会拒绝的情况：**显式**要求用明文连非本机 —— 那才是真危险
+  if (scheme === "ws" && !loopback) {
     throw new Error(
-      `拒绝以明文 ws:// 连接非本机地址 ${h} —— 接入令牌会暴露在网络上。` +
-      `请改用 wss://（把地址填成 https 形式），或确认对方确实是本机。`
+      `拒绝以明文 ws:// 连接非本机地址 ${h} —— 接入令牌会暴露在网络上。`
+      + `请去掉地址里的 ws://（默认会用 wss://）。`
     );
   }
-  const scheme = loopback ? "ws" : "wss";
   return `${scheme}://${h}:${p}${WS_PATH}?token=${encodeURIComponent(token)}`;
 }
 

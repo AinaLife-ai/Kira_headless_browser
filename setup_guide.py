@@ -213,8 +213,8 @@ def compatibility_report() -> str:
     """扩展的浏览器兼容性说明。"""
     return (
         "扩展兼容性：\n"
-        "  ✅ Chrome 116+（扩展清单里 minimum_chrome_version=116）\n"
-        "  ✅ Edge 116+（同为 Chromium 内核，扩展机制一致，可直接加载）\n"
+        "  ✅ Chrome 120+（执行 JS 依赖 chrome.userScripts，它从 120 起提供）\n"
+        "  ✅ Edge 120+（同为 Chromium 内核，扩展机制一致，可直接加载）\n"
         "  ✅ Brave / Vivaldi / Opera 等 Chromium 系浏览器\n"
         "  ❌ Firefox —— 不支持（Firefox 的 MV3 用的是 event page，\n"
         "     不接受 manifest 里的 background.service_worker）\n"

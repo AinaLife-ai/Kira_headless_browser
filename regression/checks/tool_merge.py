@@ -52,6 +52,28 @@ LEGACY = {
     "browser_cookie": ("browser_cookie", "export/import"),
 }
 
+def _tool_enum(src: str, tool: str) -> set[str]:
+    """取出某个工具 **params 里 action/mode 的 enum**。
+
+    ⚠️ 只取 schema 段（`@register.tool` 装饰器内部），**不含函数体** ——
+    函数体里会出现同样的字面量（比如 `if a == "hover"`），
+    带上它就会让"enum 里删了 action"检测不出来。
+    """
+    i = src.find(f'name="{tool}"')
+    if i < 0:
+        return set()
+    start = src.rfind("@register.tool", 0, i)
+    if start < 0:
+        start = i
+    # 装饰器参数到右括号结束（这里用"到 async def"作为上界更稳）
+    fn = src.find("async def ", i)
+    seg = src[start:fn if fn > 0 else i + 3000]
+    out = set()
+    for mm in re.finditer(r'"enum":\s*\[([^\]]*)\]', seg):
+        out |= set(re.findall(r'"([a-z_]+)"', mm.group(1)))
+    return out
+
+
 NEED_ACTIONS = {
     "click", "fill", "type", "hover", "scroll", "upload",
     "go_back", "refresh",
@@ -83,10 +105,15 @@ def run(r) -> None:
         #    所以这里把 action 也逐条验一遍。
         ok = newtool in now
         if ok and action:
+            # ⚠️ 必须在**目标工具自己的 schema 段**里找 action，
+            #    不能全文搜 —— 全文搜会命中别处的同名动作，
+            #    导致"目标工具删了这个 action"也照样 PASS。
+            enums = _tool_enum(main, newtool)
             for a in [x.strip() for x in action.split("/") if x.strip()]:
-                if f'"{a}"' not in main:
+                # 目标工具的 enum 里必须有这个动作
+                if enums and a not in enums:
                     ok = False
-                    missing.append(f"{old}(action={a} 不存在)")
+                    missing.append(f"{old}({newtool}.enum 里没有 {a})")
         if not ok and (newtool not in now):
             missing.append(old)
         r.note(f"{'✅' if ok else '❌'} {old:<28} → {newtool}"

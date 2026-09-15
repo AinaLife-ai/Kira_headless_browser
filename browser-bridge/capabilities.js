@@ -130,50 +130,22 @@ async function upload(params) {
   const tab = await resolveTab(params.tab_id);
   assertInjectable(tab);
 
-  // ⚠️ 先按 base64 长度**估算**总量再解码。
-  //    base64 每 4 个字符对应 3 字节，所以解码后的体积约为 len*3/4。
-  //    如果先全部 atob 再检查，超限的文件已经完整占住内存了 ——
-  //    上限就形同虚设（攻击面/误用面都在这儿）。
+  // ⚠️ 不要把 base64 解码成字节、再重新编码回 base64 ——
+  //    那是同一份数据在内存里存三份（原始 base64 + 解码后 + 重编码），
+  //    200MB 的上传峰值能到 1GB，足以把 MV3 的 Service Worker 直接打挂。
+  //    内容脚本最终要的就是 base64，所以只需**按长度校验**后原样拼接。
   const b64s = chunks || [];
-  let estimated = 0;
-  for (const b64 of b64s) estimated += Math.floor((b64.length * 3) / 4);
-  if (limit > 0 && estimated > limit) {
-    throw new Error(`文件过大（约 ${estimated} > 上限 ${limit} 字节），已拒绝上传`);
-  }
-
-  // chunks 是 base64 数组（由插件侧分块送来）
-  const parts = [];
-  let decoded = 0;
+  let approx = 0;
   for (const b64 of b64s) {
-    const bin = atob(b64);
-    // 边解码边累计，防止估算不准（比如 padding/非法字符）时超限
-    decoded += bin.length;
-    if (limit > 0 && decoded > limit) {
-      throw new Error(`文件过大（> ${limit} 字节），已中止上传`);
-    }
-    const buf = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-    parts.push(buf);
+    approx += Math.floor((b64.length * 3) / 4);   // base64 每 4 字符≈3 字节
+  }
+  if (limit > 0 && approx > limit) {
+    throw new Error(`文件过大（约 ${approx} > 上限 ${limit} 字节），已拒绝上传`);
   }
 
-  // ⚠️ 不要用 Blob + FileReader 绕一圈：MV3 的 background 是 Service Worker，
-  //    而 FileReader 是 DOM API，在 ServiceWorkerGlobalScope 里**不存在** ——
-  //    调用会直接抛 ReferenceError，让整个上传功能失效。
-  //    手上已经是 Uint8Array，直接拼成 base64 即可。
-  let total = 0;
-  for (const p of parts) total += p.length;
-  if (limit > 0 && total > limit) {
-    throw new Error(`文件过大（${total} > ${limit} 字节），已拒绝上传`);
-  }
-  const bytes = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    bytes.set(p, off);
-    off += p.length;
-  }
-  const fileBase64 = bytesToBase64(bytes);
+  // 拼接成一条 base64（字符串拼接，不再生成中间字节副本）
+  const fileBase64 = b64s.join("");
 
-  // 内容脚本负责把它塞进 input.files
   const res = await callContent(tab, "upload_blob", {
     selector,
     name,
@@ -181,17 +153,7 @@ async function upload(params) {
     base64: fileBase64,
   }, 60000);
 
-  return { ok: true, url: tab.url, name, size: total, matched: res.matched };
-}
-
-/** Uint8Array → base64（不用 FileReader，Service Worker 里没有它） */
-function bytesToBase64(uint8) {
-  let bin = "";
-  const STEP = 0x8000;
-  for (let i = 0; i < uint8.length; i += STEP) {
-    bin += String.fromCharCode.apply(null, uint8.subarray(i, i + STEP));
-  }
-  return btoa(bin);
+  return { ok: true, url: tab.url, name, size: approx, matched: res.matched };
 }
 
 // ─── 3. 下载（用用户会话抓取，分块回传）────────────────────────────────

@@ -158,9 +158,11 @@ def run(r) -> None:
         with open(os.path.join(p.download_dir, f"f{i}.bin"), "wb") as f:
             f.write(b"y")
     p._clean_downloads()
-    r.ok("R5 下载目录自动清理",
-         len(os.listdir(p.download_dir)) <= 6,
-         f"剩 {len(os.listdir(p.download_dir))} 个（原来 20 个从不清理）")
+    _left = len(os.listdir(p.download_dir))
+    # 精确断言：设了上限 5 就应**恰好**保留 5。
+    # 用 <= 6 会同时放过"多留一个"和"删多了"两种错误。
+    r.ok("R5 下载目录自动清理（恰好保留到上限）",
+         _left == 5, f"剩 {_left} 个，期望 5（原来 20 个从不清理）")
 
     # ── R6 CPU 参数构造 + 注入防护 ──────────────────────────────────
     hl = hbmod.build_launch_args(True)

@@ -164,12 +164,27 @@
   }
 
   /** 构造 MouseEvent 的 init（坐标 + 按键） */
+  /**
+   * 构造 MouseEvent 的 init。
+   *
+   * ⚠️ `button` 与 `buttons` 语义不同：
+   *   button  = 本次事件的**那一个**键（mousemove 时无键 → 0）
+   *   buttons = 当前**按住**的键位掩码（没按任何键 → 0）
+   * 之前无条件给 buttons=1，等于宣称"鼠标移动时左键是按下状态" ——
+   * 拖拽敏感页面会在一次纯 hover 移动上开始拖拽。
+   * 所以：不传 button 时（移动）buttons 记为 0。
+   */
   function mouseInit(x, y, button, clickCount) {
+    const hasButton = button !== undefined && button !== null;
+    const btn = !hasButton ? 0
+      : (button === "right" ? 2 : button === "middle" ? 1 : 0);
+    const buttons = !hasButton ? 0
+      : (button === "right" ? 2 : button === "middle" ? 4 : 1);
     return {
       bubbles: true, cancelable: true, view: window,
       clientX: Number(x), clientY: Number(y),
-      button: (button === "right" ? 2 : button === "middle" ? 1 : 0),
-      buttons: (button === "right" ? 2 : button === "middle" ? 4 : 1),
+      button: btn,
+      buttons,
       clickCount: Number(clickCount) || 1,
     };
   }

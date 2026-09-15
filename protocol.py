@@ -98,6 +98,8 @@ WRITE_COMMANDS = frozenset({
     CMD_MOUSE_UP,
     CMD_MOUSE_WHEEL,
     CMD_MOUSE_DRAG,
+    CMD_MOUSE_MOVE,
+    CMD_COOKIE_SET,
 })
 
 #: 只读但需要单列（不属于写操作）

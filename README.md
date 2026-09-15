@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.7
+# 浏览器插件 (Browser Plugin) 2.1.8
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -76,8 +76,8 @@
 
 | 浏览器 | 支持 | 说明 |
 |---|---|---|
-| Chrome | ✅ 116+（**执行 JS 需 120+**） | MV3 本身 116 起可用；`chrome.userScripts` 从 120 起提供，所以 `browser_script` 在 116–119 上不可用 |
-| Edge | ✅ 116+（**执行 JS 需 120+**） | 同为 Chromium 内核，扩展机制一致；打开的是 `edge://extensions` |
+| Chrome | ✅ **120+** | `chrome.userScripts`（执行 JS 依赖）从 120 起提供；扩展清单已声明 `minimum_chrome_version: 120` |
+| Edge | ✅ **120+** | 同为 Chromium 内核，扩展机制一致；打开的是 `edge://extensions` |
 | Brave / Vivaldi / Opera | ✅ | Chromium 系，`chrome.*` API 一致 |
 | Firefox | ❌ | Firefox 的 MV3 用 event page，**不接受** `background.service_worker` |
 | Safari | ❌ | 扩展格式完全不同 |
@@ -292,8 +292,9 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 
 **两个后端接口完全对称** —— 换后端不丢能力，只是"在谁的浏览器里做"不同。
 
-> 唯一的版本例外：**执行 JavaScript** 依赖 `chrome.userScripts`（Chrome/Edge 120+）。
-> 在 116–119 上该能力不可用，插件会明确告诉你原因，其它能力不受影响。
+> 最低版本是 **Chrome/Edge 120**：扩展的 `browser_script`（执行任意 JS）依赖
+> `chrome.userScripts`，它从 Chrome 120 起提供。低于 120 装不上扩展，
+> 但不装扩展也能用（走无头后端）。
 
 ---
 
@@ -469,6 +470,53 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.8（2026-09-15）
+
+**按 CodeRabbit 第六轮审查修复 15 项**：
+
+- 🔴 **上一轮我把 wss 守卫写反了**（自己引入的回归）：`buildWsUrl()` 对**所有**
+  非回环主机抛错 —— 而"远程主机默认走 wss"本身是正确且安全的路径，
+  结果把正常用法也堵死了。→ 改为：能解析用户填的 `ws://`/`wss://`；
+  默认本机 `ws`、其它主机 `wss`；**只有显式要求明文连非本机时才拒绝**。
+- 🔴 **二次确认漏了三个写命令**（CWE-862）：`activate_tab` / `close_tab` /
+  `mouse_move` 不在 `PRIVILEGED_COMMANDS` 里 —— 开了「写操作需确认」时，
+  AI 仍能在用户未批准的情况下**切走/关掉标签页**。
+  → 补齐，并让 Python 侧与 JS 侧的命令集合**逐字一致**（新增检查盯着）。
+- 🔴 **`test_ping` 报"链路正常"却没做任何服务端往返**：它只检查
+  `readyState` 再调**本地**的 `listTabs()`（后者跑 `chrome.tabs.query`，
+  根本不经过 WebSocket）。socket 半开或插件侧路由坏了时照样显示正常。
+  → 改为挂一次性监听，**等服务端心跳 ping 到达并回 pong** 才算通过；
+  5 秒没等到就明确报"链路可能不通"。
+- **上传在内存里重建整份文件**：base64 → 解码成字节 → 再编码回 base64，
+  同一份数据存三份，200MB 上传峰值可达 1GB，足以打挂 MV3 Service Worker。
+  → 内容脚本要的就是 base64，**按长度校验后原样拼接**即可，不再解码重编码。
+- **`mouse_move` 声称按着左键**：`mouseInit` 无条件给 `buttons: 1`，
+  等于说"移动时左键按住"——拖拽敏感页面会在纯 hover 上开始拖拽。
+  → 不传 `button` 时 `buttons: 0`。
+- **Chrome 最低版本 116 → 120**：扩展声明了 `userScripts` 权限，
+  而该 API 从 Chrome 120 起提供，116–119 装上也用不了 `browser_script`。
+  → manifest / README / `setup_guide` 三处统一为 120。
+- 扩展 manifest 描述里的「默认只读」已过时（实际默认可读写）→ 改为按
+  "权限由 KiraAI 插件配置控制"表述。
+
+**回归测试套件 8 项**（CR 连检查本身也审了，这几条都挺准）：
+- `file_hygiene` 把 `__pycache__` 从清单里**剔除**了 → D1/D2 永远查不到它们，
+  等于形同虚设。→ 让它们进清单，由检查判红。
+- `callgraph` 的 A13b/A13c 只看 `sym(` 调用形式 → 漏掉 `MSG.PING`、`CMD.DOWNLOAD`
+  这类**成员访问**与当值传递（运行时同样是 ReferenceError，
+  而 `node --check` 不查未定义标识符）→ 扩展覆盖面。
+- `tool_merge` 的 C1 用**全文搜索**找 action → 目标工具删了某动作、
+  但别处还有同名动作时照样 PASS。→ 改为解析**目标工具自己的 enum**
+  （且只取 schema 段，不含函数体）。**反向验证**过。
+- `runtime_behavior` 的 R5 用 `<= 6` → 同时放过"多留一个"和"删多了"。
+  → 改为精确等于上限。
+- `security_rules` 的 B2 用子串判据判"不回传绝对路径"→ 格式化一下就能绕过。
+  → 改为解析返回对象的**键**。
+- `bridge_e2e` 失败路径不收子进程与服务（断言抛错时 node 还活着）→ 包 `try/finally`。
+- `content_dom` 的 runner 文件名固定 → 并行执行会互相删。→ 加 PID 后缀。
+- 假 Playwright 的 `_die_by_itself()` 没计入 `pages_closed` → 与"每次关闭都计数"
+  的契约不符。
 
 ### v2.1.7（2026-09-15）
 
