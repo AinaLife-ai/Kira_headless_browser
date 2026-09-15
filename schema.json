@@ -384,12 +384,12 @@
   "upload_max_bytes": {
     "name": "Max Upload Size (Bytes)",
     "type": "integer",
-    "default": 209715200,
-    "hint": "Max file size for browser upload. The content travels over the WebSocket, so keep it reasonable. Default 200MB.",
+    "default": 33554432,
+    "hint": "Max file size for browser upload. The whole file travels inside ONE WebSocket message (base64 inflates it 1.33x, and json.dumps makes another copy), so one frame must be able to carry it. Default 32MB. Raising this beyond the 32MB ceiling has no effect until multi-message streaming is implemented.",
     "locales": {
       "zh": {
         "name": "上传文件大小上限（字节）",
-        "hint": "通过扩展上传文件时的大小上限。内容要经 WebSocket 传输，别设太大。默认 200MB。"
+        "hint": "通过扩展上传文件时的大小上限。整个文件要放进**一条** WebSocket 消息（base64 会放大 1.33 倍，json.dumps 再复制一份），所以单帧必须扛得住。默认 32MB。在改成「分多条消息流式传输」之前，调到 32MB 以上不会生效。"
       }
     }
   },

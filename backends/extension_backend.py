@@ -63,7 +63,13 @@ class ExtensionBackend(Backend):
 
     @property
     def display(self) -> str:
-        info = getattr(self._bridge, "info", {}) or {}
+        # ⚠️ 这里要**取一次公开的 info**（BrowserBridge.info 是 @property），
+        #    不要直接摸 _bridge._hello 之类的内部字段；也不要把 info 当成
+        #    可调用对象。取不到就退回占位符，绝不因为桥未连接而抛异常。
+        try:
+            info = self._bridge.info or {}
+        except Exception:
+            info = {}
         ver = info.get("extension_version") or "?"
         br = info.get("browser") or "?"
         return f"用户浏览器（{br} · 扩展 v{ver}）"
@@ -106,7 +112,13 @@ class ExtensionBackend(Backend):
                 return OpResult.declined_by_user(self.name)
             return OpResult(data=data, backend=self.name)
         except Exception as e:
-            return OpResult.fail(str(e), self.name)
+            msg = str(e)
+            # ⚠️ 超时类错误标成**不确定**：命令可能已经在页面里执行了，
+            #    只是回执没回来。若当成普通失败，上层会换（无头）后端重试，
+            #    同一个点击/输入就被做了两次。
+            if "超时" in msg or "timeout" in msg.lower():
+                return OpResult.indeterminate_result(msg, self.name)
+            return OpResult.fail(msg, self.name)
 
     # ══════════════════════════════════════════════════════════════════
     #  能力实现（与无头后端同一套签名，便于路由互换）

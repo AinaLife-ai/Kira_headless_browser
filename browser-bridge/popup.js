@@ -36,7 +36,22 @@ const STATE_LABEL = {
 };
 
 async function refresh() {
-  const r = await chrome.runtime.sendMessage({ action: "status" });
+  // ⚠️ sendMessage 在 service worker 被回收/未唤醒时会 **reject**。
+  //    不接住的话，每 3 秒一次的轮询会不断产生 unhandled rejection，
+  //    而且弹窗会一直停在旧状态（看不到"已断开"）。
+  let r;
+  try {
+    r = await chrome.runtime.sendMessage({ action: "status" });
+  } catch (e) {
+    setDot("err");
+    setStatus("无法连接扩展后台（" + (e && e.message ? e.message : e) + "）", true);
+    return;
+  }
+  if (!r) {
+    setDot("err");
+    setStatus("扩展后台没有响应", true);
+    return;
+  }
 
   if (r.connected) {
     setDot("on");

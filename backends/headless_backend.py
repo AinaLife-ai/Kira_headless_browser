@@ -1278,6 +1278,10 @@ class HeadlessBackend(Backend):
                 #    会把**非 Secure 的会话 cookie** 一起发出去（CWE-319）——
                 #    等于把登录态明文送出。这里自己跟，且**每一跳都要求 HTTPS**；
                 #    一旦要降级到 http，就丢掉 jar 再继续（宁可匿名也不明文带凭据）。
+                # ⚠️ 带 cookie 时不自动跟随重定向，自己跟；每跳都要求 HTTPS。
+                #    要降级到 http 时**直接停在这里**（不再继续跟）——
+                #    既不把 Cookie 明文送出去，也不用去改 aiohttp 的
+                #    私有属性 `_cookie_jar`（那是实现细节，升级即碎）。
                 r = await s.get(url, allow_redirects=False)
                 hops = 0
                 while 300 <= r.status < 400 and hops < 5:
@@ -1287,9 +1291,9 @@ class HeadlessBackend(Backend):
                     nxt = urljoin(str(r.url), loc)
                     if jar is not None and not nxt.lower().startswith("https://"):
                         logger.warning(
-                            f"下载重定向到非 HTTPS（{nxt}），将**不带 Cookie** 继续")
-                        s._cookie_jar = aiohttp.DummyCookieJar()
-                        jar = None
+                            f"下载重定向到非 HTTPS（{nxt}）—— 为保护 Cookie "
+                            f"不跟随该跳，按当前状态返回")
+                        break
                     r = await s.get(nxt, allow_redirects=False)
                     hops += 1
                     url = nxt

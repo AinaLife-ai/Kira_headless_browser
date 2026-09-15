@@ -37,6 +37,11 @@ class OpResult:
     warnings: List[str] = field(default_factory=list)
     declined: bool = False
 
+    #: **不确定状态**：命令可能已经在浏览器里执行了，只是我们没等到回执
+    #  （典型：页面操作超时）。这种结果**绝不能换后端重试** ——
+    #  否则同一个点击/输入会被做两次。和 ``declined`` 一样属于"终止性"结果。
+    indeterminate: bool = False
+
     @classmethod
     def fail(cls, error: str, backend: str = "") -> "OpResult":
         return cls(ok=False, error=error, backend=backend)
@@ -45,6 +50,14 @@ class OpResult:
     def declined_by_user(cls, backend: str = "",
                          reason: str = "用户在浏览器中拒绝了本次操作") -> "OpResult":
         return cls(ok=False, error=reason, backend=backend, declined=True)
+
+    @classmethod
+    def indeterminate_result(cls, error: str, backend: str = "") -> "OpResult":
+        """命令**可能已经执行**但没等到回执（如页面操作超时）。
+
+        调用方据此**禁止**换后端重试 —— 重复执行的伤害比失败更大。
+        """
+        return cls(ok=False, error=error, backend=backend, indeterminate=True)
 
     def as_text(self, text: str) -> str:
         return text

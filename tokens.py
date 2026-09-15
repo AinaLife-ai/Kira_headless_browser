@@ -134,10 +134,18 @@ def load_rotation(data_dir: Optional[Path] = None) -> Optional[str]:
 
 
 def rotate(data_dir: Optional[Path] = None) -> str:
-    """换一个全新的令牌世代号 —— 这让**所有**已签发的旧令牌立即失效。
+    """换一个全新的令牌世代号，并**重新签发**当前这一枚令牌。
 
-    服务端只认 ``tv``，而 ``tv`` 是按当前世代号算出来的，所以世代号一变，
-    旧令牌的 ``tv`` 就对不上，握手会被 4003 拒掉。这就是"旧的直接不能用"。
+    ⚠️ 不要再写"这让所有旧令牌立即失效" —— **实际不是这样**：
+
+    * 服务端只校验签名/有效期/auth_mode/``tv``，而 ``tv`` 是
+      ``sha256(app.state.access_token)[:16]``，**与世代号无关**。
+      （曾经想往 tv 里掺世代号，结果连新令牌一起被拒，已废弃。）
+    * 所以光改世代号，旧令牌在服务端眼里**照样合法**。
+
+    真正让旧令牌失效的是 ``is_current_token()`` 里的 **jti 闸门**：
+    重新签发会写入新的 jti，旧令牌的 jti 与当前不相等 → 被拒。
+    世代号的作用是记录"重新生成过"这件事，供面板/诊断使用。
     """
     value = secrets.token_hex(8)
     path = rotation_file_path(data_dir)

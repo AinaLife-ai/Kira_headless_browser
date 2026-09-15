@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.13
+# 浏览器插件 (Browser Plugin) 2.1.14
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -190,7 +190,7 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 | `download_auto_clean` | switch | `true` | 自动清理下载目录 |
 | `download_max_count` | integer | `100` | 下载目录最多保留文件数 |
 | `download_max_bytes` | integer | `2147483648` | 单个下载大小上限（2GB）。下载是**流式落盘**，无论多大都不占内存 |
-| `upload_max_bytes` | integer | `209715200` | 上传大小上限（200MB）。内容要经 WebSocket 传输，别设太大 |
+| `upload_max_bytes` | integer | `33554432` | 上传大小上限（32MB）。整个文件要放进**一条** WebSocket 消息（base64 ×1.33 + json 副本），超过 `ExtensionBackend.MAX_UPLOAD_BYTES` 会被自动钳制 |
 | `upload_allow_any_path` | switch | `true` | 是否允许上传任意路径的文件（**默认开**，本插件定位是给 bot 完整浏览能力）。关掉后只允许 `upload_allowed_dirs` 里的目录 |
 | `upload_allowed_dirs` | list | `["data/files","data/temp"]` | 上传目录白名单（仅在上项关闭时生效）。用 realpath 归一，可防 `../` 穿越 |
 
@@ -470,6 +470,57 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.14（2026-09-15）
+
+**按 CodeRabbit 第十二轮审查修复 14 项**（含 2 个安全问题）：
+
+- 🔴 **上传上限只改了一半**（**我上一轮的漏改**）：我把
+  `ExtensionBackend.MAX_UPLOAD_BYTES` 降到 32MB，**却没改 schema.json /
+  main.py / README 的默认值** —— 它们仍是 200MB 并会一路传下去，
+  硬顶形同虚设。→ 四处默认值统一为 33554432，**并且在 main.py 里
+  按 `MAX_UPLOAD_BYTES` 钳制配置值**（用户调大也不会突破单条消息的极限）。
+  新增守卫 **H2** 逐处核对四个默认值 + 钳制是否存在。
+- 🔴 **页面操作超时可能被当成"失败"从而换后端重试**：`callContent` 的
+  超时意味着"命令**可能已经在页面里执行了**，只是回执没回来"。
+  原样上报成普通失败，上层会换（无头）后端重试 →
+  **同一个点击/输入被做两次**。
+  → 给 `OpResult` 加 `indeterminate` 标志（与 `declined` 并列的
+  "终止性结果"），超时类错误一律标成不确定，上层**不再换后端**，
+  而是如实告诉模型"可能已生效，请先看页面状态"。
+- **无头下载：不再去写 aiohttp 的私有属性 `_cookie_jar`**：
+  上一轮为了"降级到 http 时丢 cookie"，直接替换了 session 的私有字段 ——
+  那是实现细节，库一升级就碎。→ 改成**遇到非 HTTPS 跳直接停下**，
+  既不外泄 Cookie，也不碰私有 API。
+- **`buildWsUrl` 不认 `http://` / `https://`**：面板上用户很自然会粘
+  `http://127.0.0.1:5267`，不认的话前缀会整个留在主机名里 →
+  拼出 `ws://http://127.0.0.1:5267:5267/...` 这种废地址。
+  → 认 http/https 并分别映射到 ws/wss。
+- **连接超时会关掉 socket 并重排重连**、**popup 的 refresh 捕获
+  `sendMessage` reject**（service worker 被回收时它会 reject，
+  不接住会不断产生 unhandled rejection 且弹窗停在旧状态）、
+  **`ExtensionBackend.display` 走公开的 `info`**、
+  **`op_timeout_ratio` 校验 `0<ratio<1`** 且不再被 5 秒下限顶到框架超时之上。
+- **`rotate()` 的文档与代码不符**：docstring 说"世代号一变旧令牌立即失效"，
+  但实际 `tv` 是 `sha256(access_token)[:16]`、**与世代号无关** ——
+  真正起作用的是 `is_current_token()` 里的 **jti 闸门**。→ 改正文档。
+
+**回归套件 8 项**：
+- **B2.7 改用 `new URL()` 做精确 origin 比较**（原来 `startsWith` 太松），
+  并把 http/https 归一也纳入用例；顺带发现 `new URL()` 会规范化 IPv6
+  （`0:0:0:0:0:0:0:1` → `[::1]`、`::ffff:127.0.0.1` → `[::ffff:7f00:1]`），
+  期望值按规范形式写。
+- **`bridge_e2e` 的假客户端不再响应 `wait_for`**：它会立即回结果，
+  于是"取消泄漏"用例**永远走不到超时路径**（看起来在测超时，其实没测）。
+- **`callgraph` 的 D1 改用 AST 结构判断**，不再用 `ast.unparse()` 的
+  字符串前缀 —— 前缀匹配会被 `str(event.session_id)` 误命中。
+- **`_check_tab_id` 被重复调用三次**、**cookie 导入里有个 no-op 循环**
+  （传空 dict 的 `update_cookies` + 吞异常，什么都没做）→ 都删掉。
+- **`stubs` 的固定 `/tmp/kira_data` 改为每次唯一的临时目录**。
+- `.gitignore` 的 `_click_runner.mjs` 改为匹配 `_click_runner_*.mjs`。
+
+**新增守卫 H2**（见上）。反向验证：把 schema 默认值改回 200MB
+→ H2 立即 FAIL。
 
 ### v2.1.13（2026-09-15）
 

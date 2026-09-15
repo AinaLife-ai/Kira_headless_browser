@@ -142,12 +142,17 @@ export function buildWsUrl(host, port, token) {
   const raw = (host || DEFAULT_HOST).trim();
   const p = String(port || DEFAULT_PORT).trim();
 
-  // 解析出 scheme（用户可能填 `ws://h` / `wss://h` / 裸主机名）
+  // 解析出 scheme（用户可能填 `ws://` / `wss://` / 误填 `http://` / 裸主机名）
+  // ⚠️ 必须认 http/https：面板上让用户填地址时，他们很自然会粘
+  //    `http://127.0.0.1:5267`。不认的话前缀会整个留在主机名里，
+  //    拼出 `ws://http://127.0.0.1:5267:5267/...` 这种废地址。
   let scheme = "";
   let h = raw;
-  const m = /^(wss?):\/\//i.exec(raw);
+  const m = /^(wss?|https?):\/\//i.exec(raw);
   if (m) {
-    scheme = m[1].toLowerCase();
+    const sc = m[1].toLowerCase();
+    // http→ws、https→wss：语义上都是"这个地址的 WebSocket 端口"
+    scheme = sc === "http" ? "ws" : sc === "https" ? "wss" : sc;
     h = raw.slice(m[0].length);
   }
   h = h.replace(/\/.*$/, "");                        // 去掉可能的路径

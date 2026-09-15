@@ -149,11 +149,22 @@ def run(r) -> None:
                 # ast.unparse 能稳定还原成 "str(event.session)"。
                 if not isinstance(node, ast.Call):
                     continue
-                try:
-                    expr = ast.unparse(node)
-                except Exception:
+                # ⚠️ 用 **AST 结构**判断，不要用 ast.unparse() 的字符串前缀：
+                #    前缀匹配会被 `str(event.session_id)` 这类**不同**的属性
+                #    误命中（session_id 是合法用法），也会被空格/换行差别绕过。
+                #    判据：实参必须是属性链，且**最后一个属性恰好是 session**，
+                #    接收者必须是 `event` 或 `self.event`。
+                if not node.args:
                     continue
-                if expr.startswith("str(event.session") or expr.startswith("str(self.event.session"):
+                arg = node.args[0]
+                if not isinstance(arg, ast.Attribute) or arg.attr != "session":
+                    continue
+                recv = arg.value
+                is_event = (isinstance(recv, ast.Name) and recv.id == "event")
+                is_self_event = (
+                    isinstance(recv, ast.Attribute) and recv.attr == "event"
+                    and isinstance(recv.value, ast.Name) and recv.value.id == "self")
+                if is_event or is_self_event:
                     bad_here.append(getattr(node, "lineno", 0))
             if not bad_here:
                 continue

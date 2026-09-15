@@ -54,6 +54,10 @@ function connect() {
             data: {ok: true, url: msg.params.url, mime: "application/octet-stream"}}));
           return;
         }
+        // ⚠️ wait_for **故意不回应**：上面那个"取消泄漏"用例靠的就是
+        //    命令超时，若这里回一条立即结果，超时路径就永远走不到，
+        //    用例变成"看起来在测超时、其实每次都被立刻满足"。
+        if (msg.name === "wait_for") return;
         const data =
           msg.name === "list_tabs"
             ? {tabs: [

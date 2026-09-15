@@ -38,7 +38,68 @@ CLAIMS = [
      "browser-bridge/shared.js", r"CONFIRM_ONLY_COMMANDS"),
     ("上传上限不超过单条消息能扛的范围",
      "backends/extension_backend.py", r"MAX_UPLOAD_BYTES = 32 \* 1024 \* 1024"),
+    ("上传超时/页面超时不会被换后端重试（indeterminate）",
+     "backends/base.py", r"indeterminate"),
+    ("buildWsUrl 接受 http/https 写法",
+     "browser-bridge/protocol.js", r"https\?"),
+    ("连接超时会关掉 socket 并重排重连",
+     "browser-bridge/background.js", r"scheduleReconnect"),
+    ("面板 refresh 捕获 sendMessage 失败",
+     "browser-bridge/popup.js", r"catch"),
+    ("cookie_get 在只读敏感确认集里（扩展侧）",
+     "browser-bridge/shared.js", r"CONFIRM_ONLY_COMMANDS"),
 ]
+
+
+def _check_upload_defaults(r):
+    """单独一条：upload 上限的**每一处默认值**都必须一致且不超过硬顶。
+
+    ⚠️ 这条是补上一次"只改了一半"的教训：我把
+    ExtensionBackend.MAX_UPLOAD_BYTES 降到 32MB，却没改 schema / main.py /
+    README 的默认值 —— 那些默认值（200MB）会被传下去，硬顶形同虚设。
+    """
+    import json
+    import re
+    bad = []
+    ceiling = 32 * 1024 * 1024
+
+    sch = json.loads((PLUGIN_DIR / "schema.json").read_text(encoding="utf-8"))
+    d = (sch.get("upload_max_bytes") or {}).get("default")
+    if d != ceiling:
+        bad.append(f"schema.json default={d}（期望 {ceiling}）")
+
+    main = src("main.py")
+    m = re.search(r'cfg\.get\("upload_max_bytes",\s*([^)]+)', main)
+    if not m:
+        bad.append("main.py 里找不到 upload_max_bytes 的兜底值")
+    else:
+        expr = m.group(1).strip()
+        try:
+            val = int(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307
+        except Exception:
+            val = None
+        if val != ceiling:
+            bad.append(f"main.py 兜底={expr}（期望 {ceiling}）")
+
+    rm = src("README.md")
+    if str(ceiling) not in rm:
+        bad.append(f"README.md 里没写 {ceiling}")
+
+    eb = src("backends/extension_backend.py")
+    mc = re.search(r"MAX_UPLOAD_BYTES = ([0-9]+ \* 1024 \* 1024)", eb)
+    if not mc:
+        bad.append("extension_backend.py 找不到 MAX_UPLOAD_BYTES")
+    else:
+        got = int(eval(mc.group(1), {"__builtins__": {}}, {}))  # noqa: S307
+        if got != ceiling:
+            bad.append(f"MAX_UPLOAD_BYTES={got}（期望 {ceiling}）")
+
+    # main.py 必须**真的钳制**到扩展后端的上限
+    if "MAX_UPLOAD_BYTES" not in main:
+        bad.append("main.py 没有按 MAX_UPLOAD_BYTES 钳制配置值")
+
+    r.ok("H2 upload 上限的四处默认值一致，且配置值被钳制在硬顶内",
+         not bad, f"不一致={bad or '无'}")
 
 
 def run(r):
@@ -58,3 +119,5 @@ def run(r):
     r.ok("H1 每一条写在提交信息/README 里的修复都真的在代码里",
          not bad,
          f"未落实={bad or '无'}（共核对 {len(CLAIMS)} 条声称）")
+
+    _check_upload_defaults(r)

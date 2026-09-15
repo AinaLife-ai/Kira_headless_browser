@@ -138,7 +138,22 @@ class BrowserPlugin(BasePlugin):
         #   如果你希望插件永远不超过框架上限，把它设为 true 再配合
         #   op_timeout_ratio 使用。
         # 扩展桥的大小限制（走 WebSocket 传输，需要单独钳制）
-        self.upload_max_bytes = int(cfg.get("upload_max_bytes", 200 * 1024 * 1024) or 0)
+        # ⚠️ 兜底值必须与 schema.json 一致（32MB）。
+        #    另：在扩展后端改成"分多条消息流式传输"之前，配置值会被
+        #    ExtensionBackend.MAX_UPLOAD_BYTES 钳住 —— 否则用户把配置调到
+        #    200MB 会重新引入"单条消息 >500MB 峰值 + 267MB 单帧被拒"。
+        _umb = int(cfg.get("upload_max_bytes", 32 * 1024 * 1024) or 0)
+        try:
+            from backends.extension_backend import ExtensionBackend as _EB
+            _ceil = getattr(_EB, "MAX_UPLOAD_BYTES", 0)
+            if _ceil and _umb > _ceil:
+                logger.warning(
+                    f"upload_max_bytes={_umb} 超过单条消息能承载的上限，"
+                    f"已钳制到 {_ceil}（需多消息流式传输才能再调大）")
+                _umb = _ceil
+        except Exception:
+            pass
+        self.upload_max_bytes = _umb
         self.download_timeout = float(cfg.get("download_timeout", 600) or 600)
 
         self.op_timeout_follows_framework = _b(cfg.get("op_timeout_follows_framework", False))
@@ -205,12 +220,25 @@ class BrowserPlugin(BasePlugin):
                 fw = float(self.ctx.config.get_config(
                     "bot_config.agent.tool_call_timeout", 60.0) or 60.0)
                 if fw > 0:
-                    tuned = max(5.0, fw * self.op_timeout_ratio)
+                    # ⚠️ ratio 必须是 (0,1)：0 或负数会算出无意义的超时，
+                    #    >=1 会让插件的 deadline 越过框架自己的超时，
+                    #    变成"框架先取消、插件还没等到结果"。
+                    r = self.op_timeout_ratio
+                    if not (0.0 < r < 1.0):
+                        logger.warning(
+                            f"op_timeout_ratio={r} 不合法（须 0<ratio<1），"
+                            f"本次改用 0.8")
+                        r = 0.8
+                    tuned = fw * r
+                    # 下限取 min(5.0, 目标值)，**绝不能**被 5 秒顶到框架超时
+                    # 之上：fw 很小时（如 6s），max(5, 4.8) 会变成 5，仍可能
+                    # 撞上框架取消；这里保证 tuned 始终 < fw。
+                    tuned = max(min(5.0, tuned), tuned)
+                    tuned = min(tuned, fw * 0.95)
                     self._headless_cfg["op_timeout"] = round(tuned, 1)
                     self._headless_cfg["action_timeout"] = round(min(tuned, fw * 0.5), 1)
                     logger.info(
-                        f"op_timeout 已跟随框架（{fw}s × {self.op_timeout_ratio}）"
-                        f"= {tuned}s")
+                        f"op_timeout 已跟随框架（{fw}s × {r}）= {round(tuned, 1)}s")
             except Exception as e:
                 logger.debug(f"读取框架 tool_call_timeout 失败，保持插件默认: {e}")
         else:
@@ -303,6 +331,14 @@ class BrowserPlugin(BasePlugin):
                 # 首次成功调用：如果扩展没连上，顺手把安装引导捎给用户
                 # （只带一次，不刷屏）
                 return self._attach_setup_notice(out)
+            if getattr(res, "indeterminate", False):
+                # ⚠️ 命令**可能已经在浏览器里生效**，只是没等到回执。
+                #    此时换后端重试 = 同一个点击/输入做两次。
+                #    宁可如实告诉模型"不确定"，也不要重复执行。
+                logger.info(f"[{method}] 结果不确定（可能已执行），不再换后端重试")
+                return (f"⚠️ {res.error}\n"
+                        f"这条操作**可能已经在浏览器里生效了**，所以没有自动重试"
+                        f"（避免重复执行）。请先查看页面当前状态，再决定要不要重做。")
             if getattr(res, "declined", False):
                 # ⚠️ 用户明确拒绝了，**立刻停手**，绝不换后端重试。
                 #    否则会出现「我点了拒绝，结果插件换条路把事情做了」——

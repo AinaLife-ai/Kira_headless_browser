@@ -13,23 +13,33 @@ import re
 _PROBE_JS = r'''
 import { buildWsUrl } from "__URI__";
 const cases = [
-  ["::1",             "ws://[::1]:5267"],
-  ["0:0:0:0:0:0:0:1", "ws://[0:0:0:0:0:0:0:1]:5267"],
-  ["::ffff:127.0.0.1","ws://[::ffff:127.0.0.1]:5267"],
-  ["[::1]",           "ws://[::1]:5267"],
-  ["127.0.0.1",       "ws://127.0.0.1:5267"],
-  ["localhost:5267",  "ws://localhost:5267"],
-  ["example.com",     "wss://example.com:5267"],
+  ["::1",              "ws:",  "[::1]:5267"],
+  // new URL() 会把 IPv6 规范化：展开写法 -> 压缩写法，
+  // v4-mapped 会转成十六进制形式。这里按**规范形式**断言。
+  ["0:0:0:0:0:0:0:1",  "ws:",  "[::1]:5267"],
+  ["::ffff:127.0.0.1", "ws:",  "[::ffff:7f00:1]:5267"],
+  ["[::1]",            "ws:",  "[::1]:5267"],
+  ["127.0.0.1",        "ws:",  "127.0.0.1:5267"],
+  ["http://127.0.0.1:5267", "ws:", "127.0.0.1:5267"],
+  ["localhost:5267",   "ws:",  "localhost:5267"],
+  ["example.com",      "wss:", "example.com:5267"],
+  ["https://example.com", "wss:", "example.com:5267"],
 ];
 let bad = [];
-for (const [h, want] of cases) {
-  let got;
-  try { got = buildWsUrl(h, 5267, "T"); } catch (e) { got = "THREW:" + e.message; }
-  if (!got.startsWith(want)) bad.push(h + " -> " + got + " (expected " + want + ")");
+for (const [h, wantScheme, wantHost] of cases) {
+  let u;
+  try { u = new URL(buildWsUrl(h, 5267, "T")); }
+  catch (e) { bad.push(h + " -> THREW " + e.message); continue; }
+  // 精确比较：协议 + host（host 含端口），不用 startsWith
+  if (u.protocol !== wantScheme || u.host !== wantHost) {
+    bad.push(h + " -> " + u.protocol + "//" + u.host + " (expected "
+             + wantScheme + "//" + wantHost + ")");
+  }
 }
 if (bad.length) { console.log(bad.join(" ; ")); process.exit(1); }
 console.log("OK");
 '''
+
 
 import os as _os
 import shutil as _sh
@@ -122,8 +132,14 @@ def run(r) -> None:
     r.ok("B2.3 显式 ws:// 连非本机时拒绝（不静默发明文）",
          'scheme === "ws" && !loopback' in pjs and "拒绝以明文 ws://" in pjs)
     # 用户填 wss://xxx 时要能解析出 scheme（否则连不上远程）
-    r.ok("B2.4 支持用户在地址里写 ws:// / wss://",
-         r"^(wss?):\/\/" in pjs or "wss?:" in pjs)
+    # ⚠️ 不能只匹配源码里的字面量 `^(wss?)://` —— 现在这个正则扩展成
+    #    同时接受 http/https（面板上用户很自然会粘 http://host:port），
+    #    写死字面量会导致一改实现就误报。改为**行为级**断言：真跑一遍，
+    #    确认各种写法都能被正确归一。
+    # 源码层面确认 scheme 解析接受 ws/wss/http/https（行为由 B2.7 真跑覆盖）
+    r.ok("B2.4 支持用户在地址里写 ws:// / wss:// / http://",
+         "wss?" in pjs and "https?" in pjs,
+         "地址栏允许 ws/wss 以及误填的 http/https")
     # 扩展下载不允许跟随重定向（跨协议会带出 cookie）
     # ⚠️ 只在下**载处理器内部**找这个选项 —— 全文搜会命中注释或别处，
     #    下载里删掉了也照样通过。
