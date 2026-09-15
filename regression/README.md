@@ -37,6 +37,8 @@ KIRA_PLUGIN_DIR=/path/to/other-copy python3 regression/run_all.py
 | **`scroll` 报成功但没动** | smooth 是异步的，截图拿到旧位置 | `运行时 R10` |
 | **扩展 async 回调没兜异常** | unhandled rejection 会让 worker 掉线 | `接线完整性 F1/F2` |
 | **两后端返回字段不一致** | 同一工具随路由切换给出不同形状的结果 | `返回契约一致性 F1` |
+| **方法被调用但没定义** | 截图/文件发送直接 `AttributeError`，而语法检查全绿 | `调用图完整性 A1` |
+| **面板 API 路径用了旧插件 id** | 面板 404，令牌读不出来 | `静态一致性 A14` |
 
 ---
 
@@ -55,7 +57,8 @@ regression/
 │   ├── bridge_e2e.py       真实 WebSocket 端到端
 │   ├── content_dom.py      扩展点击行为（真实 DOM）
 │   ├── wiring.py           接线完整性（配置接通 / 数据透传）
-│   └── contract.py         两后端返回契约一致性
+│   ├── contract.py         两后端返回契约一致性
+│   └── callgraph.py        调用图完整性（未定义方法 / 签名合规）
 ├── stubs/                  让插件能被 import 的最小替身（不需要真的 KiraAI）
 │   ├── core/               框架接口的最小实现
 │   └── playwright/         **语义忠实的**假 Playwright（见下）

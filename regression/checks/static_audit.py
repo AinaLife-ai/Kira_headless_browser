@@ -137,6 +137,26 @@ def run(r) -> None:
     r.ok("A13 JS 模块的 import 符号都在目标模块导出",
          not bad, f"缺={bad or '无'}")
 
+    # A14 硬编码的插件 id 必须与 manifest 一致
+    #     （面板 API 路径 / WS 路径 / 扩展路径都依赖它，
+    #      对不上就是 404 或连不上，而且"看起来都写对了"）
+    pid = man["plugin_id"]
+    hard = []
+    for rel in ("web/index.html", "browser-bridge/protocol.js"):
+        if not exists(rel):
+            continue
+        body = src(rel)
+        for i, ln in enumerate(body.splitlines(), 1):
+            if "/api/plugin/" in ln or "/ws/plugin/" in ln:
+                # 该行必须含正确的 plugin_id，或者是动态拼接
+                if f"/api/plugin/{pid}" in ln or f"/ws/plugin/{pid}" in ln:
+                    continue
+                if "plugin_id" in ln or "${" in ln or "ws_path" in ln:
+                    continue          # 动态拼接，OK
+                hard.append(f"{rel}:{i} {ln.strip()[:70]}")
+    r.ok("A14 硬编码的插件 id 与 manifest 一致", not hard,
+         f"不一致={hard or '无'}（plugin_id={pid}）")
+
     # ══════════════════════════════════════════════════════════════
     section("B. README 与代码一致性")
     # ══════════════════════════════════════════════════════════════
@@ -144,7 +164,11 @@ def run(r) -> None:
         r.warn("README.md 不存在")
     else:
         readme = src("README.md")
-        mentioned = set(re.findall(r'browser_[a-z_]+', readme))
+        # 只认**工具名**：browser_ 前缀且后面是工具命名风格。
+        # 别把文件名（browser_bridge.py）或配置项（browser_channel）算进来 ——
+        # 这里额外排除已知不是工具的标识。
+        mentioned = set(re.findall(r'\bbrowser_[a-z_]+\b', readme))
+        mentioned -= {"browser_bridge", "browser_channel"}
         nonexistent = sorted(mentioned - ext_names - set(sch) - {"browser_send_file"})
         r.ok("B1 README 提到的工具都存在（或已标注为废弃）",
              not nonexistent, f"不存在的={nonexistent or '无'}")

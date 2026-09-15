@@ -165,7 +165,10 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const API = "/api/plugin/kira_browser_bridge";
+// ⚠️ 这里的插件 id 必须与 manifest.json 的 plugin_id 一致。
+//    框架把插件 API 挂在 /api/plugin/{plugin_id}/... 下，
+//    id 对不上就是 404（面板"令牌读取失败"，且重载也不会有反应）。
+const API = "/api/plugin/headless_browser";
 
 function $(id) { return document.getElementById(id); }
 

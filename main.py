@@ -341,6 +341,72 @@ class BrowserPlugin(BasePlugin):
         except Exception:
             return None
 
+    # ══════════════════════════════════════════════════════════════════
+    #  发送图片 / 文件到会话
+    #
+    #  注意：event.session 是 Session **对象**，不是字符串 ——
+    #  直接 str() 它拿到的是 repr（不是 "adapter:type:id"），
+    #  适配器会解析失败。正确做法是用 event.sid（框架提供的属性）。
+    # ══════════════════════════════════════════════════════════════════
+
+    def _sid_of(self, event) -> str:
+        """取会话字符串 "adapter:sessiotype:id"。
+
+        优先用框架的 ``event.sid``；拿不到再退回 ``str(event.session)``
+        （Session 有 __str__，正常情况下等价）。
+        """
+        sid = getattr(event, "sid", None)
+        if isinstance(sid, str) and sid.count(":") == 2:
+            return sid
+        sess = getattr(event, "session", None)
+        if sess is None:
+            return ""
+        s = str(sess)
+        return s if s.count(":") == 2 else ""
+
+    async def _adapter_for(self, event):
+        """解析出 (adapter, chat_type, target_id)。"""
+        sid = self._sid_of(event)
+        parts = sid.split(":")
+        if len(parts) != 3:
+            logger.error(f"无法解析会话标识：{sid!r}")
+            return None
+        adapter = self.ctx.adapter_mgr.get_adapter(parts[0])
+        if not adapter:
+            logger.error(f"未找到适配器: {parts[0]}")
+            return None
+        return adapter, parts[1], parts[2]
+
+    async def _send_chain(self, event, elements) -> bool:
+        got = await self._adapter_for(event)
+        if not got:
+            return False
+        adapter, chat_type, target = got
+        try:
+            chain = MessageChain(elements)
+            if chat_type == "gm":
+                r = await adapter.send_group_message(target, chain)
+            else:
+                r = await adapter.send_direct_message(target, chain)
+            ok = bool(r and getattr(r, "ok", False))
+            if not ok:
+                logger.error(f"发送失败: {r}")
+            return ok
+        except Exception as e:
+            logger.error(f"发送异常: {e}")
+            return False
+
+    async def _send_image(self, event, path: str) -> bool:
+        return await self._send_chain(event, [Image(image=path)])
+
+    async def _send_file(self, event, path: str, name: str = "") -> bool:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        fname = name or os.path.basename(path)
+        return await self._send_chain(event, [File(file=path, name=fname, size=str(size))])
+
     def _attach_setup_notice(self, text: str) -> str:
         """首次成功调用时，把「装扩展」的引导捎带一次。
 
