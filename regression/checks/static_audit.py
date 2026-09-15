@@ -348,6 +348,25 @@ def run(r) -> None:
          and "\"chunks\": chunks" not in _eb_code,
          "必须走分块流式；一次性下发 chunks 会在文件 >~12MiB 时断开连接")
 
+    # ⚠️ 架构不变量：**文件内容只能在页面侧累积，SW 只转发**。
+    #    原因：MV3 的 Service Worker 常驻内存紧、最容易被系统回收，
+    #    回收会让正在进行的上传直接断掉；页面上下文宽松得多。
+    #    实测：200MB 若在 SW 里攒 base64 峰值 ≈267MB；改成页面侧累积后
+    #    SW 峰值 ≈0.3MB（恒定），页面侧峰值 ≈1.0× 文件大小。
+    _cap3 = ext_file("capabilities.js")
+    _content3 = ext_file("content.js")
+    _cap_up = _cap3.split("async function upload(")[-1].split("async function uploadAbort(")
+    _cap_up = _cap_up[0] if len(_cap_up) > 1 else _cap3
+    _accum = ("parts.push" in _cap_up or ".push(data)" in _cap_up
+              or "chunks.push" in _cap_up or "join(" in _cap_up)
+    r.ok("C16h SW 侧上传只转发、不累积文件内容（内存不随文件增长）",
+         not _accum,
+         "capabilities.js 的上传路径里出现累积/拼接 —— SW 内存会随文件线性增长，"
+         "且有被 MV3 回收的风险")
+    r.ok("C16i 分块累积实现在页面侧（content.js）",
+         "_upSessions" in _content3 and "upload_chunk" in _content3,
+         "content.js 必须自己累积分块并实现 upload_chunk/finish")
+
     # 扩展侧要有对应的分块接收器。
     # ⚠️ 必须查**函数定义**，不能只查名字是否出现 ——
     #    名字在 export 名单里也会出现，函数体被删了照样"存在"。

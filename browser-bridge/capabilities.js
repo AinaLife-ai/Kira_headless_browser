@@ -138,31 +138,34 @@ async function execJs(params) {
 // ─── 2. 上传文件（内容由插件分块送来）──────────────────────────────────
 
 /**
- * 上传会话表。
+ * 上传中转。
  *
- * ⚠️ 为什么要有这个：整份文件塞进**一条** WebSocket 消息是行不通的 ——
- *    uvicorn 的 ws_max_size 默认 16 MiB，KiraAI 没覆盖它；实测整条帧
- *    超过 16 MiB 时对端会回 1009 并**关闭整个连接**，一次超大上传会把
- *    连接打断、连带后面所有命令一起崩。
- *    base64 又放大 4/3，所以"一条消息"的文件上限其实只有 ~12 MiB。
+ * ⚠️ 这里**刻意不累积任何文件内容** —— 每收到一块就立刻转发给内容脚本。
  *
- * → 改成：upload 只建立会话，之后每个分块单独一条消息送过来，
- *   扩展侧边收边拼，最后 finish 时一次性构造 File。
- *   这样单帧大小恒定（~340KB），内存与帧尺寸都与文件大小无关。
+ * 原因：MV3 的 Service Worker 常驻内存很紧，恰恰最容易被系统回收，
+ * 而回收会让正在进行的上传直接断掉。相比之下，页面上下文（内容脚本）
+ * 的内存宽松得多。所以：
+ *
+ *    插件 ──(upload_chunk)──▶ service worker ──(立即转发)──▶ 内容脚本累积
+ *                                    ↑
+ *                            峰值恒定为一块（~0.3MB），与文件大小无关
+ *
+ * 实测（Node 基线）：文件 200MB 时，若在 SW 里攒 base64，峰值 ≈ 267MB。
  */
-const _uploads = new Map();
+
+//: 只记"这次上传对应哪个 tab"，**不记文件内容**
+const _uploadTabs = new Map();
 
 function _uploadKey(id) {
   return String(id || "");
 }
 
-/** 开始一次上传：登记会话，把文件大小/上限先校验掉。 */
+/** 开始一次上传：解析 tab、把会话建到内容脚本里。 */
 async function upload(params) {
   const { selector, name, mime, limit, size, tab_id } = params;
   if (!selector) throw new Error("缺少 selector");
   if (!name) throw new Error("缺少文件名");
 
-  // 先按声明的大小做一次快速否决，避免白传一遍
   const declared = Number(size) || 0;
   const cap = Number(limit) || 0;
   if (cap > 0 && declared > cap) {
@@ -174,74 +177,66 @@ async function upload(params) {
 
   const id = "up_" + Date.now().toString(36) + "_"
     + Math.random().toString(36).slice(2, 10);
-  _uploads.set(_uploadKey(id), {
-    id, tabId: tab.id, selector, name,
-    path: params.path || name,
+
+  // 会话建在**页面侧**（那里负责累积）
+  await callContent(tab, "upload_begin", {
+    upload_id: id, selector, name,
     mime: mime || "application/octet-stream",
-    parts: [], received: 0, cap, expectIndex: 0, created: Date.now(),
-  });
-  // 顺手清掉过期的会话（比如插件中途崩了）
-  for (const [k, v] of _uploads) {
-    if (Date.now() - v.created > 10 * 60 * 1000) _uploads.delete(k);
+    size: declared, limit: cap,
+  }, 30000);
+
+  _uploadTabs.set(_uploadKey(id), { tabId: tab.id, created: Date.now() });
+  for (const [k, v] of _uploadTabs) {
+    if (Date.now() - v.created > 10 * 60 * 1000) _uploadTabs.delete(k);
   }
   return { ok: true, upload_id: id, url: tab.url };
 }
 
-/** 收一个分块。只做长度累加与拼接，**不逐块解码**（省内存）。 */
+/** 收一块就**立刻转发**，本层不留任何数据。 */
 async function uploadChunk(params) {
-  const st = _uploads.get(_uploadKey(params.upload_id));
+  const key = _uploadKey(params.upload_id);
+  const st = _uploadTabs.get(key);
   if (!st) throw new Error("上传会话不存在或已过期（请重新发起上传）");
   const { index, data } = params;
   if (typeof data !== "string" || !data) throw new Error("分块内容为空");
 
-  // 顺序校验：乱序/丢块会让拼出来的文件损坏，宁可明确报错
-  const idx = Number(index) || 0;
-  if (idx !== st.expectIndex) {
-    throw new Error(`分块顺序不对（期望 ${st.expectIndex}，收到 ${idx}）`);
-  }
-  // 扣掉 padding 再累加，得到**精确**的已收字节数
-  const pad = (data.match(/=+$/) || [""])[0].length;
-  st.received += Math.floor(((data.length - pad) * 3) / 4);
-  if (st.cap > 0 && st.received > st.cap) {
-    _uploads.delete(_uploadKey(st.id));
-    throw new Error(`文件超过上限 ${st.cap} 字节，已中止上传`);
-  }
-  st.parts.push(data);
-  st.expectIndex = idx + 1;
-  return { ok: true, received: st.received };
+  const tab = await resolveTab(st.tabId);
+  // ⚠️ 转发后立即返回、不保存 data —— 这一层的内存占用与文件大小无关。
+  return await callContent(tab, "upload_chunk", {
+    upload_id: params.upload_id, index, data,
+  }, 30000);
 }
 
-/** 收尾：此时才拼成完整 base64 并塞进 input[type=file]。 */
+/** 收尾：让内容脚本拼 File 并塞进 input。 */
 async function uploadFinish(params) {
   const key = _uploadKey(params.upload_id);
-  const st = _uploads.get(key);
+  const st = _uploadTabs.get(key);
   if (!st) throw new Error("上传会话不存在或已过期（请重新发起上传）");
-  _uploads.delete(key);
-
-  // 拼接前去掉各块末尾的 padding（块长已是 3 的倍数，正常不会有）
-  const fileBase64 = st.parts.map((x) => x.replace(/=+$/, "")).join("");
-  st.parts = [];   // 尽快释放
+  _uploadTabs.delete(key);
 
   const tab = await resolveTab(st.tabId);
-  assertInjectable(tab);
-  const res = await callContent(tab, "upload_blob", {
-    selector: st.selector,
-    name: st.name,
-    mime: st.mime,
-    base64: fileBase64,
-  }, 60000);
+  const res = await callContent(tab, "upload_finish", {
+    upload_id: params.upload_id,
+  }, 120000);
 
-  // ⚠️ 字段要与无头后端的 upload_file 返回**对齐**（契约检查 F1 会核对）：
-  //    path / name / size / url 一个都不能少。
-  //    扩展侧拿不到本地路径，这里回传插件声明的路径供上层显示。
-  return { ok: true, url: tab.url, name: st.name,
-           path: st.path || st.name, size: st.received,
+  return { ok: true, url: tab.url, name: res.name,
+           path: params.path || res.name, size: res.size,
            matched: res.matched };
 }
 
 /** 放弃这次上传（插件侧发块失败时会调）。 */
 async function uploadAbort(params) {
-  _uploads.delete(_uploadKey(params.upload_id));
+  const key = _uploadKey(params.upload_id);
+  const st = _uploadTabs.get(key);
+  _uploadTabs.delete(key);
+  if (st) {
+    try {
+      const tab = await resolveTab(st.tabId);
+      await callContent(tab, "upload_abort", { upload_id: params.upload_id }, 10000);
+    } catch (_) {
+      // 尽力而为：页面可能已经关了
+    }
+  }
   return { ok: true };
 }
 

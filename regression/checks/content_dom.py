@@ -166,6 +166,39 @@ def run(r) -> None:
 
         for item in data:
             r.ok(f"D {item['name']}", item["ok"], item.get("detail", ""))
+
+        # ── 分块流式上传：真实 DOM 下逐字节校验 ──────────────────────
+        #  ⚠️ 只做静态检查是不够的：这段链路的正确性取决于
+        #     "base64 → Uint8Array → Blob → File → input.files"
+        #     每一步的字节是否无损，以及分块顺序/上限是否真的生效。
+        #     这里用 jsdom 真跑一遍，把塞进 input.files 的内容读回来比对。
+        up = JS_DIR / "upload_stream.mjs"
+        if up.is_file():
+            env2 = dict(env)
+            # ⚠️ 必须把当前插件的根目录传下去，否则脚本会去测**默认目录**，
+            #    反向验证/多副本跑的时候等于没测。
+            env2["KIRA_PLUGIN_DIR"] = str(PLUGIN_DIR)
+            env2["UPLOAD_TARGET_MB"] = "1,5,20"
+            try:
+                p2 = subprocess.run(
+                    ["node", str(up)], cwd=str(JS_DIR),
+                    capture_output=True, text=True, env=env2, timeout=300)
+                out2 = (p2.stdout or "")
+                checks = [
+                    ("U1 分块上传在真实 DOM 下逐字节一致",
+                     "内容 ✓ 逐字节一致" in out2 and out2.count("内容 ✓") >= 3,
+                     [ln.strip() for ln in out2.splitlines()
+                      if "逐字节一致" in ln or "不一致" in ln][:3]),
+                    ("U2 乱序分块被拒绝",
+                     "乱序分块是否被拒: ✓ 已拒绝" in out2, ""),
+                    ("U3 上限为 0 时不误拒",
+                     "未误拒" in out2, ""),
+                ]
+                for name, ok2, det in checks:
+                    r.ok(name, ok2, str(det)[:160] if not ok2 else
+                         "base64→Uint8Array→Blob→File 全链路字节无损")
+            except subprocess.TimeoutExpired:
+                r.ok("U0 分块上传 DOM 测试", False, "超时")
     finally:
         # 无论成功失败都要清掉临时 runner，否则会污染下一次的文件清点
         try:

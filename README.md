@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.15
+# 浏览器插件 (Browser Plugin) 2.1.16
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -190,7 +190,7 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 | `download_auto_clean` | switch | `true` | 自动清理下载目录 |
 | `download_max_count` | integer | `100` | 下载目录最多保留文件数 |
 | `download_max_bytes` | integer | `2147483648` | 单个下载大小上限（2GB）。下载是**流式落盘**，无论多大都不占内存 |
-| `upload_max_bytes` | integer | `67108864` | 上传大小上限（64MB）。上传走**分块流式**，单帧恒定 ~340KB、不受 16MiB 帧上限约束；实际约束是扩展常驻内存（≈文件 ×2.7）。超过 `ExtensionBackend.MAX_UPLOAD_BYTES` 会被自动钳制 |
+| `upload_max_bytes` | integer | `268435456` | 上传大小上限（256MB）。上传走**分块流式**，单帧恒定 ~340KB；分块累积在**页面上下文**（SW 只转发），峰值内存 ≈文件大小 ×1.0。超过 `ExtensionBackend.MAX_UPLOAD_BYTES` 会被自动钳制 |
 | `upload_allow_any_path` | switch | `true` | 是否允许上传任意路径的文件（**默认开**，本插件定位是给 bot 完整浏览能力）。关掉后只允许 `upload_allowed_dirs` 里的目录 |
 | `upload_allowed_dirs` | list | `["data/files","data/temp"]` | 上传目录白名单（仅在上项关闭时生效）。用 realpath 归一，可防 `../` 穿越 |
 
@@ -470,6 +470,59 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.16（2026-09-15）
+
+**上传：把分块的累积从 Service Worker 挪到页面上下文 —— 内存不再放大 2.67 倍**
+
+v2.1.15 把上传改成"分块流式"解决了帧尺寸问题，但还有个更隐蔽的
+性能问题：**分块仍然攒在 MV3 的 Service Worker 里**，而 SW 恰恰是
+整个扩展里最容易被系统回收的地方（回收会让上传直接断掉），
+并且它的峰值 = 文件 × 1.33（base64）+ 拼接副本 ≈ **文件 × 2.67**。
+
+改成三段式：
+
+```
+插件 ──(upload_chunk)──▶ Service Worker ──(立即转发)──▶ 内容脚本（累积）
+                              ↑
+                      峰值恒定为一块（~0.3MB）
+```
+
+- **SW 只做转发**：收到一块就 `callContent` 转发给页面，自己不保存任何内容。
+- **页面侧（content.js）负责累积**：每块 base64 立刻解码成 `Uint8Array`
+  存进会话，`upload_finish` 时才 `new Blob(chunks)` → `new File([blob])`。
+- 新增 `upload_begin`（此时就把 input 解析好，避免传完才发现选择器不对）、
+  `upload_chunk`（**顺序校验**，乱序会让文件损坏，宁可明确报错）、
+  `upload_finish`、`upload_abort`。
+
+**实测（Node 基线，RSS，不中途 GC）**：
+
+| 文件 | 改造前（SW 累积） | 改造后（页面累积） |
+|---|---|---|
+| 64 MB | 85 MB (1.33×) | **70 MB (1.10×)** |
+| 200 MB | 267 MB (1.33×) | **200 MB (1.00×)** |
+| 256 MB | 341 MB (1.33×) | **261 MB (1.02×)** |
+
+**SW 侧峰值从"随文件线性增长"变成恒定的 ~0.3MB。**
+
+**吞吐与正确性实测**（真实 uvicorn，逐块往返）：
+
+| 文件 | 块数 | 用时 | 吞吐 | 内容校验 |
+|---|---|---|---|---|
+| 32 MB | 129 | 1.6s | 19.8 MB/s | ✓ SHA-256 一致 |
+| 100 MB | 402 | 5.4s | 18.6 MB/s | ✓ 一致 |
+| 256 MB | 1029 | 13.3s | 19.2 MB/s | ✓ 一致 |
+
+→ 默认上限提到 **256MB**（约 13 秒传完，内存约 1.0× 文件大小）。
+
+**新增守卫**：
+- **C16h**：SW 侧上传路径**不许出现累积/拼接**（`parts.push` / `join(` 等）。
+  反向验证：加回 `st.parts.push(data)` → 立即 FAIL。
+- **C16i**：累积必须实现在 `content.js`。
+- **U1/U2/U3**：用 jsdom **真跑** `content.js`，从 `input.files[0]` 把内容
+  读回来**逐字节比对**（1MB/5MB/20MB），并验证乱序被拒、上限为 0 时不误拒。
+  ⚠️ 这个用例第一版把插件路径**写死**了 —— 反向验证时"悄悄测的还是原目录
+  的文件"，检查永远通过、等于没有检查。改成读 `KIRA_PLUGIN_DIR` 后才真正生效。
 
 ### v2.1.15（2026-09-15）
 

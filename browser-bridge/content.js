@@ -233,6 +233,128 @@
 
   // ─── 命令实现 ──────────────────────────────────────────────────────────────
 
+  // ─── 上传会话（分块流式接收）──────────────────────────────────────────────
+  //
+  // ⚠️ 为什么累积必须发生在**这里**（页面上下文），而不是 service worker：
+  //    MV3 的 Service Worker 常驻内存很紧，恰恰是最容易被系统回收的地方，
+  //    而回收会让正在进行的上传直接断掉。页面上下文的内存宽松得多。
+  //    背景脚本因此改成"每收到一块就立刻转发"，自己不留 —— 它的峰值
+  //    恒定为一块（~0.3MB），与文件大小无关。
+  //
+  //    实测（Node 基线，堆外分配另计）：
+  //      文件 200MB 时，若在 SW 里攒 base64，峰值 ≈ 267MB；
+  //      改成这里累积后，SW 峰值 ≈ 0.3MB。
+  const _upSessions = new Map();
+
+  function _u64(b64) {
+    const bin = atob(b64);
+    const u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return u;
+  }
+
+  function _cleanupUploads() {
+    const now = Date.now();
+    for (const [k, v] of _upSessions) {
+      if (now - v.created > 10 * 60 * 1000) _upSessions.delete(k);
+    }
+  }
+
+  /** 建立上传会话：此时就把目标 input 解析好，避免最后才发现选择器不对。 */
+  function uploadBegin(payload) {
+    const { upload_id: id, selector, name, mime, size, limit } = payload;
+    if (!id) return fail("缺少 upload_id");
+    if (!selector) return fail("缺少 selector");
+
+    const declared = Number(size) || 0;
+    const cap = Number(limit) || 0;
+    if (cap > 0 && declared > cap) {
+      return fail(`文件过大（${declared} > 上限 ${cap} 字节），已拒绝上传`);
+    }
+
+    let el;
+    try {
+      el = document.querySelector(selector);
+    } catch (e) {
+      return fail(`选择器语法错误：${e.message}`);
+    }
+    if (!el) return fail(`找不到文件输入框「${selector}」`);
+    if (el.tagName.toLowerCase() !== "input" || el.type !== "file") {
+      return fail(`元素 ${selector} 不是文件输入框（tag=${el.tagName}, type=${el.type}）`);
+    }
+
+    _cleanupUploads();
+    _upSessions.set(id, {
+      id, el, name: name || "upload.bin",
+      mime: mime || "application/octet-stream",
+      declared, cap, chunks: [], received: 0,
+      expectIndex: 0, created: Date.now(),
+    });
+    return { ok: true, upload_id: id, size: declared };
+  }
+
+  /** 收一块：base64 → Uint8Array 后就地存起来（不再保留 base64 字符串）。 */
+  function uploadChunk(payload) {
+    const st = _upSessions.get(payload.upload_id);
+    if (!st) return fail("上传会话不存在或已过期");
+    if (typeof payload.data !== "string" || !payload.data) {
+      return fail("分块内容为空");
+    }
+    const idx = Number(payload.index) || 0;
+    if (idx !== st.expectIndex) {
+      return fail(`分块顺序不对（期望 ${st.expectIndex}，收到 ${idx}）`);
+    }
+
+    let bytes;
+    try {
+      bytes = _u64(payload.data);
+    } catch (e) {
+      return fail(`分块 base64 解码失败：${e.message}`);
+    }
+    st.received += bytes.length;
+    if (st.cap > 0 && st.received > st.cap) {
+      _upSessions.delete(st.id);
+      return fail(`文件超过上限 ${st.cap} 字节，已中止上传`);
+    }
+    st.chunks.push(bytes);
+    st.expectIndex = idx + 1;
+    return { ok: true, received: st.received };
+  }
+
+  /** 收尾：拼成 File 塞进 input[type=file]。 */
+  function uploadFinish(payload) {
+    const st = _upSessions.get(payload.upload_id);
+    if (!st) return fail("上传会话不存在或已过期");
+    _upSessions.delete(st.id);
+
+    const blob = new Blob(st.chunks, { type: st.mime });
+    st.chunks = [];                       // 尽快让底层缓冲可回收
+    const file = new File([blob], st.name, { type: st.mime });
+
+    // 用 DataTransfer 造 FileList 塞进去（绕过系统文件对话框）
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const el = st.el;
+    el.files = dt.files;
+
+    flash(el);
+    // 受控组件（React/Vue）需要这两个事件才会同步内部状态
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+
+    return {
+      ok: true,
+      matched: `input[type=file]${el.id ? "#" + el.id : ""}`,
+      name: st.name, size: file.size,
+    };
+  }
+
+  /** 放弃这次上传。 */
+  function uploadAbort(payload) {
+    _upSessions.delete(payload.upload_id);
+    return { ok: true };
+  }
+
   const handlers = {
     ping() {
       return { ok: true, url: location.href, ready: !!document.body };
@@ -308,6 +430,11 @@
       }
       return { found: false };
     },
+
+    upload_begin: (p) => uploadBegin(p),
+    upload_chunk: (p) => uploadChunk(p),
+    upload_finish: (p) => uploadFinish(p),
+    upload_abort: (p) => uploadAbort(p),
 
     upload_blob(payload) {
       const { selector, name, mime, base64 } = payload;

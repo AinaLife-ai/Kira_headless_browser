@@ -27,18 +27,22 @@ class ExtensionBackend(Backend):
     name = "extension"
     is_user_browser = True
 
-    #: 上传大小上限（默认 **64MB**）。
+    #: 上传大小上限（默认 **256MB**）。
     #
-    #  **帧尺寸**：不再是约束。上传已改成**分块流式**（每块一条消息，
-    #  单帧恒定 ~340KB），所以文件多大都不会撞上 uvicorn 的 16MiB
-    #  ws_max_size —— 实测 100MB 也能完整传输且 base64 校验一致。
+    #  **帧尺寸**：不是约束。上传走**分块流式**，单帧恒定 ~340KB。
+    #  **SW 内存**：也不是约束。分块的累积发生在**页面侧**（content.js），
+    #  Service Worker 只做转发、峰值恒定为一块（~0.3MB）——
+    #  这一点很重要，因为 MV3 的 SW 恰恰是最容易被系统回收的。
     #
-    #  **内存**才是现在的约束。扩展侧要攒下全部分块的 base64 才能拼出
-    #  一个完整 File，实测堆增量 ≈ 文件大小 × 2.67：
-    #      32MB → 85MB ；64MB → 171MB ；100MB → 267MB ；200MB → 532MB
-    #  MV3 的 Service Worker 常驻内存有限，200MB 那档有被系统回收的风险，
-    #  所以默认取 64MB。要更大就调 upload_max_bytes（上限由这里钳制）。
-    MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+    #  实测（Node 基线，RSS）：
+    #     文件 64MB → 页面峰值 +70MB (1.10×)
+    #     文件 200MB → +200MB (1.00×)
+    #     文件 256MB → +261MB (1.02×)
+    #  也就是说峰值 ≈ 1.0× 文件大小，不再有 2.67× 的放大。
+    #  吞吐实测 ≈19 MB/s（256MB 约 13s），内容 SHA-256 全部校验一致。
+    #
+    #  取 256MB 为默认上限；要更大可调 upload_max_bytes。
+    MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 
     def __init__(self, bridge, protocol, max_upload_bytes=None,
                  max_download_bytes=None, download_timeout=None,

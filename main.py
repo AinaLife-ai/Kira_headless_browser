@@ -142,7 +142,7 @@ class BrowserPlugin(BasePlugin):
         #    另：在扩展后端改成"分多条消息流式传输"之前，配置值会被
         #    ExtensionBackend.MAX_UPLOAD_BYTES 钳住 —— 否则用户把配置调到
         #    200MB 会重新引入"单条消息 >500MB 峰值 + 267MB 单帧被拒"。
-        _umb = int(cfg.get("upload_max_bytes", 64 * 1024 * 1024) or 0)
+        _umb = int(cfg.get("upload_max_bytes", 256 * 1024 * 1024) or 0)
         try:
             from backends.extension_backend import ExtensionBackend as _EB
             _ceil = getattr(_EB, "MAX_UPLOAD_BYTES", 0)
