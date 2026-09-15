@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.8
+# 浏览器插件 (Browser Plugin) 2.1.9
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -470,6 +470,51 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.9（2026-09-15）
+
+**按 CodeRabbit 第七轮审查修复 11 项**：
+
+- 🔴 **上一轮我改出来的 Regression**：`test_ping` 里调用了
+  `probeServerRoundTrip(5000)`，但**这个函数从未定义** —— 每次点"测试"
+  都会抛 `ReferenceError`，被 catch 后统一显示"测试失败"。
+  → 补上实现（挂一次性监听等**服务端心跳 ping** 到达并回 pong）；
+  并把超时从 5 秒改成 **30 秒** —— 心跳间隔是 25 秒，
+  用 5 秒会把**正常链路也判超时**。
+- 🔴 **上传分块大小不是 3 的倍数**：插件侧按 `256 * 1024` 分块，
+  而 `256*1024 % 3 = 1` —— base64 每 3 字节编 4 字符，块长不是 3 的倍数时
+  **每块末尾都带 padding**，独立编码后直接拼接就不再是合法 base64，
+  `atob` 会抛 `InvalidCharacterError`。**大于一块的文件上传必挂。**
+  → 改为 255KB（能被 3 整除），并在扩展侧拼接前**去掉各块 padding** 兜底。
+- 🔴 **无头下载的 HTTPS→HTTP 重定向会带出非 Secure cookie**（CWE-319）：
+  aiohttp 只过滤 `Secure` cookie，同域降级到 http 时**普通会话 cookie 照样发出去**。
+  → 带 cookie 时**不自动跟随重定向**，自己跟且**每一跳都要求 HTTPS**；
+  一旦要降级就丢掉 cookie jar 再继续（宁可匿名，不明文带凭据）。
+- 🔴 **SSRF：完整写法的 IPv6 回环被漏判**：`0:0:0:0:0:0:0:1`（即 `::1` 的完整写法）
+  被我上一轮的"拆内嵌 IPv4"逻辑误拆成 `1` → 归一成 `0.0.0.1` →
+  `is_local_host` 反而**漏掉**回环地址。→ 先判断是否为合法 IPv6，
+  只有**真正的 v4-mapped** 才拆。
+- **`buildWsUrl` 会把裸 IPv6 的冒号当端口剥掉**：`::1` → 剥成 `::`
+  → 判定为非回环 → 生成 `wss://:::5267/...`，连接直接失败。
+  → 只在「带方括号的 IPv6」或「单冒号主机」时才剥端口。
+- **`headless_profile_mode` 的代码兜底值与 schema 不一致**：
+  schema 默认 `inherit`（复制真实数据），而 `main.py` 的 `cfg.get` 兜底写的是
+  `persistent` —— 配置文件缺这一项时会**静默退回插件自己的 profile**，
+  用户以为继承了登录态其实没有。→ 改为 `inherit`。
+
+**回归测试套件 5 项**：
+- `runtime_behavior` 每次跑都在系统临时目录留一个 `kira_reg_*` 目录
+  → 改用 `TemporaryDirectory`（正常/异常都会清理）。
+- `R4` 只断"element_ 剩几张" → 改成**三条一起断**：总数到上限、
+  element_ 未被全删、留下的确实是较新的那批。
+  顺带修了随机性：测试里显式区分 mtime（同一 tick 创建的文件 mtime 相同，
+  排序结果取决于文件名，断言会忽过忽不过）。
+- `R10` 在 `scroll` 处理器被删/改名时会 `IndexError` **中断整组检查**、
+  把后面的断言全跳过（假绿）→ 先判断分隔符存在再解析。
+- `security_rules` 的"下载不跟随重定向"用全文搜 → 改成只在
+  `downloadViaSession` 内部找。
+- `tool_merge` 的 C1 在取不到 enum 时**跳过校验** → 改为判 FAIL；
+  但**非 action 式**的工具（`browser_wait` 等）本来就没 enum，不该要求。
 
 ### v2.1.8（2026-09-15）
 

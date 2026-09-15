@@ -109,11 +109,19 @@ def run(r) -> None:
             #    不能全文搜 —— 全文搜会命中别处的同名动作，
             #    导致"目标工具删了这个 action"也照样 PASS。
             enums = _tool_enum(main, newtool)
-            for a in [x.strip() for x in action.split("/") if x.strip()]:
-                # 目标工具的 enum 里必须有这个动作
-                if enums and a not in enums:
-                    ok = False
-                    missing.append(f"{old}({newtool}.enum 里没有 {a})")
+            # 有些目标工具本来就**不是** action 式的（browser_wait / browser_tabs
+            # 等），没有 enum 是正常的，不该要求 action 存在。
+            # 判据：它的参数里声明了 action/mode 吗？声明了才要求 enum。
+            _seg = main[main.find(f'name="{newtool}"'):][:1200]
+            _has_sel = bool(re.search(r'"(action|mode)":\s*\{"type"', _seg))
+            if _has_sel and not enums:
+                ok = False
+                missing.append(f"{old}({newtool} 声明了 action/mode 但没有可解析的 enum)")
+            elif enums:
+                for a in [x.strip() for x in action.split("/") if x.strip()]:
+                    if a not in enums:
+                        ok = False
+                        missing.append(f"{old}({newtool}.enum 里没有 {a})")
         if not ok and (newtool not in now):
             missing.append(old)
         r.note(f"{'✅' if ok else '❌'} {old:<28} → {newtool}"

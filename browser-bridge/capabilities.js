@@ -143,8 +143,10 @@ async function upload(params) {
     throw new Error(`文件过大（约 ${approx} > 上限 ${limit} 字节），已拒绝上传`);
   }
 
-  // 拼接成一条 base64（字符串拼接，不再生成中间字节副本）
-  const fileBase64 = b64s.join("");
+  // ⚠️ 拼接前要**去掉各块末尾的 padding**：
+  //    插件侧虽然已用 3 的倍数分块（不会产生 padding），
+  //    但历史数据/别的调用方可能带 padding —— 拼进来会让整体非法。
+  const fileBase64 = b64s.map((x) => x.replace(/=+$/, "")).join("");
 
   const res = await callContent(tab, "upload_blob", {
     selector,

@@ -150,7 +150,10 @@ class BrowserPlugin(BasePlugin):
             "timeout": cfg.get("timeout", 45),
             "default_viewport": cfg.get("default_viewport", "1920x1080"),
             "user_agent": cfg.get("user_agent"),
-            "headless_profile_mode": cfg.get("headless_profile_mode", "persistent"),
+            # 兜底值必须与 schema.json 的默认一致（inherit）——
+            # 写成 persistent 的话，配置文件缺这一项时会静默退回
+            # "插件自己的 profile"，用户以为继承了登录态其实没有。
+            "headless_profile_mode": cfg.get("headless_profile_mode", "inherit"),
             "custom_user_data_dir": cfg.get("custom_user_data_dir"),
             "screenshot_dir": cfg.get("screenshot_dir") or str(Path("data/temp")),
             "download_dir": cfg.get("download_dir"),

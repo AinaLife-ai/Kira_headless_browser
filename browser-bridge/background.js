@@ -257,6 +257,50 @@ async function ensureAlive() {
 
 // ─── 消息分发 ────────────────────────────────────────────────────────────────
 
+/**
+ * 验证与服务端的**真实往返**。
+ *
+ * 插件每 25 秒发一次心跳 ping，扩展回 pong。这里挂一个一次性监听：
+ * 只要收到服务端的 ping（说明 socket 可收 + 对端在跑），并成功回 pong
+ * （说明我们可发），往返就算成立。
+ *
+ * ⚠️ 超时必须**大于心跳间隔 25 秒**，否则正常链路也会被判超时。
+ * ⚠️ 不要反过来给插件发 ping —— bridge.py 只发不收，它只处理扩展回的 pong。
+ */
+function probeServerRoundTrip(timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+      resolve({ ok: false, error: "未连接到 KiraAI（请先点连接）" });
+      return;
+    }
+    let done = false;
+    const t0 = Date.now();
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      state.probe = null;
+      resolve({
+        ok: false,
+        error: `${Math.round(timeoutMs / 1000)} 秒内没收到服务端心跳，`
+             + `链路可能不通（socket 开着但对端不响应）`,
+      });
+    }, timeoutMs);
+
+    state.probe = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      state.probe = null;
+      resolve({
+        ok: true,
+        socket: "OPEN",
+        rtt_ms: Date.now() - t0,
+        note: "已与服务端完成一次真实心跳往返",
+      });
+    };
+  });
+}
+
 async function handleMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
@@ -662,7 +706,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           //    真正能证明链路通的是**收到服务端发来的 ping 并回 pong** ——
           //    这需要"socket 可收 + 对端在跑 + 我们可发"三者同时成立。
           //    做法：发一条 probe，等服务端心跳 ping 到达并触发 pong。
-          const okRtt = await probeServerRoundTrip(5000);
+          // 心跳间隔 25s，超时给 30s（否则正常链路也会被误判）
+          const okRtt = await probeServerRoundTrip(30000);
+          if (okRtt && okRtt.ok) {
+            try {
+              const tabs = await listTabs();
+              okRtt.tab_count = tabs.tab_count;
+            } catch (_) {}
+          }
           sendResponse(okRtt);
         } catch (e) {
           sendResponse({ ok: false, error: e.message });

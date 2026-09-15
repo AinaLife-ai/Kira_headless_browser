@@ -14,6 +14,7 @@ import glob
 import os
 import time
 from datetime import datetime
+from urllib.parse import urljoin
 from pathlib import Path
 from typing import Optional
 
@@ -1265,31 +1266,49 @@ class HeadlessBackend(Backend):
                 jar = None
             limit = self.download_max_bytes
             async with aiohttp.ClientSession(headers=headers, cookie_jar=jar) as s:
-                # allow_redirects 保持默认，但 jar 里只放了**目标域**的 cookie，
-                # 且非 HTTPS 时根本没放 cookie —— 重定向也带不出去。
-                async with s.get(url) as r:
-                    if r.status != 200:
-                        return OpResult.fail(f"下载失败，HTTP {r.status}", self.name)
-                    declared = r.headers.get("Content-Length")
-                    if declared and limit > 0:
-                        try:
-                            if int(declared) > limit:
-                                return OpResult.fail(
-                                    f"文件过大（{int(declared)} > {limit} 字节），已拒绝", self.name)
-                        except ValueError:
-                            pass
-                    size = 0
-                    with open(path, "wb") as f:
-                        async for chunk in r.content.iter_chunked(64 * 1024):
-                            size += len(chunk)
-                            if limit > 0 and size > limit:
-                                f.close()
-                                try:
-                                    os.remove(path)
-                                except Exception:
-                                    pass
-                                return OpResult.fail(f"文件超过 {limit} 字节上限，已中止", self.name)
-                            f.write(chunk)
+                # ⚠️ 带了 cookie 就**不允许自动重定向**。
+                #    aiohttp 只过滤 `Secure` cookie，而 HTTPS→HTTP 的同域重定向
+                #    会把**非 Secure 的会话 cookie** 一起发出去（CWE-319）——
+                #    等于把登录态明文送出。这里自己跟，且**每一跳都要求 HTTPS**；
+                #    一旦要降级到 http，就丢掉 jar 再继续（宁可匿名也不明文带凭据）。
+                r = await s.get(url, allow_redirects=False)
+                hops = 0
+                while 300 <= r.status < 400 and hops < 5:
+                    loc = r.headers.get("Location")
+                    if not loc:
+                        break
+                    nxt = urljoin(str(r.url), loc)
+                    if jar is not None and not nxt.lower().startswith("https://"):
+                        logger.warning(
+                            f"下载重定向到非 HTTPS（{nxt}），将**不带 Cookie** 继续")
+                        s._cookie_jar = aiohttp.DummyCookieJar()
+                        jar = None
+                    r = await s.get(nxt, allow_redirects=False)
+                    hops += 1
+                    url = nxt
+
+                if r.status != 200:
+                    return OpResult.fail(f"下载失败，HTTP {r.status}", self.name)
+                declared = r.headers.get("Content-Length")
+                if declared and limit > 0:
+                    try:
+                        if int(declared) > limit:
+                            return OpResult.fail(
+                                f"文件过大（{int(declared)} > {limit} 字节），已拒绝", self.name)
+                    except ValueError:
+                        pass
+                size = 0
+                with open(path, "wb") as f:
+                    async for chunk in r.content.iter_chunked(64 * 1024):
+                        size += len(chunk)
+                        if limit > 0 and size > limit:
+                            f.close()
+                            try:
+                                os.remove(path)
+                            except Exception:
+                                pass
+                            return OpResult.fail(f"文件超过 {limit} 字节上限，已中止", self.name)
+                        f.write(chunk)
             self._clean_downloads()
             return OpResult(data={"path": path, "size": size, "url": url,
                                   "mime": None}, backend=self.name)

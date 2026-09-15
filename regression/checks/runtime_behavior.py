@@ -11,6 +11,7 @@ import importlib.util
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,7 +86,11 @@ def run(r) -> None:
         for k in STATS:
             STATS[k] = 0
 
-    tmp = tempfile.mkdtemp(prefix="kira_reg_")
+    # 用 TemporaryDirectory：正常结束与异常退出都会清理，
+    # 不会在系统临时目录里堆一堆 kira_reg_* 残留。
+    _tmpdir = tempfile.TemporaryDirectory(prefix="kira_reg_")
+    tmp = _tmpdir.name
+    _ = _tmpdir      # 持有引用，别被 GC 提前回收
 
     # ── R1 页面失效后自愈 ────────────────────────────────────────────
     async def r1():
@@ -142,14 +147,30 @@ def run(r) -> None:
     reset()
     p = _mk(hbmod, tmp, screenshot_max_count=3)
     os.makedirs(p.screenshot_dir, exist_ok=True)
-    for pre in ("element", "screenshot"):
-        for i in range(10):
-            with open(os.path.join(p.screenshot_dir, f"{pre}_{i}.png"), "wb") as f:
-                f.write(b"x")
+    # 两类各 5 张，并**显式区分 mtime** —— 同一 tick 内创建的文件 mtime 相同，
+    # 排序结果会取决于文件名，导致"剩哪几张"随机、断言忽过忽不过。
+    _now = time.time()
+    for i in range(5):
+        fp = os.path.join(p.screenshot_dir, f"screenshot_{i}.png")
+        with open(fp, "wb") as f:
+            f.write(b"x")
+        os.utime(fp, (_now - 100, _now - 100))     # 普通截图调旧
+    for i in range(5):
+        fp = os.path.join(p.screenshot_dir, f"element_{i}.png")
+        with open(fp, "wb") as f:
+            f.write(b"x")
+        os.utime(fp, (_now, _now))                 # 元素截图最新
     p._clean_screenshots()
     left = os.listdir(p.screenshot_dir)
     n_elem = len([f for f in left if f.startswith("element_")])
-    r.ok("R4 元素截图参与清理", n_elem <= 1, f"element_*.png 剩 {n_elem} 张")
+    n_shot = len([f for f in left if f.startswith("screenshot_")])
+    # 三条一起断，缺一不可：
+    #   * 总数 == 上限 3
+    #   * element_ 有剩（防"元素截图被全删"）
+    #   * 留下的正是较新的那批（证明按时间清理，不是按文件名）
+    r.ok("R4 元素截图参与清理（到上限 + 未全删 + 按时间保新）",
+         len(left) == 3 and n_elem >= 1 and n_shot == 3 - n_elem,
+         f"总计 {len(left)}（期望 3）；element_* {n_elem}；screenshot_* {n_shot}")
 
     # ── R5 下载目录清理 ─────────────────────────────────────────────
     p = _mk(hbmod, tmp, download_max_count=5)
@@ -225,13 +246,21 @@ def run(r) -> None:
     # ── R10 扩展 scroll 用瞬时行为 ──────────────────────────────────
     cjs = open(PLUGIN_DIR / "browser-bridge" / "content.js",
                encoding="utf-8").read()
-    seg = cjs.split("scroll(payload) {")[1][:1200]
+    # ⚠️ 先判断分隔符在不在 —— 处理器被删/改名时 split 会 IndexError，
+    #    那会直接中断整组检查、把后面的断言全跳过（假绿）。
+    if "scroll(payload) {" not in cjs:
+        r.ok("R10 扩展 scroll 用瞬时滚动", False,
+             "content.js 里找不到 scroll(payload) 处理器（被删或改名了？）")
+        seg = ""
+    else:
+        seg = cjs.split("scroll(payload) {")[1][:1200]
     # 只看真正的代码，注释里提到 smooth 是正常的（说明为什么不用它）
     seg_code = "\n".join(ln for ln in seg.splitlines()
                          if not ln.strip().startswith(("//", "*", "/*")))
-    r.ok("R10 扩展 scroll 用瞬时滚动（smooth 是异步的会读到旧位置）",
-         'behavior: "auto"' in seg_code and "smooth" not in seg_code,
-         "且返回真实位移而不是无条件 changed:true")
+    if seg:
+        r.ok("R10 扩展 scroll 用瞬时滚动（smooth 是异步的会读到旧位置）",
+             'behavior: "auto"' in seg_code and "smooth" not in seg_code,
+             "且返回真实位移而不是无条件 changed:true")
 
     ext = FakeExt(True)
     router = rt.BackendRouter("auto")

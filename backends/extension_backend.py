@@ -235,7 +235,12 @@ class ExtensionBackend(Backend):
                     f"如需放开请调整插件配置里的 upload_max_bytes。", self.name)
             # 逐块读、逐块编码，避免把整份文件同时拿在内存里
             name = os.path.basename(resolved)
-            step = 256 * 1024
+            # ⚠️ 分块大小必须是 **3 的倍数**。
+            #    base64 每 3 字节编成 4 字符；块长不是 3 的倍数时，
+            #    每块末尾都会带 padding（=），独立编码的块直接拼接后
+            #    整体不再是合法 base64，`atob` 会抛 InvalidCharacterError。
+            #    256*1024 % 3 = 1 → 必须改。
+            step = 255 * 1024          # 261120 % 3 == 0
             chunks = []
             with open(resolved, "rb") as f:
                 while True:

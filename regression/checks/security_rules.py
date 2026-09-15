@@ -96,9 +96,14 @@ def run(r) -> None:
     r.ok("B2.4 支持用户在地址里写 ws:// / wss://",
          r"^(wss?):\/\/" in pjs or "wss?:" in pjs)
     # 扩展下载不允许跟随重定向（跨协议会带出 cookie）
+    # ⚠️ 只在下**载处理器内部**找这个选项 —— 全文搜会命中注释或别处，
+    #    下载里删掉了也照样通过。
     cap = src("browser-bridge/capabilities.js")
+    _dl = cap.split("async function downloadViaSession(")[-1].split("// ───")[0] \
+        if "async function downloadViaSession(" in cap else ""
     r.ok("B2.5 下载不跟随重定向（杜绝跨协议带 cookie）",
-         'redirect: "error"' in cap)
+         'redirect: "error"' in _dl,
+         "必须出现在 downloadViaSession 里")
     # [12] 不把本机绝对路径回传给服务。
     # ⚠️ 别用"子串在不在一起"这种脆弱判据 —— 格式化一下就能绕过。
     #    改成提取 listFiles 里的 map 对象字面量，检查它的**键**里有没有 path。

@@ -141,6 +141,17 @@ def _extract_mapped_ipv4(h: str) -> Optional[str]:
     raw = (h or "").strip().strip("[]").rstrip(".").lower()
     if ":" not in raw:
         return None
+    # ⚠️ 先判断它是不是一个**合法的 IPv6**（除 mapped 之外）。
+    #    否则 `0:0:0:0:0:0:0:1`（::1 的完整写法）会被我们当"内嵌 IPv4"拆出 `1`
+    #    → 归一成 0.0.0.1 → is_local_host 反而漏判回环地址。
+    try:
+        ip = ipaddress.ip_address(raw)
+        if not getattr(ip, "ipv4_mapped", None):
+            # 是合法 IPv6 且不是 v4-mapped → 交给上层按原本的值判断
+            return None
+    except ValueError:
+        pass  # 不是合法 IPv6，继续按"内嵌 IPv4"解析
+
     # 取最后一段（内嵌地址），去掉前导 ffff:
     tail = raw.rsplit(":", 1)[-1]
     if not tail:

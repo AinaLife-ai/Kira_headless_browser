@@ -189,9 +189,17 @@ def run(r) -> None:
     # 严格模式下直接 ReferenceError，**扩展永远连不上**。
     import re as _re
     # 只看真正的代码行 —— 注释里提到这些名字是**正常的**（说明为什么这么写）
-    bg_code = "\n".join(
-        ln for ln in bg_bg.splitlines()
-        if not ln.strip().startswith(("//", "*", "/*")))
+    # ⚠️ 注释必须**完整剥掉**，包括跨行的块注释 ——
+    #    逐行过滤只能处理 `//`，块注释（/* ... */，中间那些行不以
+    #    注释符开头）会漏，里面的词会被误当成裸引用。
+    bg_code = _re2.sub(r'/\*[\s\S]*?\*/', '', bg_bg)        # 块注释
+    bg_code = _re2.sub(r'(?m)//[^\n]*$', '', bg_code)          # 行注释
+    # ⚠️ 还要剥掉**字符串字面量**（含反引号模板串）。
+    #    注释剥完仍会把 `\`...socket 开着...\`` 这种提示文本里的词
+    #    当成标识符引用 —— 那是运行时才存在的字符串，不是变量。
+    bg_code = _re2.sub(r'`(?:[^`\\]|\\.)*`', '``', bg_code)      # 模板串
+    bg_code = _re2.sub(r'"(?:[^"\\\n]|\\.)*"', '""', bg_code)     # 双引号
+    bg_code = _re2.sub(r"'(?:[^'\\\n]|\\.)*'", "''", bg_code)     # 单引号
     naked = []
     for m in _re.finditer(r'(?<![\w.$])\b(socket|reconnectAttempt|reconnectTimer|'
                           r'intentionalClose|userDisconnected|lastError)\b', bg_code):
