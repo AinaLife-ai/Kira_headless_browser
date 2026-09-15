@@ -142,7 +142,8 @@ class HeadlessBackend(Backend):
         self.download_max_bytes = int(cfg.get("download_max_bytes", 2 * 1024 ** 3) or 0)
 
         self.idle_close_seconds = int(cfg.get("idle_close_seconds", 300) or 0)
-        self.op_timeout = float(cfg.get("op_timeout", 40) or 0)
+        # 与 schema.json / main.py 三处保持一致（120）
+        self.op_timeout = float(cfg.get("op_timeout", 120) or 0)
         self.action_timeout = float(cfg.get("action_timeout", 20) or 0)
         self.wait_until = cfg.get("default_wait_until", "domcontentloaded") or "domcontentloaded"
         # 单次返回给模型的正文长度（可通过 offset 续读，不是硬上限）
@@ -154,7 +155,12 @@ class HeadlessBackend(Backend):
 
     @property
     def available(self) -> bool:
-        return self._context is not None or self._browser is not None
+        # ⚠️ 只认 `_context`。
+        #    非持久化启动时会**先赋 _browser 再建 _context**；
+        #    如果这里把 _browser 也算作"可用"，并发调用就能在
+        #    _context 还是 None 的时候绕过 _lock 进来，
+        #    它的自愈逻辑甚至会把对方**正在初始化**的浏览器关掉。
+        return self._context is not None
 
     @property
     def display(self) -> str:
@@ -312,11 +318,31 @@ class HeadlessBackend(Backend):
         #    `Default/Cookies` 被改写（也就是登录态更新）时它**不变** ——
         #    结果就是一直复用旧副本，用户新登录的账号读不到。
         #    改成看真正承载登录态的那几个文件的 mtime 之和。
+        # ⚠️ 除了 Cookie 文件，**Local Storage** 也必须看 ——
+        #    不少站点把登录 token 只存在 Local Storage 里，
+        #    漏了它就会一直复用旧副本，用户"明明重新登录了却还是登出状态"。
         src_mtime = 0.0
-        for rel in ("Default/Cookies", "Default/Login Data", "Local State",
-                    "Default/Preferences", "Default/Network/Cookies"):
+        STAMPS = ("Default/Cookies", "Default/Login Data", "Local State",
+                  "Default/Preferences", "Default/Network/Cookies")
+        for rel in STAMPS:
             try:
                 src_mtime = max(src_mtime, os.path.getmtime(Path(src) / rel))
+            except OSError:
+                continue
+        # Local Storage / IndexedDB / Session Storage 下的文件（递归取最大 mtime）
+        for rel in ("Default/Local Storage", "Default/Session Storage",
+                    "Default/IndexedDB"):
+            root = Path(src) / rel
+            if not root.is_dir():
+                continue
+            try:
+                for dirpath, _dirnames, filenames in os.walk(root):
+                    for fn in filenames:
+                        try:
+                            src_mtime = max(src_mtime,
+                                            os.path.getmtime(os.path.join(dirpath, fn)))
+                        except OSError:
+                            continue
             except OSError:
                 continue
         if src_mtime == 0.0:
@@ -395,6 +421,8 @@ class HeadlessBackend(Backend):
                         self._browser = self._context.browser
                         self._desc = f"无头({ch or '内置Chromium'}) + 插件profile"
                     else:
+                        # 先建 browser 再建 context —— 注意 available 只看 _context，
+                        # 所以这里中间态不会被别的协程当成"已就绪"
                         self._browser = await self._playwright.chromium.launch(
                             **launch_ch, **self._launch_kwargs())
                         self._context = await self._browser.new_context(**self._context_options())
@@ -739,8 +767,16 @@ class HeadlessBackend(Backend):
             return OpResult.fail(err, self.name)
         try:
             if new_tab:
-                self._own_page = None
+                # ⚠️ 先建新页、认领，再关旧页。
+                #    不关的话每调一次就多一张 Chromium 页面常驻吃资源，
+                #    而 _check_tab_id() 又让调用方选不到它们 —— 纯泄漏。
+                old_page = self._page
                 page = self._adopt_page(await self._new_page())
+                if old_page is not None and old_page is not page:
+                    try:
+                        await old_page.close()
+                    except Exception as pe:
+                        logger.debug(f"关闭旧页面失败: {pe}")
             # 默认 domcontentloaded：networkidle 已被官方标注不推荐，
             # 现代页面可能永远不空闲，白等 + 让页面持续跑
             await self._op(self._page.goto(url, wait_until=self.wait_until,
@@ -1178,12 +1214,18 @@ class HeadlessBackend(Backend):
             return OpResult.fail(err, self.name)
         if not url.lower().startswith(("http://", "https://")):
             return OpResult.fail("仅支持 http/https 链接下载", self.name)
+        # ⚠️ 带浏览器凭据去下载时，明文 HTTP 会把 cookie 暴露在网络上
+        #    （CWE-319）。而且 aiohttp 默认跟随重定向，跳一次就可能
+        #    把 cookie 带到 http 站点。所以：**非 HTTPS 就不带 cookie**。
+        is_https = url.lower().startswith("https://")
+        if not is_https:
+            logger.warning(f"目标不是 HTTPS，本次下载将**不携带**浏览器 Cookie：{url}")
         try:
             import aiohttp
             from yarl import URL as _URL
             headers, jar = {}, None
             try:
-                if self._context is not None:
+                if self._context is not None and is_https:
                     jar = aiohttp.CookieJar(unsafe=False)
                     # ⚠️ 用 {name: value} 这种 dict 会把 domain/path/secure/expires
                     #    全部丢掉，只留"名字+值" ——
@@ -1223,6 +1265,8 @@ class HeadlessBackend(Backend):
                 jar = None
             limit = self.download_max_bytes
             async with aiohttp.ClientSession(headers=headers, cookie_jar=jar) as s:
+                # allow_redirects 保持默认，但 jar 里只放了**目标域**的 cookie，
+                # 且非 HTTPS 时根本没放 cookie —— 重定向也带不出去。
                 async with s.get(url) as r:
                     if r.status != 200:
                         return OpResult.fail(f"下载失败，HTTP {r.status}", self.name)

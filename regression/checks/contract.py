@@ -228,8 +228,12 @@ async def _collect_hb(mod, tmp) -> dict[str, set[str]]:
         if i > 0:
             # ⚠️ 要允许跨行 —— 返回字典常写成多行，
             #    单行正则匹配不到就会误报"字段缺失"。
+            # 窗口要够大：download() 里加了 HTTPS 校验后变长了，
+            # 4000 字符取不到末尾的成功返回。
+            nxt = body.find("\n    async def ", i + 10)
+            seg = body[i:nxt] if nxt > 0 else body[i:i + 12000]
             succ = re.findall(r'OpResult\(\s*data=\{([^}]*)\}\s*,\s*backend=self\.name\s*\)',
-                              body[i:i + 4000], re.S)
+                              seg, re.S)
             keys = set()
             for grp in succ:
                 keys |= set(re.findall(r'"([a-z_]+)":', grp))

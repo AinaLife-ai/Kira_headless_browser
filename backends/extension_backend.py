@@ -281,6 +281,10 @@ class ExtensionBackend(Backend):
                              timeout=self.download_timeout,
                              cmd_id=cmd_id)
         if not r.ok:
+            # ⚠️ 命令可能**根本没到 bridge**（扩展未连接 / 未知命令），
+            #    那条路径不会走到 send_command 的 try 里，sink 就没人收 ——
+            #    文件句柄留到进程退出，磁盘上多一个 0 字节文件，重试还会叠加。
+            self._bridge.abort_download_sink(cmd_id)
             return r
         size = (r.data or {}).get("bytes")
         if size is None:

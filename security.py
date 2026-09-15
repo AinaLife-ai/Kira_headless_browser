@@ -114,11 +114,55 @@ def is_local_host(host: str) -> bool:
     if normalized:
         h = normalized
 
+    # ⚠️ IPv4-mapped IPv6（`::ffff:127.0.0.1`）也要拆出来判 ——
+    #    `ipaddress` 对它的 is_loopback 是 **False**，
+    #    而 Chromium 会老老实实连到回环地址。不处理就等于开了一个后门。
+    #    形式还包括 `::ffff:7f00:1`（十六进制段）与 `::ffff:2130706433`（十进制整体）。
+    mapped = _extract_mapped_ipv4(h)
+    if mapped:
+        h = mapped
+
     try:
         ip = ipaddress.ip_address(h)
         return ip.is_loopback or ip.is_unspecified
     except ValueError:
         return False
+
+
+def _extract_mapped_ipv4(h: str) -> Optional[str]:
+    """把 IPv4-mapped IPv6 里的内嵌 IPv4 拆出来（点分十进制形式）。
+
+    支持：
+      ``::ffff:127.0.0.1``     —— 点分
+      ``::ffff:7f00:1``        —— 两个十六进制段
+      ``::ffff:2130706433``    —— 十进制整体
+      ``::ffff:0x7f000001``    —— 十六进制整体
+    """
+    raw = (h or "").strip().strip("[]").rstrip(".").lower()
+    if ":" not in raw:
+        return None
+    # 取最后一段（内嵌地址），去掉前导 ffff:
+    tail = raw.rsplit(":", 1)[-1]
+    if not tail:
+        return None
+    # ::ffff:7f00:1 这种是两个 16 进制段拼成的，先把 ffff 去掉
+    parts = raw.split(":")
+    if "ffff" in parts:
+        idx = len(parts) - 1 - parts[::-1].index("ffff")
+        rest = parts[idx + 1:]
+        if len(rest) == 2:
+            try:
+                value = (int(rest[0], 16) << 16) + int(rest[1], 16)
+                return "%d.%d.%d.%d" % ((value >> 24) & 255, (value >> 16) & 255,
+                                        (value >> 8) & 255, value & 255)
+            except ValueError:
+                return None
+        if len(rest) == 1:
+            tail = rest[0]
+    # 单段：可能是点分 / 十进制 / 十六进制
+    if "." in tail:
+        return tail if _normalize_ipv4_literal(tail) else None
+    return _normalize_ipv4_literal(tail)
 
 
 def parse_host(url: str) -> Optional[str]:

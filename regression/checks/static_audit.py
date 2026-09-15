@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from ..harness import (
     EXT_DIR, PLUGIN_DIR, backend_methods, called_backend_methods,
@@ -172,6 +173,40 @@ def run(r) -> None:
     r.ok("A13b 从 shared/protocol 用到的符号都 import 了",
          not unresolved, f"未 import={unresolved or '无'}")
 
+    # A13c **ES 模块语法**（用 module 模式解析）
+    #      ⚠️ `node --check xxx.js` 会把 .js 当 **CommonJS** 解析，
+    #      "import 与本地声明重名"这类模块级语法错误**根本查不出来**。
+    #      必须复制成 .mjs 或用 --input-type=module 才是真检查。
+    #      真实事故：capabilities.js 既 import 了 sendChunk 又本地声明了一遍
+    #      → 整个扩展模块**解析失败**，扩展完全加载不了。
+    import shutil as _sh, subprocess as _sp, tempfile as _tf
+    if _sh.which("node"):
+        js_bad = []
+        for f_ in js_files:
+            p_ = PLUGIN_DIR / "browser-bridge" / f_
+            if not p_.is_file():
+                continue
+            tmp = Path(_tf.gettempdir()) / f"_kira_chk_{f_.replace('.', '_')}.mjs"
+            try:
+                tmp.write_text(p_.read_text(encoding="utf-8"), encoding="utf-8")
+                r_ = _sp.run(["node", "--check", str(tmp)],
+                             capture_output=True, text=True, timeout=30)
+                if r_.returncode != 0:
+                    first = (r_.stderr or "").strip().splitlines()
+                    msg = next((x for x in first if "Error" in x), first[0] if first else "?")
+                    js_bad.append(f"{f_}: {msg[:80]}")
+            except Exception as e:
+                js_bad.append(f"{f_}: 检查失败 {e}")
+            finally:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        r.ok("A13c 扩展 JS 在 module 模式下语法正确", not js_bad,
+             f"失败={js_bad or '无'}")
+    else:
+        r.warn("没有 node，跳过 ES 模块语法检查")
+
     # A14 硬编码的插件 id 必须与 manifest 一致
     #     （面板 API 路径 / WS 路径 / 扩展路径都依赖它，
     #      对不上就是 404 或连不上，而且"看起来都写对了"）
@@ -260,9 +295,22 @@ def run(r) -> None:
          "finally:" in br and "CancelledError" in br)
     r.ok("C11 桥接下载分块走 sink（不整份攒内存）",
          "_sinks" in br and "_abort_sink" in br and "_chunks" not in br)
-    r.ok("C12 扩展点击不再重复调 el.click()",
-         "不能再调" in ext_file("content.js")
-         or "只派发一次 click" in ext_file("content.js"))
+    # ⚠️ 不能拿**注释文字**当判据 —— 注释还在、有人把 el.click() 加回来时，
+    #    这条检查照样会过。必须看**真正的代码**。
+    _cjs = ext_file("content.js")
+    _cjs_code = "\n".join(ln for ln in _cjs.splitlines()
+                          if not ln.strip().startswith(("//", "*", "/*")))
+    # 找 click 处理器里有没有第二次触发（target.click() / el.click() 之类）
+    _dup_click = []
+    for _m in re.finditer(r'(\w+)\.click\(\)', _cjs_code):
+        # 排除我们自己派发的 dispatchEvent(new MouseEvent("click"...))
+        _line = _cjs_code[:_m.start()].rsplit("\n", 1)[-1]
+        if "dispatchEvent" in _line or _m.group(1) in ("window",):
+            continue
+        _dup_click.append(_m.group(0))
+    r.ok("C12 扩展点击只派发一次（没有第二次原生 click()）",
+         not _dup_click,
+         f"发现第二次点击调用={_dup_click or '无'}")
     r.ok("C13 扩展桥不直接占用真实目录",
          "_real_user_data_dir" in hb and "_inherited_profile_dir" in hb
          and "use_real_browser_profile" not in hb)

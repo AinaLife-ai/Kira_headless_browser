@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.5
+# 浏览器插件 (Browser Plugin) 2.1.6
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -469,6 +469,41 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.6（2026-09-15）
+
+**按 CodeRabbit 第四轮审查修复 10 项**（1 个 Critical + 9 个真实问题）：
+
+- 🔴 **扩展模块直接语法错误**：`capabilities.js` 既 `import { sendChunk }`
+  又在本地 `function sendChunk()` 声明了一遍 → `SyntaxError: Identifier
+  'sendChunk' has already been declared` → **整个扩展加载不了**。
+  → 删掉本地重复声明。
+  → 新增检查 **A13c：用 module 模式检查 ES 模块语法**。
+  这之前一直是盲区：`node --check xxx.js` 会把 `.js` 当 **CommonJS** 解析，
+  "import 与本地声明重名"这类**模块级**语法错误根本查不出来。
+- **`upload_allow_any_path` 的默认值分裂**：schema 写 `true`、代码也写 `true`，
+  但**取值不安全**（可外传任意本机文件）。→ 两处统一改为 `false`（安全值），
+  并新增检查 **C3：代码默认值必须与 schema 一致**
+  （这条检查当场又揪出 `op_timeout` schema=120 / 代码=40 的真实分裂）。
+- **SSRF：IPv4-mapped IPv6 可绕过**（CWE-918）—— `ipaddress` 对
+  `::ffff:127.0.0.1` 的 `is_loopback` 是 **False**，而 Chromium 会真的连到回环。
+  十进制/十六进制写法我上一轮堵了，这个映射形式漏了。已补（含
+  `::ffff:7f00:1` / `::ffff:2130706433` 等变体），并加入用例表。
+- **带凭据下载允许明文 HTTP**（CWE-319）→ 非 HTTPS 时**不带 Cookie**。
+- **`available` 判据不对**：非持久化启动会**先赋 `_browser` 再建 `_context`**，
+  并发调用能在 `_context` 还是 None 时绕过锁进来，自愈逻辑甚至会把
+  对方**正在初始化**的浏览器关掉。→ 只认 `_context`。
+- **`navigate(new_tab=True)` 不关旧页面**：每调一次多一张 Chromium 页面常驻，
+  而 `_check_tab_id()` 又让调用方选不到它们 —— 纯泄漏。→ 建新页后关旧页。
+- **chunk 写失败只 abort sink 不置 future**：调用方会一直等到自己的超时
+  （下载默认 **600 秒**），磁盘满/非法 base64 表现为"工具卡 10 分钟"。
+- **命令没到 bridge 时 sink 没人收**：扩展未连接 / 未知命令会从
+  `send_command` 入口就抛，不走它内部的 try，于是句柄泄漏、磁盘留 0 字节文件。
+  → 补 `abort_download_sink()` 公开入口并在失败路径调用。
+- **profile 新鲜度漏了 Local Storage**：不少站点把登录 token 只存在
+  Local Storage，漏了就一直复用旧副本，用户"重新登录了却还是登出状态"。
+- **回归检查 C12 拿注释当判据**：注释还在、`el.click()` 被加回来时照样会过。
+  → 改为检查**真正的代码**（并做了反向验证）。
 
 ### v2.1.5（2026-09-15）
 

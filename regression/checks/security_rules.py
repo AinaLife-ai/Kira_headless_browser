@@ -34,6 +34,11 @@ MATCH_CASES = [
     ("example.com", "*.example*", True),
     ("paypal.com", "*.pay*", True),
     ("paypal.com.evil.io", "*.pay*", False),
+    # 字面量开头 + 通配后缀：fnmatch 的 * 跨点号会造成越界
+    ("github.com", "github.*", True),
+    ("sub.github.com", "github.*", True),
+    ("github.io", "github.*", True),
+    ("github.com.evil.test", "github.*", False),
 ]
 
 #: 浏览器会当成本机、但 ipaddress 认不出的写法
@@ -42,6 +47,12 @@ LOCAL_CASES = [
     ("127.1", True), ("0x7f000001", True), ("0177.0.0.1", True),
     ("0x7f.0.0.1", True), ("2130706433", True), ("0.0.0.0", True),
     ("::1", True), ("[::1]", True),
+    # IPv4-mapped IPv6 —— ipaddress 对它的 is_loopback 是 False，
+    # 但 Chromium 会真的连到回环。不处理就是个后门。
+    ("::ffff:127.0.0.1", True), ("::ffff:7f00:1", True),
+    ("[::ffff:127.0.0.1]", True), ("::ffff:2130706433", True),
+    ("::ffff:0x7f000001", True),
+    ("::ffff:8.8.8.8", False),
     ("example.com", False), ("8.8.8.8", False), ("1.1.1.1", False),
 ]
 

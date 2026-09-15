@@ -252,15 +252,8 @@ async function downloadViaSession(params, cmdId) {
   return { ok: true, url, mime, bytes: total };
 }
 
-function sendChunk(cmdId, uint8) {
-  // 分块用独立消息类型，避免和 result 抢同一条通道的语义
-  let bin = "";
-  const step = 0x8000;
-  for (let i = 0; i < uint8.length; i += step) {
-    bin += String.fromCharCode.apply(null, uint8.subarray(i, i + step));
-  }
-  sendRaw({ type: MSG.CHUNK, id: cmdId, data: btoa(bin) });
-}
+// sendChunk 由 shared.js 提供（这里不能再声明一次：
+// 与 import 的同名绑定冲突会让整个模块语法错误）
 
 // ─── 4. Cookie 导出 / 导入（打通两个后端的登录态）──────────────────────
 

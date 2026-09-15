@@ -467,6 +467,10 @@ class BrowserBridge:
             pass
         return sink
 
+    def abort_download_sink(self, cmd_id: str) -> None:
+        """公开的收尾入口（调用方在命令失败时用，不必碰私有方法）。"""
+        self._abort_sink(cmd_id, RuntimeError("命令未成功完成"))
+
     def _abort_sink(self, cmd_id: str, exc: Exception) -> None:
         """出错/超限/断开时：关文件并删掉半成品，不留垃圾。"""
         sink = self._sinks.pop(cmd_id, None)

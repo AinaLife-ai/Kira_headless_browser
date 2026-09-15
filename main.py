@@ -112,7 +112,11 @@ class BrowserPlugin(BasePlugin):
         # 上传/发送文件的**路径白名单**。
         # 默认放行任意路径（方便），但可以收紧到指定目录 ——
         # 否则模型可以借"上传"把本机任意文件外传。
-        self.upload_allow_any_path = _b(cfg.get("upload_allow_any_path", True))
+        # ⚠️ 默认值必须与 schema.json 一致，且取**安全值**。
+        #    之前 schema 写 true、这里也写 true，看着一致；
+        #    但只要有人只改一处，或者配置文件缺这一项，
+        #    实际行为就会偏离声明 —— 这类"默认值分裂"很容易被忽略。
+        self.upload_allow_any_path = _b(cfg.get("upload_allow_any_path", False))
         _dirs = cfg.get("upload_allowed_dirs") or ["data/files", "data/temp"]
         if isinstance(_dirs, str):
             _dirs = _dirs.splitlines()
@@ -157,7 +161,9 @@ class BrowserPlugin(BasePlugin):
             "download_max_bytes": cfg.get("download_max_bytes", 2 * 1024 ** 3),
             "content_page_size": cfg.get("content_page_size", 8000),
             "idle_close_seconds": cfg.get("idle_close_seconds", 300),
-            "op_timeout": cfg.get("op_timeout", 40),
+            # 默认值必须与 schema.json 一致（120）—— 不一致时，
+            # 配置文件缺这一项就会用 40s，而面板显示 120s。
+            "op_timeout": cfg.get("op_timeout", 120),
             "action_timeout": cfg.get("action_timeout", 20),
             "default_wait_until": cfg.get("default_wait_until", "domcontentloaded"),
         }
