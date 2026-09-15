@@ -96,11 +96,21 @@ export async function connect({ manual = false } = {}) {
   state.intentionalClose = false;
   clearTimeout(state.reconnectTimer);
 
-  const url = buildWsUrl(cfg.host, cfg.port, cfg.token);
+  let url;
+  try {
+    url = buildWsUrl(cfg.host, cfg.port, cfg.token);
+  } catch (e) {
+    // 例如"非本机却用了 ws://" —— 明确告诉用户，不要静默失败
+    state.lastError = e.message;
+    await setStatus({ connected: false, error: e.message });
+    return { ok: false, error: e.message };
+  }
   console.log("[KiraBridge] 正在连接", url.replace(/token=.*/, "token=***"));
 
+  let mine;
   try {
-    state.socket = new WebSocket(url);
+    mine = new WebSocket(url);
+    state.socket = mine;
   } catch (e) {
     state.lastError = "创建连接失败：" + e.message;
     await setStatus({ connected: false, error: state.lastError });
@@ -117,7 +127,12 @@ export async function connect({ manual = false } = {}) {
       settle({ ok: false, error: state.lastError });
     }, 8000);
 
-    state.socket.onopen = () => {
+    // ⚠️ 所有回调都必须先确认 **自己仍是当前连接**（state.socket === mine）。
+    //    否则：disconnect() 异步关旧 socket → 用户马上重连 →
+    //    旧 socket 的 onclose 在新连接已写入 state.socket 之后才执行，
+    //    于是它把**新连接引用清成 null**，还可能给旧连接起一次重连。
+    mine.onopen = () => {
+      if (state.socket !== mine) return;
       clearTimeout(openTimeout);
       state.reconnectAttempt = 0;
       state.lastError = "";
@@ -137,19 +152,26 @@ export async function connect({ manual = false } = {}) {
       settle({ ok: true });
     };
 
-    state.socket.onmessage = (ev) => {
+    mine.onmessage = (ev) => {
+      if (state.socket !== mine) return;
       handleMessage(ev.data).catch((e) => console.error("[KiraBridge] 消息处理异常", e));
     };
 
-    state.socket.onerror = () => {
+    mine.onerror = () => {
+      if (state.socket !== mine) return;
       // onerror 后必然跟 onclose，这里不做重连，避免双触发
       state.lastError = "连接出错，请确认 KiraAI 正在运行";
     };
 
-    state.socket.onclose = (ev) => {
+    mine.onclose = (ev) => {
       clearTimeout(openTimeout);
-      const wasOpen = ev.wasClean;
       console.log("[KiraBridge] 连接关闭", ev.code, ev.reason);
+
+      // 旧连接的收尾**不能动新连接的状态**
+      if (state.socket !== mine) {
+        settle({ ok: false, error: "连接已被替换" });
+        return;
+      }
 
       chrome.action.setBadgeText({ text: "" });
       setStatus({ connected: false, error: state.lastError || `连接已断开 (${ev.code})` });
@@ -168,9 +190,12 @@ export async function disconnect() {
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
 
-  if (state.socket) {
-    try { state.socket.close(1000, "user disconnected"); } catch (_) {}
-    state.socket = null;
+  // 只把**当前**连接置空再关；关之前捕获引用，避免 onclose 里
+  // 因为 state.socket 已是 null 而误判
+  const cur = state.socket;
+  state.socket = null;
+  if (cur) {
+    try { cur.close(1000, "user disconnected"); } catch (_) {}
   }
 
   chrome.action.setBadgeText({ text: "" });

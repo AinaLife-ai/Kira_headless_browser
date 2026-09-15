@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.6
+# 浏览器插件 (Browser Plugin) 2.1.7
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -191,7 +191,7 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 | `download_max_count` | integer | `100` | 下载目录最多保留文件数 |
 | `download_max_bytes` | integer | `2147483648` | 单个下载大小上限（2GB）。下载是**流式落盘**，无论多大都不占内存 |
 | `upload_max_bytes` | integer | `209715200` | 上传大小上限（200MB）。内容要经 WebSocket 传输，别设太大 |
-| `upload_allow_any_path` | switch | `true` | 是否允许上传任意路径的文件。**关掉后只允许 `upload_allowed_dirs` 里的目录** —— 可防止模型把本机敏感文件外传 |
+| `upload_allow_any_path` | switch | `true` | 是否允许上传任意路径的文件（**默认开**，本插件定位是给 bot 完整浏览能力）。关掉后只允许 `upload_allowed_dirs` 里的目录 |
 | `upload_allowed_dirs` | list | `["data/files","data/temp"]` | 上传目录白名单（仅在上项关闭时生效）。用 realpath 归一，可防 `../` 穿越 |
 
 ---
@@ -469,6 +469,42 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.7（2026-09-15）
+
+**按 CodeRabbit 第五轮审查修复 9 项**：
+
+- 🔴 **非本机地址会用明文 `ws://` 传令牌**（CWE-319）：`buildWsUrl()` 无条件拼
+  `ws://`，而接入令牌就在 query string 里。host 可由用户配置 ——
+  一旦填远程主机，网络上的任何人都能抓到令牌，然后**拿到整个浏览器桥权限**。
+  → 回环地址用 `ws://`（不出网卡），其它地址**必须 `wss://`**；
+  用户填远程主机却想用 ws:// 时**直接报错**，而不是悄悄发明文。
+- 🔴 **旧连接的 `onclose` 会清掉新连接**：`disconnect()` 异步关旧 socket 后
+  立即允许重连；若旧 socket 的 `onclose` 在新 socket 已写入 `state.socket`
+  之后才执行，它会把**新连接引用清成 null**，还可能为旧连接起一次重连。
+  → 每次 `connect()` 捕获局部引用，所有回调先确认"自己仍是当前连接"。
+- 🔴 **替换旧连接时没清在途命令与下载 sink**：`_close_ws()` 只关 socket，
+  不清 `_pending` 也不收 `_sinks`；而旧连接的 `_cleanup` 又会因 session 已换
+  而直接返回 —— 旧命令一直等到超时，下载句柄也一直开着。
+  → 改用 `_force_close()`（一次做完 cancel 心跳 + 失败在途命令 + 收 sink）。
+- **扩展下载无条件带凭据**（CWE-319）：`credentials: "include"` 对 HTTP 目标
+  或 HTTPS→HTTP 重定向会送出非 Secure 的 Cookie。
+  → 仅 HTTPS 带凭据，并把 `redirect` 设为 `error`（**根治**跨协议泄漏，
+  而不是"跟随后再检查"——那时已经发出去了）。
+- **下载列表回传本机绝对路径**（CWE-200）：`chrome.downloads.search()` 的
+  `filename` 通常含用户名与本地目录结构，而扩展后端本来也用不了该路径。
+  → 只回文件名与必要元数据。
+- 回归检查 3 项：`bridge_e2e` 端口写死会撞车 → 改绑 `0` 让系统分配；
+  `callgraph` 的豁免"文件里有一处合法就跳过整个文件" →
+  改成按 AST 定位所属函数，只豁免 `_sid_of` 内部那处（并**反向验证**过：
+  同文件里再插一处不安全用法能报出来）。
+- `setup_guide` 的 Windows 浏览器路径只查一个环境变量 → 补
+  `%PROGRAMFILES(X86)%` 等常见位置（Edge 在 64 位系统上装在 x86 目录），
+  并跳过空环境变量（`Path("") / "x"` 会得到相对路径、误判本机存在）。
+
+**`upload_allow_any_path` 保持默认 `true`**（按需求）：本插件的定位是给 bot
+完整的浏览器能力，上传任意本机文件是预期功能。想收紧就把这项关掉，
+白名单在 `upload_allowed_dirs`。README 配置表已与代码/schema 对齐。
 
 ### v2.1.6（2026-09-15）
 

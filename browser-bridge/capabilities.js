@@ -205,7 +205,15 @@ async function downloadViaSession(params, cmdId) {
   const limit = Number(max_bytes) > 0 ? Number(max_bytes) : MAX_DOWNLOAD_BYTES;
 
   // 在扩展自己的上下文里 fetch —— 会带上浏览器已存的 Cookie（同源）
-  const resp = await fetch(url, { credentials: "include" });
+  // ⚠️ 凭据只能走 HTTPS。
+  //    明文 HTTP 或在重定向里跳到 HTTP，都会把非 Secure 的 Cookie
+  //    暴露在网络上（CWE-319）。这里直接用 redirect:"error" ——
+  //    与其"跟随后再检查"（已经发出去了），不如根本不让它跳。
+  const isHttps = url.toLowerCase().startsWith("https://");
+  const resp = await fetch(url, {
+    credentials: isHttps ? "include" : "omit",
+    redirect: "error",           // 不跟随重定向，杜绝跨协议泄漏
+  });
   if (!resp.ok) throw new Error(`下载失败，HTTP ${resp.status}`);
 
   const declared = Number(resp.headers.get("Content-Length") || 0);

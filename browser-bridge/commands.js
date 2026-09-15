@@ -116,8 +116,11 @@ async function listFiles(params) {
       files: items
         .filter((d) => d.filename)
         .map((d) => ({
+          // ⚠️ 只回**文件名**，不回绝对路径 ——
+          //    绝对路径里通常含用户名与本地目录结构，
+          //    而扩展后端本来也用不了那个路径做后续操作，
+          //    回给模型纯属信息泄露（CWE-200）。
           name: d.filename.split(/[\\/]/).pop(),
-          path: d.filename,
           size: d.totalBytes || d.fileSize || 0,
           mtime: d.endTime ? Date.parse(d.endTime) / 1000 : 0,
         })),

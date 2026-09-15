@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from ..harness import PLUGIN_DIR, load_module, section
+from ..harness import PLUGIN_DIR, load_module, section, src
 
 TITLE = "安全规则（域名 / 本机地址）"
 
@@ -78,6 +78,26 @@ def run(r) -> None:
             bad2.append(f"{host}: got={got} exp={expect}")
     r.ok("B1 本机等价写法全部被识别", not bad2,
          f"{len(LOCAL_CASES)} 个用例；不符={bad2 or '无'}")
+
+    section("B2. 扩展的 WS 地址：非本机必须 wss")
+    # 令牌放在 query string 里，明文 ws:// 到远程主机会把它暴露在网络上
+    pjs = src("browser-bridge/protocol.js")
+    r.ok("B2.1 有回环判定函数", "isLoopbackHost" in pjs)
+    r.ok("B2.2 非回环且非 allowInsecure 时抛错（不静默发明文）",
+         "allowInsecure" in pjs and "拒绝以明文 ws://" in pjs,
+         "把令牌明文发到远程 = 泄露整个浏览器桥权限")
+    ok_line = "const scheme = loopback ? \"ws\" : \"wss\";" in pjs
+    r.ok("B2.3 按回环与否选择 ws/wss", ok_line)
+    # 扩展下载不允许跟随重定向（跨协议会带出 cookie）
+    cap = src("browser-bridge/capabilities.js")
+    r.ok("B2.4 下载不跟随重定向（杜绝跨协议带 cookie）",
+         'redirect: "error"' in cap)
+    # 不把本机绝对路径回传给服务
+    cmds = src("browser-bridge/commands.js")
+    r.ok("B2.5 下载列表不返回绝对路径",
+         "d.filename," not in cmds.replace(" ", "").replace("\n", "")
+         or "path: d.filename" not in cmds,
+         "绝对路径含用户名与本地目录结构，且扩展侧本来也用不了")
 
     section("C. check_url 整体行为")
     # 黑名单优先

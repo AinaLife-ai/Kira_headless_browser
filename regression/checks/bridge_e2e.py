@@ -124,7 +124,6 @@ def run(r) -> None:
         import websockets
 
         bridge = B.BrowserBridge(command_timeout=15.0)
-        port = 8793
 
         class StarletteLike:
             """把 websockets 的连接适配成 Starlette 接口（bridge.py 是按后者写的）。"""
@@ -151,7 +150,10 @@ def run(r) -> None:
         async def handler(ws):
             await bridge.handle_connection(StarletteLike(ws))
 
-        server = await websockets.serve(handler, "127.0.0.1", port)
+        # ⚠️ 端口写死会撞车（并行跑/被别的程序占用）→ E0 直接失败。
+        #    绑 0 让系统分配空闲端口，再从 server.sockets 读回来。
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
         # 持有引用直到结束：Popen 被 GC 回收会提前杀掉子进程
         proc = subprocess.Popen(["node", str(client_path), str(port)],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

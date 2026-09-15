@@ -83,12 +83,39 @@ export const DEFAULT_PORT = 5267;
 // 默认按安装时填的令牌自动发现；如果路由变了，改这一处即可。
 export const WS_PATH = "/ws/plugin/headless_browser/bridge";
 
-/** 拼出完整的 WebSocket 地址 */
-export function buildWsUrl(host, port, token) {
+/** 本机地址判定（ws:// 只允许用在回环） */
+function isLoopbackHost(h) {
+  const x = String(h || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return x === "localhost" || x === "127.0.0.1" || x === "::1"
+      || x === "0.0.0.0" || x.endsWith(".localhost") || x === "127.0.0.1.";
+}
+
+/**
+ * 拼出完整的 WebSocket 地址。
+ *
+ * ⚠️ 令牌是放在 **query string** 里的。`ws://` 是明文传输 ——
+ *    只要 host 不是本机，网络上的任何人都能抓到这枚令牌，
+ *    然后拿到整个浏览器桥的权限。所以：
+ *      * 回环地址 → `ws://`（本机，不出网卡，安全）
+ *      * 其它地址 → **必须 `wss://`**（证书校验由浏览器完成）
+ *    如果用户填的是远程主机又想用 ws://，这里直接抛错，
+ *    而不是悄悄把令牌明文发出去。
+ */
+export function buildWsUrl(host, port, token, { allowInsecure = false } = {}) {
   const h = (host || DEFAULT_HOST).trim();
   const p = String(port || DEFAULT_PORT).trim();
-  return `ws://${h}:${p}${WS_PATH}?token=${encodeURIComponent(token)}`;
+  const loopback = isLoopbackHost(h);
+  if (!loopback && !allowInsecure) {
+    throw new Error(
+      `拒绝以明文 ws:// 连接非本机地址 ${h} —— 接入令牌会暴露在网络上。` +
+      `请改用 wss://（把地址填成 https 形式），或确认对方确实是本机。`
+    );
+  }
+  const scheme = loopback ? "ws" : "wss";
+  return `${scheme}://${h}:${p}${WS_PATH}?token=${encodeURIComponent(token)}`;
 }
+
+export { isLoopbackHost };
 
 // 保活：MV3 的 Service Worker 会被回收，用 alarms 定期唤醒
 export const KEEPALIVE_ALARM = "kira-bridge-keepalive";

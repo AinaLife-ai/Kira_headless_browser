@@ -396,12 +396,12 @@
   "upload_allow_any_path": {
     "name": "Allow Any Upload Path",
     "type": "switch",
-    "default": false,
-    "hint": "OFF (default): only files under upload_allowed_dirs can be uploaded - prevents the model from exfiltrating arbitrary local files. ON: any readable file.",
+    "default": true,
+    "hint": "ON (default): any readable local file can be uploaded - this plugin is meant to give the bot full browser capability. OFF: only files under upload_allowed_dirs.",
     "locales": {
       "zh": {
         "name": "允许上传任意路径",
-        "hint": "【默认关】只允许上传 upload_allowed_dirs 里的文件 —— 防止模型把本机敏感文件外传到网页。打开后允许任意可读文件。"
+        "hint": "【默认开】允许上传任意可读文件 —— 本插件的定位是给 bot 完整的浏览能力。关掉后只允许 upload_allowed_dirs 里的目录，可防止本机敏感文件被外传。"
       }
     }
   },

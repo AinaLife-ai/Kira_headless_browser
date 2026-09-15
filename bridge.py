@@ -130,15 +130,16 @@ class BrowserBridge:
         # 单连接模型：踢掉旧连接
         if self._ws is not None:
             logger.warning("已有扩展连接，主动断开旧连接")
-            # ⚠️ 必须先把旧心跳任务取消掉。
-            #    旧连接的接收循环会走到 _cleanup(old_session)，但那时
-            #    self._session_id 已经换成新会话，_cleanup 会直接返回 ——
-            #    旧心跳任务就永远活着，而且它用的是**共享的 self._ws**，
-            #    会往新连接上发 ping。每次重连都多留一个协程。
-            if self._heartbeat_task and not self._heartbeat_task.done():
-                self._heartbeat_task.cancel()
-            self._heartbeat_task = None
-            await self._close_ws(self._ws, code=4001, reason="Replaced by a new connection")
+            # ⚠️ 必须用 _force_close，不能用 _close_ws。
+            #    _close_ws 只是关 socket，它**不清 _pending 也不收 _sinks**；
+            #    而旧连接的接收循环随后走到 _cleanup 时会因为
+            #    self._session_id 已被换掉而直接 return ——
+            #    结果：旧连接上的在途命令一直等到超时，
+            #          下载 sink 的文件句柄也一直开着到那时。
+            #    _force_close 会一次性做完：cancel 心跳 + 失败在途命令 +
+            #    收掉下载 sink。
+            await self._force_close(self._ws, code=4001,
+                                    reason="Replaced by a new connection")
 
         self._ws = ws
         self._session_id = session_id

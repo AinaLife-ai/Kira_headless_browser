@@ -112,11 +112,11 @@ class BrowserPlugin(BasePlugin):
         # 上传/发送文件的**路径白名单**。
         # 默认放行任意路径（方便），但可以收紧到指定目录 ——
         # 否则模型可以借"上传"把本机任意文件外传。
-        # ⚠️ 默认值必须与 schema.json 一致，且取**安全值**。
-        #    之前 schema 写 true、这里也写 true，看着一致；
-        #    但只要有人只改一处，或者配置文件缺这一项，
-        #    实际行为就会偏离声明 —— 这类"默认值分裂"很容易被忽略。
-        self.upload_allow_any_path = _b(cfg.get("upload_allow_any_path", False))
+        # ⚠️ 默认值必须与 schema.json 一致（两处写同一个值）。
+        #    这里**有意选 true**：本插件的定位是"完全全能的浏览器操作"，
+        #    上传任何本机文件是预期能力（比如把本地 PDF 传到网盘）。
+        #    想收紧的人把这项关掉即可，白名单在 upload_allowed_dirs。
+        self.upload_allow_any_path = _b(cfg.get("upload_allow_any_path", True))
         _dirs = cfg.get("upload_allowed_dirs") or ["data/files", "data/temp"]
         if isinstance(_dirs, str):
             _dirs = _dirs.splitlines()

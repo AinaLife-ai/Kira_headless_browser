@@ -139,7 +139,12 @@ def run(r) -> None:
          "async function execJs(" in cap and "chrome.userScripts.execute" in cap)
     r.ok("C7 扩展侧实现 upload（DataTransfer）",
          "async function upload(" in cap and "DataTransfer" in src("browser-bridge/content.js"))
+    # 看**意图**而不是写死的字面量：现在凭据是按协议条件携带的
+    # （HTTPS 才带，防止明文泄漏），所以断言"用用户会话"这一点。
+    _dl = cap.split("async function downloadViaSession(")[-1][:1500]
     r.ok("C8 扩展侧实现 download（用户会话 + 分块）",
-         "async function downloadViaSession(" in cap and "credentials: \"include\"" in cap)
+         "async function downloadViaSession(" in cap
+         and "credentials" in _dl and '"include"' in _dl
+         and "sendChunk" in cap)
     r.ok("C9 扩展侧实现 cookie 导出/写入",
          "async function cookieGet(" in cap and "async function cookieSet(" in cap)

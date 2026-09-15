@@ -132,15 +132,36 @@ def run(r) -> None:
          f"不合规={bad_hook or '无'}")
 
     section("D. 会话标识取法正确（event.session 是对象，不是字符串）")
+    # ⚠️ 之前是"文件里只要有一处合法的 _sid_of 兜底，整个文件都跳过" ——
+    #    等于同一文件里其它不安全的 str(event.session) 全被放过。
+    #    改成按 **AST 定位所属函数**，只豁免 _sid_of 内部那处。
     wrong = []
     for f in _iter_py():
         src = f.read_text(encoding="utf-8")
-        for i, ln in enumerate(src.splitlines(), 1):
-            if "str(event.session)" in ln or "str(event.session" in ln:
-                # 允许在 _sid_of 里作为兜底（那里有 count(":")==2 校验）
-                if "_sid_of" in src and "count(\":\") == 2" in src:
+        tree = ast.parse(src)
+        # 找出所有"函数内使用了 str(event.session)"的位置
+        for fn in [n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            bad_here = []
+            for node in ast.walk(fn):
+                # 要匹配的是**调用** str(event.session)，不是字符串常量。
+                # ast.unparse 能稳定还原成 "str(event.session)"。
+                if not isinstance(node, ast.Call):
                     continue
-                wrong.append(f"{f.name}:{i}")
+                try:
+                    expr = ast.unparse(node)
+                except Exception:
+                    continue
+                if expr.startswith("str(event.session") or expr.startswith("str(self.event.session"):
+                    bad_here.append(getattr(node, "lineno", 0))
+            if not bad_here:
+                continue
+            body = ast.get_source_segment(src, fn) or ""
+            # 只有在 _sid_of 内部、且带 `count(":") == 2` 校验时才放行
+            if fn.name == "_sid_of" and 'count(":") == 2' in body:
+                continue
+            for ln in bad_here:
+                wrong.append(f"{f.name}:{ln} ({fn.name})")
     r.ok("D1 没有把 event.session 直接当字符串用",
          not wrong,
          f"可疑={wrong or '无'}（event.session 是 Session 对象，"

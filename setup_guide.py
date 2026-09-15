@@ -60,24 +60,49 @@ def known_chromium_browsers() -> List[Dict[str, str]]:
     """列出这台机器上可能存在的 Chromium 系浏览器（用于给用户点名）。"""
     home = Path.home()
     osname = detect_os()
+    # ⚠️ Windows 的安装位置有多个，且**都不在 PATH 上** ——
+    #    只查一个环境变量会漏掉大多数用户：
+    #      * Chrome 常见于 %PROGRAMFILES%\Google\Chrome\...（64 位）
+    #        或 %PROGRAMFILES(X86)%\...（32 位 / 老安装）
+    #      * Edge 装在 %PROGRAMFILES(X86)%\Microsoft\Edge\...（即使系统是 64 位）
+    #    另外环境变量为空时 `Path("") / "x"` 会得到**相对路径**，
+    #    可能误判本机存在某个无关目录 —— 所以空值要直接跳过。
+    def _win_paths(env_names, rel):
+        out = []
+        for ev in env_names:
+            base = os.environ.get(ev)
+            if not base:
+                continue
+            out.append(Path(base) / rel)
+        return out
+
     cands = {
         "chrome": {
-            "windows": [Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe"],
+            "windows": (
+                _win_paths(["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"],
+                           "Google/Chrome/Application/chrome.exe")
+            ),
             "macos": [Path("/Applications/Google Chrome.app")],
             "linux": [Path("/usr/bin/google-chrome"), Path("/usr/bin/google-chrome-stable")],
         },
         "edge": {
-            "windows": [Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe"],
+            "windows": (
+                _win_paths(["PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"],
+                           "Microsoft/Edge/Application/msedge.exe")
+            ),
             "macos": [Path("/Applications/Microsoft Edge.app")],
             "linux": [Path("/usr/bin/microsoft-edge"), Path("/usr/bin/microsoft-edge-stable")],
         },
         "brave": {
-            "windows": [Path(os.environ.get("PROGRAMFILES", "")) / "BraveSoftware/Brave-Browser/Application/brave.exe"],
+            "windows": (
+                _win_paths(["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"],
+                           "BraveSoftware/Brave-Browser/Application/brave.exe")
+            ),
             "macos": [Path("/Applications/Brave Browser.app")],
             "linux": [Path("/usr/bin/brave-browser")],
         },
         "chromium": {
-            "windows": [],
+            "windows": _win_paths(["LOCALAPPDATA"], "Chromium/Application/chrome.exe"),
             "macos": [Path("/Applications/Chromium.app")],
             "linux": [Path("/usr/bin/chromium"), Path("/usr/bin/chromium-browser")],
         },
