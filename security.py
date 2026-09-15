@@ -35,6 +35,71 @@ _LOCAL_HOSTS = frozenset({
 })
 
 
+def _normalize_ipv4_literal(h: str) -> Optional[str]:
+    """把浏览器能识别、但 ``ipaddress`` 认不出的 IPv4 写法归一成点分十进制。
+
+    为什么要做：Chromium 会把 ``127.1`` / ``0x7f000001`` / ``0177.0.0.1``
+    都当作 ``127.0.0.1``。如果我们只认标准写法，这些就能绕过本机拦截，
+    直接访问 KiraAI 自己的 WebUI 端口。
+
+    支持的形式（与 WHATWG URL 规范一致）：
+      * 十进制整体：``2130706433``
+      * 十六进制整体：``0x7f000001``
+      * 八进制整体：``017700000001``
+      * 分段简写：``127.1``（补零）、``127.0.1``
+      * 每段可为 0x 十六进制 / 0 开头八进制：``0x7f.0.0.1``
+    """
+    raw = (h or "").strip().rstrip(".")
+    if not raw:
+        return None
+
+    parts = raw.split(".")
+    # 多于 4 段不是合法 IPv4
+    if len(parts) > 4:
+        return None
+
+    numbers = []
+    for p in parts:
+        if p == "":
+            return None
+        try:
+            if p.lower().startswith("0x"):
+                numbers.append(int(p, 16))
+            elif len(p) > 1 and p.startswith("0"):
+                numbers.append(int(p, 8))
+            else:
+                numbers.append(int(p, 10))
+        except ValueError:
+            return None
+
+    if any(n < 0 for n in numbers):
+        return None
+
+    # 最后一段以外的段必须在 0-255；最后一段可以承载剩余位数
+    if len(numbers) > 1:
+        if any(n > 255 for n in numbers[:-1]):
+            return None
+        if numbers[-1] > 0xFFFFFF:
+            return None
+
+    # 按 WHATWG 规则拼成 32 位
+    if len(numbers) == 1:
+        if numbers[0] > 0xFFFFFFFF:
+            return None
+        value = numbers[0]
+    else:
+        value = numbers[-1]
+        for i, n in enumerate(numbers[:-1]):
+            value += n << (8 * (3 - i))
+        if value > 0xFFFFFFFF:
+            return None
+
+    return "%d.%d.%d.%d" % (
+        (value >> 24) & 255, (value >> 16) & 255,
+        (value >> 8) & 255, value & 255,
+    )
+
+
 def is_local_host(host: str) -> bool:
     """判断 host 是否指向本机（含各种等价写法）。"""
     h = (host or "").strip().strip("[]").rstrip(".").lower()
@@ -43,10 +108,13 @@ def is_local_host(host: str) -> bool:
     if h in _LOCAL_HOSTS or h.endswith(".localhost"):
         return True
 
-    # 纯数字是十进制形式的 IPv4（2130706433 == 127.0.0.1）
+    # 先按浏览器规则归一化，再判断 —— 否则 127.1 / 0x7f000001 / 0177.0.0.1
+    # 这类写法会绕过本机拦截
+    normalized = _normalize_ipv4_literal(h)
+    if normalized:
+        h = normalized
+
     try:
-        if h.isdigit():
-            return ipaddress.ip_address(int(h)).is_loopback
         ip = ipaddress.ip_address(h)
         return ip.is_loopback or ip.is_unspecified
     except ValueError:
@@ -144,10 +212,44 @@ def _matches(host: str, pat: str) -> bool:
     if not any(ch in pat for ch in "*?["):
         return h == pat or h.endswith("." + pat)
 
-    # 2) 两端通配的关键词模式：整串子串匹配
+    # 2) 两端通配的关键词模式：在**单个标签内**做子串匹配。
+    #
+    #    这里曾经是整串子串匹配，会让白名单 *.example* 顺带放行
+    #    example.com.evil.test（"example" 出现在某个标签里就算命中），
+    #    等于把写权限授给了 evil.test。改成逐标签比较后，
+    #    只有真正含该关键词的那个标签才算命中。
     if pat.startswith("*") and pat.endswith("*") and pat.count("*") == 2:
+        # 这两种写法语义**不同**，不能混为一谈：
+        #   ``*bank*``   —— 关键词，整串任意位置子串匹配（用户明确要关键词拦截）
+        #   ``*.bank*``  —— **域名主体**里含关键词，不允许跨到别的域名
+        # 区分依据就是那个点。丢了它，``*.bank*`` 就会被
+        # bankofamerica.com.evil.com 这种借关键词过关。
+        keyword_form = not pat.lstrip("*").startswith(".")
         core = pat.strip("*").lstrip(".")
-        return bool(core) and core in h
+        if not core:
+            return False
+        if keyword_form:
+            return core in h
+        # ⚠️ 判据是「**域名主体**里含关键词」，而不是「整串里含关键词」。
+        #
+        #    域名主体 = 去掉 www 之后的注册域，即最后两个标签
+        #    （bankofamerica.com、bank.com.cn 这种多级后缀另算）。
+        #    只看整串的话，example.com.evil.test 会因为第一个标签是
+        #    "example" 而命中 *.example* —— 等于把权限授给了 evil.test。
+        #
+        #    多级公共后缀（com.cn / co.uk / com.br …）单独处理，
+        #    否则 bank.com.cn 的主体会被算成 com.cn，规则反而漏掉。
+        MULTI_TLD = {"com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+                     "co.uk", "org.uk", "me.uk", "co.jp", "co.kr",
+                     "com.br", "com.tw", "com.hk", "com.sg", "co.in",
+                     "com.au", "co.nz", "com.mx", "com.tr"}
+        if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_TLD:
+            body_labels = labels[-3:]
+        elif len(labels) >= 2:
+            body_labels = labels[-2:]
+        else:
+            body_labels = labels
+        return any(core in label for label in body_labels)
 
     # 拆成「通配符左边的字面量」+「含通配符的剩余部分」。
     #
@@ -175,8 +277,26 @@ def _matches(host: str, pat: str) -> bool:
     #    也可能不含（"*.example.com" 的 "example.com"），那就是精确后缀匹配，
     #    绝不会命中 "example.com.evil.com"。
     if not literal:
-        return any(_glob_match(".".join(labels[i:]), tail)
-                   for i in range(len(labels)))
+        # tail 里**不含**通配符时（"*.example.com"）→ 精确后缀匹配，
+        # 天然不会命中 example.com.evil.com
+        if not any(ch in tail for ch in "*?["):
+            return h == tail or h.endswith("." + tail)
+        # tail 含通配符时（"*.bank*" / "*.example*"）—— 注意 tail 里**没有点**，
+        # 说明这是「一个标签」的模式（关键词类规则）。那就只比对域名主体
+        # （最后两个标签，例如 bankofamerica.com），不能拿整串去比，
+        # 否则 bankofamerica.com.evil.com 也会命中。
+        if "." not in tail:
+            body = ".".join(labels[-2:]) if len(labels) >= 2 else labels[-1]
+            if _glob_match_segment(body, tail):
+                return True
+            # 也允许纯单标签域名（如内网名 "bank"）
+            return _glob_match_segment(labels[-1], tail)
+        # tail 里带点（"*.sub.example.com"）→ 逐标签起点试后缀匹配
+        for i in range(len(labels)):
+            rest = ".".join(labels[i:])
+            if _glob_match_segment(rest, tail):
+                return True
+        return False
 
     # 4) "bank*" / "github.*"：字面量必须从某个标签起始处对齐
     for i in range(len(labels)):
@@ -185,6 +305,22 @@ def _matches(host: str, pat: str) -> bool:
             return True
 
     return False
+
+
+def _glob_match_segment(text: str, pattern: str) -> bool:
+    """与 :func:`_glob_match` 相同，但要求通配符**不跨越标签分隔符**。
+
+    用于 ``*.bank*`` 这类规则的收尾匹配：``example.com.evil.test`` 从
+    ``example`` 起虽然以 ``example`` 开头，但后面还有 ``.com.evil.test``
+    这些**其它域名**的标签，不应该算命中。
+    """
+    if not pattern:
+        return text == ""
+    t_labels = text.split(".")
+    p_labels = pattern.split(".")
+    if len(t_labels) != len(p_labels):
+        return False
+    return all(fnmatch.fnmatch(t, p) for t, p in zip(t_labels, p_labels))
 
 
 def _glob_match(text: str, pattern: str) -> bool:

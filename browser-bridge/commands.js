@@ -1,3 +1,8 @@
+import {
+  resolveTab, assertInjectable, callContent, detectBrowser, state,
+} from "./shared.js";
+import { ensureUserScripts } from "./capabilities.js";
+
 /**
  * 补齐的命令实现：把无头后端有、扩展桥原先缺的能力都做出来。
  * 挂在 background.js 的 execute() 分发里。

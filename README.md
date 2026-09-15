@@ -76,8 +76,8 @@
 
 | 浏览器 | 支持 | 说明 |
 |---|---|---|
-| Chrome | ✅ 116+ | |
-| Edge | ✅ 116+ | 同为 Chromium 内核，扩展机制一致；打开的是 `edge://extensions` |
+| Chrome | ✅ 116+（**执行 JS 需 120+**） | MV3 本身 116 起可用；`chrome.userScripts` 从 120 起提供，所以 `browser_script` 在 116–119 上不可用 |
+| Edge | ✅ 116+（**执行 JS 需 120+**） | 同为 Chromium 内核，扩展机制一致；打开的是 `edge://extensions` |
 | Brave / Vivaldi / Opera | ✅ | Chromium 系，`chrome.*` API 一致 |
 | Firefox | ❌ | Firefox 的 MV3 用 event page，**不接受** `background.service_worker` |
 | Safari | ❌ | 扩展格式完全不同 |
@@ -275,6 +275,9 @@ OSCrypt（Linux）包裹，这三者都是**用户级、与路径无关**的—�
 | 用你现有的登录态 | ✅ 天然 | ✅（`inherit` 复制） |
 
 **两个后端接口完全对称** —— 换后端不丢能力，只是"在谁的浏览器里做"不同。
+
+> 唯一的版本例外：**执行 JavaScript** 依赖 `chrome.userScripts`（Chrome/Edge 120+）。
+> 在 116–119 上该能力不可用，插件会明确告诉你原因，其它能力不受影响。
 
 ---
 

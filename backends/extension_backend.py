@@ -31,12 +31,14 @@ class ExtensionBackend(Backend):
     MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
     def __init__(self, bridge, protocol, max_upload_bytes=None,
-                 max_download_bytes=None, download_timeout=None):
+                 max_download_bytes=None, download_timeout=None,
+                 content_page_size=8000):
         self._bridge = bridge
         self._P = protocol
         self.max_upload_bytes = int(max_upload_bytes or self.MAX_UPLOAD_BYTES)
         self.max_download_bytes = max_download_bytes or 2 * 1024 ** 3
         self.download_timeout = download_timeout or 600.0
+        self.content_page_size = int(content_page_size or 8000)
 
     # ─── Backend 接口 ────────────────────────────────────────────────
 
@@ -57,9 +59,11 @@ class ExtensionBackend(Backend):
     async def close(self) -> None:
         await self._bridge.close()
 
-    async def _send(self, cmd: str, params: Optional[dict] = None, timeout=None) -> OpResult:
+    async def _send(self, cmd: str, params: Optional[dict] = None, timeout=None,
+                    cmd_id: str = None) -> OpResult:
         try:
-            data = await self._bridge.send_command(cmd, params or {}, timeout=timeout)
+            data = await self._bridge.send_command(cmd, params or {},
+                                                   timeout=timeout, cmd_id=cmd_id)
             return OpResult(data=data, backend=self.name)
         except Exception as e:
             return OpResult.fail(str(e), self.name)
@@ -73,9 +77,42 @@ class ExtensionBackend(Backend):
         return r
 
     async def get_page(self, detail: str = "text", tab_id=None,
-                       offset: int = 0, max_chars=None) -> OpResult:
-        return await self._send(self._P.CMD_GET_PAGE,
-                                {"detail": detail or "text", "tab_id": tab_id})
+                       offset: int = 0, max_chars=None, selector: str = "",
+                       **kw) -> OpResult:
+        """读页面。**必须和 HeadlessBackend 返回同样形状** ——
+        路由可能在两者间切换，若只有一边分页，模型拿到的字段会随后端而变。
+
+        selector 走 CMD_EXTRACT 取单个元素的文本（扩展侧不做 selector 读）。
+        """
+        if selector:
+            r = await self._send(self._P.CMD_EXTRACT,
+                                 {"selector": selector, "limit": 1, "tab_id": tab_id})
+            if not r.ok:
+                return r
+            items = (r.data or {}).get("items") or []
+            content = items[0] if items else ""
+            return OpResult(data={"title": "", "url": (r.data or {}).get("url", ""),
+                                  "content": content, "total_chars": len(content),
+                                  "offset": 0, "returned": len(content),
+                                  "has_more": False, "next_offset": None},
+                            backend=self.name)
+
+        r = await self._send(self._P.CMD_GET_PAGE,
+                             {"detail": detail or "text", "tab_id": tab_id})
+        if not r.ok:
+            return r
+        # 在这里补上分页（扩展侧一次性回全量，分页放到插件侧做）
+        d = dict(r.data or {})
+        full = d.get("content") or ""
+        total = len(full)
+        limit = int(max_chars) if max_chars else self.content_page_size
+        start = max(0, int(offset or 0))
+        chunk = full[start:start + limit] if limit and limit > 0 else full[start:]
+        end = start + len(chunk)
+        d.update({"content": chunk, "total_chars": total, "offset": start,
+                  "returned": len(chunk), "has_more": end < total,
+                  "next_offset": end if end < total else None})
+        return OpResult(data=d, backend=self.name)
 
     async def extract(self, selector: str, attr=None, limit: int = 50, tab_id=None) -> OpResult:
         return await self._send(self._P.CMD_EXTRACT,
@@ -152,17 +189,22 @@ class ExtensionBackend(Backend):
                 return OpResult.fail(
                     f"文件过大（{size} > {self.max_upload_bytes} 字节），已拒绝上传。"
                     f"如需放开请调整插件配置里的 upload_max_bytes。", self.name)
-            with open(resolved, "rb") as f:
-                raw = f.read()
-            # 分块（每块 256KB）base64，避免一条消息过大
-            step = 256 * 1024
-            chunks = [base64.b64encode(raw[i:i + step]).decode()
-                      for i in range(0, len(raw), step)]
+            # 逐块读、逐块编码，避免把整份文件同时拿在内存里
             name = os.path.basename(resolved)
+            step = 256 * 1024
+            chunks = []
+            with open(resolved, "rb") as f:
+                while True:
+                    block = f.read(step)
+                    if not block:
+                        break
+                    chunks.append(base64.b64encode(block).decode())
+            # 仍然一次下发（扩展侧需要一个完整 File 才能塞进 input.files），
+            # 但插件侧不再额外留一份 raw 副本；上限由 upload_max_bytes 控制。
             return await self._send(self._P.CMD_UPLOAD, {
                 "selector": selector, "name": name,
-                "mime": _guess_mime(name), "chunks": chunks,
-            }, timeout=max(30.0, size / (1024 * 1024) * 2))
+                "mime": _guess_mime(name), "chunks": chunks, "limit": self.max_upload_bytes,
+            }, timeout=max(60.0, size / (1024 * 1024) * 3))
         except Exception as e:
             return OpResult.fail(f"上传失败: {e}", self.name)
 
@@ -170,30 +212,34 @@ class ExtensionBackend(Backend):
         """下载文件。
 
         让**扩展用用户浏览器的会话**去抓（带上已登录的 Cookie），
-        再分块回传给插件落盘。比让插件自己裸奔去下要好：
-        登录态资源也能下，而且不会把文件塞进浏览器的下载目录。
+        分块回传给插件。
+
+        内存行为：分块**边收边写盘**（由 BrowserBridge 的 sink 负责），
+        调用方拿到的只是「写了多少字节」。所以多大的文件内存都是平的 ——
+        旧实现把所有分块攒成列表再一次性返回，大文件会占住与整个文件
+        （base64 后还 ×1.33）相当的内存。
         """
-        import base64
+        import os
+        import uuid as _uuid
+
+        cmd_id = _uuid.uuid4().hex
+        self._bridge.open_download_sink(cmd_id, path, limit=self.max_download_bytes)
         r = await self._send(self._P.CMD_DOWNLOAD,
                              {"url": url, "max_bytes": self.max_download_bytes},
-                             timeout=self.download_timeout)
+                             timeout=self.download_timeout,
+                             cmd_id=cmd_id)
         if not r.ok:
             return r
-        chunks = (r.data or {}).get("chunks") or []
-        if not chunks:
-            return OpResult.fail("扩展没有回传文件内容", self.name)
-        try:
-            with open(path, "wb") as f:
-                for c in chunks:
-                    f.write(base64.b64decode(c))
-            import os
-            size = os.path.getsize(path)
-            return OpResult(data={"path": path, "size": size,
-                                  "url": (r.data or {}).get("url", url),
-                                  "mime": (r.data or {}).get("mime")},
-                            backend=self.name)
-        except Exception as e:
-            return OpResult.fail(f"写入下载文件失败: {e}", self.name)
+        size = (r.data or {}).get("bytes")
+        if size is None:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+        return OpResult(data={"path": path, "size": size,
+                              "url": url,
+                              "mime": (r.data or {}).get("mime")},
+                        backend=self.name)
 
     async def get_info(self) -> OpResult:
         return await self._send(self._P.CMD_GET_INFO)

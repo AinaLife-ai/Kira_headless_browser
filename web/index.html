@@ -246,7 +246,7 @@ async function refresh() {
       }).join("");
     }
 
-    $("wspath").innerHTML = "WebSocket 路径：<code>" + (b.connected ? "/ws/plugin/kira_browser_bridge/bridge" : "/ws/plugin/kira_browser_bridge/bridge") + "</code>（扩展已自动使用）";
+    $("wspath").innerHTML = "WebSocket 路径：<code>" + (b.ws_path || "/ws/plugin/headless_browser/bridge") + "</code>（扩展已自动使用）";
 
   } catch (e) {
     $("conn").innerHTML = '<span class="dot off"></span>读取失败';

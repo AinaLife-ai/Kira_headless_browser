@@ -47,7 +47,19 @@ from .tokens import ensure_token, is_current_token, token_expiry
 
 logger = get_logger("browser_merged", "cyan")
 
-PLUGIN_ID = "browser"
+def _read_plugin_id() -> str:
+    """插件 id 以 manifest.json 为准，避免代码与清单两处硬编码跑偏
+    （跑偏的后果：扩展连到不存在的 WS 路由）。"""
+    try:
+        import json as _json
+        with open(Path(__file__).resolve().parent / "manifest.json",
+                  encoding="utf-8") as f:
+            return _json.load(f).get("plugin_id") or "headless_browser"
+    except Exception:
+        return "headless_browser"
+
+
+PLUGIN_ID = _read_plugin_id()
 
 #: 扩展侧二次确认弹窗的等待秒数（与 browser-bridge/protocol.js 对齐）
 CONFIRM_WAIT_SECONDS = 45
@@ -997,7 +1009,9 @@ class BrowserPlugin(BasePlugin):
         return {"ok": True, "token": self._token, "expires": token_expiry(),
                 "never_expires": token_expiry() is None,
                 "changed": self._token != before,
-                "ws_path": "/ws/plugin/browser/bridge"}
+                # 路径里的插件 id 必须与 manifest.plugin_id 一致，
+                # 否则扩展会连到不存在的路由
+                "ws_path": f"/ws/plugin/{PLUGIN_ID}/bridge"}
 
     @register.page(
         "/panel",

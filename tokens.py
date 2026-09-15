@@ -223,6 +223,13 @@ def is_current_token(token: Optional[str], data_dir: Optional[Path] = None) -> b
         # 磁盘上没有令牌可对照（还没签发过）—— 保守放行，框架的握手校验仍在
         return True
 
+    if current and not incoming_jti:
+        # 当前那枚**有** jti，而进来的这枚没有 → 它不可能是"当前"这枚，
+        # 只可能是更早签发的。用户点过「重新生成」后它必须失效，
+        # 不能因为 tv 相同就放行（tv 依赖的是 access_token，重新生成不改它）。
+        logger.info("拒绝无 jti 的旧令牌：当前令牌已带 jti，说明该令牌早于最近一次轮换")
+        return False
+
     # 老令牌（无 jti）：退回 tv 指纹比对
     try:
         import jwt as _jwt

@@ -147,6 +147,22 @@
   }
 
 
+  /** 鼠标按下/释放的统一目标解析：
+   *  有坐标就用坐标处的元素（down/up 才会落在同一个元素上），
+   *  没坐标就用 activeElement，再退到 body。 */
+  function mouseTarget(payload) {
+    const x = payload && payload.x, y = payload && payload.y;
+    if (x !== undefined && x !== null && y !== undefined && y !== null) {
+      return document.elementFromPoint(Number(x), Number(y)) || document.body;
+    }
+    return document.activeElement || document.body;
+  }
+
+  function describeTarget(el) {
+    return el === document.body ? "body"
+      : `${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""}`;
+  }
+
   /** 构造 MouseEvent 的 init（坐标 + 按键） */
   function mouseInit(x, y, button, clickCount) {
     return {
@@ -386,17 +402,18 @@
     },
 
     mouse_down(payload) {
-      const { button } = payload;
-      const el = document.elementFromPoint(0, 0) || document.body;
-      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: button || "left" }));
-      return { ok: true };
+      // ⚠️ MouseEvent.button 是**数字**，"left" 会被转成 0 →
+      // 右键/中键全被当成左键。必须用 mouseInit 做映射。
+      // 另外 down/up 必须落在**同一个元素**上，否则按下和释放不是一对。
+      const el = mouseTarget(payload);
+      el.dispatchEvent(new MouseEvent("mousedown", mouseInit(payload.x, payload.y, payload.button)));
+      return { ok: true, match: describeTarget(el) };
     },
 
     mouse_up(payload) {
-      const { button } = payload;
-      const el = document.activeElement || document.body;
-      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: button || "left" }));
-      return { ok: true };
+      const el = mouseTarget(payload);
+      el.dispatchEvent(new MouseEvent("mouseup", mouseInit(payload.x, payload.y, payload.button)));
+      return { ok: true, match: describeTarget(el) };
     },
 
     mouse_wheel(payload) {
@@ -497,12 +514,16 @@
       // 页面里的 iframe 是无法从顶层文档 querySelector 到的。
       // 直接说"找不到元素"会让模型反复改选择器，白绕一圈；
       // 这里点破原因，让它转而用文字匹配或让用户确认目标位置。
-      if (window.top !== window.self) {
+      // ⚠️ 只在「用 selector 定位」时才提示 iframe ——
+      // text / index 两条分支不走 selector，若在这里硬套，
+      // 会用一个不存在的选择器判断后直接 fail，把本来能点的元素也拦掉。
+      if (!selector) {
+        /* text / index 定位成功，无需 iframe 提示 */
+      } else if (window.top !== window.self) {
         /* 已经在子框架里，继续 */
       } else if (document.querySelector("iframe, frame")) {
-        // 仅当选择器在顶层文档确实无匹配时，提示可能藏在 iframe 里
         try {
-          if (!document.querySelector(selector || "____none____")) {
+          if (!document.querySelector(selector)) {
             return fail(
               `顶层文档里找不到「${selector}」。该页面包含 iframe，` +
               `目标元素可能在内嵌页面里 —— 扩展目前不注入 iframe，` +

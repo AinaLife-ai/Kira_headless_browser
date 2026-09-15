@@ -71,8 +71,10 @@ class BrowserBridge:
         # 心跳任务
         self._heartbeat_task: Optional[asyncio.Task] = None
 
-        # cmd_id -> [base64 分块]  下载时扩展会边收边回传
-        self._chunks: Dict[str, list] = {}
+        # cmd_id -> 一个「分块接收器」。下载时扩展边收边回传，
+        # 这里**边收边写盘**，不把整份文件攒在内存里。
+        #   {"path": 目标文件, "handle": 打开的文件对象, "total": 已收字节}
+        self._sinks: Dict[str, dict] = {}
 
         # 统计
         self.commands_sent = 0
@@ -223,7 +225,8 @@ class BrowserBridge:
             if not fut.done():
                 fut.set_exception(BridgeNotConnected("扩展连接已失效"))
         self._pending.clear()
-        self._chunks.clear()
+        for cid in list(self._sinks):
+            self._abort_sink(cid, RuntimeError("disconnected"))
 
         self._ws = None
         self._hello = None
@@ -246,7 +249,8 @@ class BrowserBridge:
             if not fut.done():
                 fut.set_exception(BridgeNotConnected("扩展连接已断开"))
         self._pending.clear()
-        self._chunks.clear()
+        for cid in list(self._sinks):
+            self._abort_sink(cid, RuntimeError("disconnected"))
 
         self._ws = None
         self._session_id = None
@@ -304,11 +308,30 @@ class BrowserBridge:
                 logger.debug(f"收到无人认领的命令结果: {result.cmd_id}")
 
         elif mtype == P.MSG_CHUNK:
-            # 下载分块：先攒着，等 result 到了再一起交给调用方组装
+            # 下载分块：只接受**属于当前活动下载命令**的分块，并立刻写盘。
+            # （旧实现把所有分块攒进列表，大文件会占住与完整文件相当的内存；
+            #   而且未知 cmd_id 的分块会一直留着不释放。）
             cid = str(msg.get("id", ""))
             data = msg.get("data")
-            if cid and data:
-                self._chunks.setdefault(cid, []).append(data)
+            sink = self._sinks.get(cid)
+            if not (cid and data and sink):
+                return
+            try:
+                import base64 as _b64
+                raw = _b64.b64decode(data)
+                sink["handle"].write(raw)
+                sink["total"] += len(raw)
+                limit = sink.get("limit") or 0
+                if limit and sink["total"] > limit:
+                    self._abort_sink(cid, RuntimeError(f"下载超过上限 {limit} 字节"))
+                    # 通知调用方失败
+                    fut = self._pending.pop(cid, None)
+                    if fut and not fut.done():
+                        fut.set_result(P.BridgeResult(
+                            cmd_id=cid, ok=False, error=f"下载超过上限 {limit} 字节"))
+            except Exception as e:
+                logger.warning(f"写入下载分块失败: {e}")
+                self._abort_sink(cid, e)
 
         elif mtype == P.MSG_PONG:
             pass
@@ -347,7 +370,8 @@ class BrowserBridge:
     # ─── 命令下发 ────────────────────────────────────────────────────────
 
     async def send_command(self, name: str, params: Optional[dict] = None,
-                           timeout: Optional[float] = None) -> Any:
+                           timeout: Optional[float] = None,
+                           cmd_id: Optional[str] = None) -> Any:
         """下发一条命令并等待扩展返回结果。
 
         Args:
@@ -371,7 +395,7 @@ class BrowserBridge:
         if name not in P.ALL_COMMANDS:
             raise BridgeError(f"未知命令: {name}")
 
-        cmd_id = uuid.uuid4().hex
+        cmd_id = cmd_id or uuid.uuid4().hex
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[cmd_id] = fut
 
@@ -394,14 +418,52 @@ class BrowserBridge:
             self.commands_failed += 1
             raise BridgeError(result.error or f"命令 {name} 执行失败")
 
-        # 有分块的话一并交出去（下载场景）
-        chunks = self._chunks.pop(cmd_id, None)
-        if chunks:
-            if isinstance(result.data, dict):
-                result.data["chunks"] = chunks
-            else:
-                result.data = {"data": result.data, "chunks": chunks}
+        # 下载类命令：分块已经边收边写进了 sink，这里只把落盘结果报回去
+        sink = self._finish_sink(cmd_id)
+        if sink:
+            data = dict(result.data or {}) if isinstance(result.data, dict) else {}
+            data["bytes"] = sink["total"]
+            data["path"] = sink["path"]
+            return data
         return result.data
+
+    # ─── 下载分块接收器 ──────────────────────────────────────────────
+
+    def open_download_sink(self, cmd_id: str, path: str, limit: int = 0) -> None:
+        """为某个下载命令开一个落盘接收器（调用方在 send_command 之前调）。"""
+        try:
+            h = open(path, "wb")
+        except Exception as e:
+            logger.warning(f"无法打开下载目标 {path}: {e}")
+            return
+        self._sinks[cmd_id] = {"path": path, "handle": h, "total": 0, "limit": limit}
+
+    def _finish_sink(self, cmd_id: str):
+        sink = self._sinks.pop(cmd_id, None)
+        if not sink:
+            return None
+        try:
+            sink["handle"].close()
+        except Exception:
+            pass
+        return sink
+
+    def _abort_sink(self, cmd_id: str, exc: Exception) -> None:
+        """出错/超限/断开时：关文件并删掉半成品，不留垃圾。"""
+        sink = self._sinks.pop(cmd_id, None)
+        if not sink:
+            return
+        try:
+            sink["handle"].close()
+        except Exception:
+            pass
+        try:
+            import os as _os
+            if _os.path.exists(sink["path"]):
+                _os.remove(sink["path"])
+        except Exception:
+            pass
+        logger.warning(f"下载已中止并清理临时文件: {sink['path']}")
 
     # ─── 事件订阅（"可感知"） ────────────────────────────────────────────
 

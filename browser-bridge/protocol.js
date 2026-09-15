@@ -79,7 +79,9 @@ export const EVT = {
 // 默认服务端地址（与 KiraAI WebUI 同端口）
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 5267;
-export const WS_PATH = "/ws/plugin/kira_browser_bridge/bridge";
+// ⚠️ 这里的插件 id 必须与 manifest.json 的 plugin_id 一致。
+// 默认按安装时填的令牌自动发现；如果路由变了，改这一处即可。
+export const WS_PATH = "/ws/plugin/headless_browser/bridge";
 
 /** 拼出完整的 WebSocket 地址 */
 export function buildWsUrl(host, port, token) {

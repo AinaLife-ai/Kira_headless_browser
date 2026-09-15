@@ -1,3 +1,7 @@
+# Cookie 目录包含用户会话凭证，禁止提交到版本库
+# 已在 manifest.json 的 exclude 字段中声明打包排除
+data/files/cookie/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -6,16 +10,14 @@ __pycache__/
 venv/
 
 # 插件运行时数据
-data/plugins/headless_browser/
 screenshots/
 downloads/
 browser_profile/
 inherited_profile/
+data/plugins/
 
-# Cookie 目录包含用户会话凭证，禁止提交到版本库
-data/files/cookie/
-
-# 编辑器
+# 编辑器 / 系统
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/

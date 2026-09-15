@@ -692,6 +692,13 @@ class HeadlessBackend(Backend):
             return OpResult.fail(err, self.name)
         limit = max(1, min(int(timeout or 10), 60))
         started = time.time()
+        # 先取 url：出错时 _recover 可能把 self._page 置空，
+        # except 里再去读就是 AttributeError
+        url_before = ""
+        try:
+            url_before = self._page.url
+        except Exception:
+            pass
         try:
             if selector:
                 await self._op(self._page.wait_for_selector(selector, timeout=limit * 1000),
@@ -702,11 +709,12 @@ class HeadlessBackend(Backend):
                     arg=text, timeout=limit * 1000), f"等待文字「{text}」", timeout=limit + 5)
             else:
                 return OpResult.fail("需要提供 selector 或 text", self.name)
+            cur = self._page.url if self._page is not None else url_before
             return OpResult(data={"found": True, "elapsed": round(time.time() - started, 1),
-                                  "url": self._page.url}, backend=self.name)
+                                  "url": cur}, backend=self.name)
         except Exception:
             return OpResult(data={"found": False, "elapsed": round(time.time() - started, 1),
-                                  "url": self._page.url}, backend=self.name)
+                                  "url": url_before}, backend=self.name)
 
     async def screenshot(self, path: str, full_page: bool = False, selector=None) -> OpResult:
         err = await self._ready()
