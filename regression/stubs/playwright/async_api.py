@@ -57,9 +57,151 @@ class FakePage:
         """真实 Playwright 的 Page.is_closed() 是同步方法"""
         return self._closed
 
-    async def evaluate(self, script):
+    # ── 以下为契约校验需要的页面动作（保持"能做，但有真实语义"）──
+    def _alive(self):
         if self._closed:
             raise RuntimeError("Target page, context or browser has been closed")
+
+    async def click(self, selector=None, **kw):
+        self._alive()
+        return None
+
+    async def fill(self, selector, value, **kw):
+        self._alive()
+        return None
+
+    async def type(self, selector, text, **kw):
+        self._alive()
+        return None
+
+    async def press(self, selector, key, **kw):
+        self._alive()
+        return None
+
+    async def hover(self, selector, **kw):
+        self._alive()
+        return None
+
+    async def wait_for_selector(self, selector, **kw):
+        self._alive()
+        return object()
+
+    async def wait_for_function(self, expr, **kw):
+        self._alive()
+        return None
+
+    async def inner_text(self, selector, **kw):
+        self._alive()
+        return "fake body text"
+
+    async def content(self):
+        self._alive()
+        return "<html><body>fake</body></html>"
+
+    async def screenshot(self, path=None, **kw):
+        self._alive()
+        if path:
+            with open(path, "wb") as f:
+                f.write(b"\x89PNG\r\n\x1a\n")
+        return b""
+
+    async def go_back(self, **kw):
+        self._alive()
+        return None
+
+    async def reload(self, **kw):
+        self._alive()
+        return None
+
+    def locator(self, sel):
+        page = self
+
+        class _Loc:
+            @property
+            def first(self):
+                return self
+
+            def nth(self, i):
+                return self
+
+            async def click(self, **kw):
+                page._alive()
+                return None
+
+        return _Loc()
+
+    def get_by_text(self, text, exact=False):
+        return self.locator(text)
+
+    async def query_selector(self, selector):
+        self._alive()
+
+        class _El:
+            async def screenshot(self, path=None, **kw):
+                if path:
+                    with open(path, "wb") as f:
+                        f.write(b"\x89PNG\r\n\x1a\n")
+                return b""
+
+            async def inner_text(self):
+                return "element text"
+
+        return _El()
+
+    async def set_input_files(self, selector, files, **kw):
+        self._alive()
+        return None
+
+    @property
+    def keyboard(self):
+        page = self
+
+        class _K:
+            async def type(self, text, delay=0):
+                page._alive()
+
+            async def press(self, key):
+                page._alive()
+
+            async def down(self, key):
+                page._alive()
+
+            async def up(self, key):
+                page._alive()
+
+        return _K()
+
+    @property
+    def mouse(self):
+        page = self
+
+        class _M:
+            async def move(self, x, y, steps=1):
+                page._alive()
+
+            async def down(self, button="left"):
+                page._alive()
+
+            async def up(self, button="left"):
+                page._alive()
+
+            async def wheel(self, dx, dy):
+                page._alive()
+
+            async def click(self, x, y, **kw):
+                page._alive()
+
+        return _M()
+
+    async def evaluate(self, script, arg=None):
+        """真实 Playwright 的 evaluate 支持传参（script, arg）"""
+        if self._closed:
+            raise RuntimeError("Target page, context or browser has been closed")
+        # 针对几个常见脚本给出"像真的"返回值，方便上层组装 data
+        if isinstance(script, str) and "querySelectorAll" in script:
+            return ["item1", "item2"]
+        if isinstance(script, str) and "querySelectorAll" not in script and "scrollY" in script:
+            return 100
         return 1
 
     async def close(self):

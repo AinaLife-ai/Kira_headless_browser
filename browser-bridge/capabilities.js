@@ -251,7 +251,9 @@ async function cookieSet(params) {
       failed++;
     }
   }
-  return { ok, failed, total: list.length };
+  // 字段名与无头后端保持一致：written/skipped/failed/total
+  // （否则同一个工具因为路由到不同后端而给出不同形状的结果）
+  return { ok, written: ok, skipped: 0, failed, total: list.length };
 }
 
 export { execJs, upload, downloadViaSession, cookieGet, cookieSet, ensureUserScripts };

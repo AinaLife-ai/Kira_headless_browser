@@ -36,6 +36,7 @@ KIRA_PLUGIN_DIR=/path/to/other-copy python3 regression/run_all.py
 | **并发调工具互相踩** | `goto` 没完就 click 同一张页面 | `运行时 R9` |
 | **`scroll` 报成功但没动** | smooth 是异步的，截图拿到旧位置 | `运行时 R10` |
 | **扩展 async 回调没兜异常** | unhandled rejection 会让 worker 掉线 | `接线完整性 F1/F2` |
+| **两后端返回字段不一致** | 同一工具随路由切换给出不同形状的结果 | `返回契约一致性 F1` |
 
 ---
 
@@ -52,7 +53,9 @@ regression/
 │   ├── file_hygiene.py     文件冗余与缺失清点
 │   ├── runtime_behavior.py 生命周期 / 路由 / 内存（假 Playwright）
 │   ├── bridge_e2e.py       真实 WebSocket 端到端
-│   └── content_dom.py      扩展点击行为（真实 DOM）
+│   ├── content_dom.py      扩展点击行为（真实 DOM）
+│   ├── wiring.py           接线完整性（配置接通 / 数据透传）
+│   └── contract.py         两后端返回契约一致性
 ├── stubs/                  让插件能被 import 的最小替身（不需要真的 KiraAI）
 │   ├── core/               框架接口的最小实现
 │   └── playwright/         **语义忠实的**假 Playwright（见下）

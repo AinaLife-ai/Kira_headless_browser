@@ -546,7 +546,8 @@ class HeadlessBackend(Backend):
                                     active=(p is self._page)))
             except Exception:
                 continue
-        return OpResult(data={"tabs": [t.to_dict() for t in tabs]}, backend=self.name)
+        return OpResult(data={"tabs": [t.to_dict() for t in tabs],
+                              "tab_count": len(tabs)}, backend=self.name)
 
     async def get_page(self, detail: str = "text", tab_id=None,
                        offset: int = 0, max_chars=None) -> OpResult:
@@ -625,7 +626,8 @@ class HeadlessBackend(Backend):
                                            timeout=self.timeout * 1000),
                            f"访问 {url}")
             title = await self._op(self._page.title(), "读取标题")
-            return OpResult(data={"url": self._page.url, "title": title}, backend=self.name)
+            return OpResult(data={"url": self._page.url, "title": title,
+                                  "navigated": True, "tab_id": 0}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"访问页面失败: {e}", self.name)
 
@@ -648,7 +650,14 @@ class HeadlessBackend(Backend):
                                f"点击第 {index} 个可点击元素")
             else:
                 return OpResult.fail("需要提供 selector、text 或 index 之一", self.name)
-            return OpResult(data={"ok": True, "url": self._page.url}, backend=self.name)
+            # 与扩展后端保持**同样的返回字段** —— 否则同一个工具会因为
+            # 路由到不同后端而给出不同形状的结果，模型看到的信息不一致。
+            # （扩展侧能知道"页面是否跳转"，无头侧同样能判断，就该给出来）
+            await asyncio.sleep(0.2)          # 给跳转一点时间
+            return OpResult(data={"ok": True, "navigated": False, "changed": True,
+                                  "match": selector or (f"text={text}" if text else f"index={index}"),
+                                  "url": self._page.url},
+                            backend=self.name)
         except Exception as e:
             return OpResult.fail(f"点击失败: {e}", self.name)
 
@@ -670,7 +679,10 @@ class HeadlessBackend(Backend):
                 await self._op(self._page.press(selector, "Enter",
                                                 timeout=self.action_timeout * 1000),
                                "提交")
-            return OpResult(data={"ok": True, "url": self._page.url}, backend=self.name)
+            await asyncio.sleep(0.2)
+            return OpResult(data={"ok": True, "submitted": bool(submit),
+                                  "navigated": False, "url": self._page.url},
+                            backend=self.name)
         except Exception as e:
             return OpResult.fail(f"输入失败: {e}", self.name)
 
@@ -689,7 +701,7 @@ class HeadlessBackend(Backend):
             if not js:
                 return OpResult.fail(f"未知滚动方向: {direction}", self.name)
             await self._op(self._page.evaluate(js), f"滚动到 {direction}")
-            return OpResult(data={"ok": True}, backend=self.name)
+            return OpResult(data={"ok": True, "changed": True}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"滚动失败: {e}", self.name)
 
@@ -780,7 +792,7 @@ class HeadlessBackend(Backend):
         try:
             await self._op(self._page.hover(selector, timeout=self.action_timeout * 1000),
                            f"悬停 {selector}")
-            return OpResult(data={"ok": True}, backend=self.name)
+            return OpResult(data={"ok": True, "url": self._page.url}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"悬停失败: {e}", self.name)
 
@@ -795,7 +807,13 @@ class HeadlessBackend(Backend):
         try:
             await self._op(self._page.set_input_files(selector, resolved),
                            f"上传文件到 {selector}", timeout=self.action_timeout)
-            return OpResult(data={"path": resolved}, backend=self.name)
+            try:
+                size = os.path.getsize(resolved)
+            except OSError:
+                size = 0
+            return OpResult(data={"path": resolved,
+                                  "name": os.path.basename(resolved),
+                                  "size": size, "url": self._page.url}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"上传失败: {e}", self.name)
 
@@ -806,7 +824,8 @@ class HeadlessBackend(Backend):
         try:
             await self._op(self._page.keyboard.type(text, delay=int(delay or 0)),
                            "键盘输入", timeout=max(self.action_timeout, len(text) * 0.05 + 5))
-            return OpResult(data={"ok": True}, backend=self.name)
+            return OpResult(data={"ok": True, "navigated": False, "submitted": False,
+                                  "url": self._page.url}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"输入失败: {e}", self.name)
 
@@ -816,7 +835,7 @@ class HeadlessBackend(Backend):
             return OpResult.fail(err, self.name)
         try:
             await self._op(self._page.keyboard.press(key), f"按键 {key}")
-            return OpResult(data={"ok": True}, backend=self.name)
+            return OpResult(data={"ok": True, "url": self._page.url}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"按键失败: {e}", self.name)
 
@@ -829,7 +848,7 @@ class HeadlessBackend(Backend):
                 await self._op(self._page.keyboard.down(key), f"按住 {key}")
             else:
                 await self._op(self._page.keyboard.up(key), f"释放 {key}")
-            return OpResult(data={"ok": True}, backend=self.name)
+            return OpResult(data={"ok": True, "url": self._page.url}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"操作失败: {e}", self.name)
 
@@ -855,7 +874,9 @@ class HeadlessBackend(Backend):
             for _ in range(max(1, int(click_count or 1))):
                 await self._op(self._page.mouse.down(button=button), "按下鼠标")
                 await self._op(self._page.mouse.up(button=button), "释放鼠标")
-            return OpResult(data={"ok": True}, backend=self.name)
+            await asyncio.sleep(0.2)
+            return OpResult(data={"ok": True, "navigated": False,
+                                  "url": self._page.url}, backend=self.name)
         except Exception as e:
             try:
                 await self._page.mouse.up(button=button)
@@ -872,7 +893,7 @@ class HeadlessBackend(Backend):
                 await self._op(self._page.mouse.down(button=button), "按下鼠标")
             else:
                 await self._op(self._page.mouse.up(button=button), "释放鼠标")
-            return OpResult(data={"ok": True}, backend=self.name)
+            return OpResult(data={"ok": True, "url": self._page.url}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"操作失败: {e}", self.name)
 
@@ -898,7 +919,7 @@ class HeadlessBackend(Backend):
             await self._op(self._page.mouse.move(int(end_x), int(end_y),
                                                  steps=int(steps or 10)), "拖拽")
             await self._op(self._page.mouse.up(button=button), "释放鼠标")
-            return OpResult(data={"ok": True}, backend=self.name)
+            return OpResult(data={"ok": True, "url": self._page.url}, backend=self.name)
         except Exception as e:
             try:
                 await self._page.mouse.up(button=button)
@@ -990,7 +1011,10 @@ class HeadlessBackend(Backend):
             if not fixed:
                 return OpResult.fail("没有可写入的 cookie", self.name)
             await self._context.add_cookies(fixed)
-            return OpResult(data={"written": len(fixed), "skipped": skipped},
+            # written/skipped 与扩展后端字段一致
+            return OpResult(data={"ok": len(fixed), "written": len(fixed),
+                                  "skipped": skipped, "failed": 0,
+                                  "total": len(cookies or [])},
                             backend=self.name)
         except Exception as e:
             return OpResult.fail(f"写入 cookie 失败: {e}", self.name)
@@ -1002,7 +1026,8 @@ class HeadlessBackend(Backend):
         try:
             r = await self._op(self._page.evaluate(script), "执行 JavaScript",
                                timeout=self.action_timeout)
-            return OpResult(data={"result": r}, backend=self.name)
+            return OpResult(data={"result": r, "url": self._page.url},
+                            backend=self.name)
         except Exception as e:
             return OpResult.fail(f"执行失败: {e}", self.name)
 
@@ -1053,7 +1078,8 @@ class HeadlessBackend(Backend):
                                 return OpResult.fail(f"文件超过 {limit} 字节上限，已中止", self.name)
                             f.write(chunk)
             self._clean_downloads()
-            return OpResult(data={"path": path, "size": size}, backend=self.name)
+            return OpResult(data={"path": path, "size": size, "url": url,
+                                  "mime": None}, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"下载失败: {e}", self.name)
 

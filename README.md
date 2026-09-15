@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.1
+# 浏览器插件 (Browser Plugin) 2.1.2
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -453,6 +453,22 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.2（2026-09-15）
+
+**两后端返回契约完全对齐**（真正可互换）。
+
+- 🔴 **两个后端返回的字段不一致（22 处差异）**：同一个工具因为路由到不同后端，
+  返回的字段形状不同 —— 模型看到的信息时有时无，这类问题极难排查
+  （"昨天还能读出标题，今天不行了"）。
+  已逐条对齐：`click` 补 `navigated`/`changed`/`match`，`navigate` 补 `title`/`tab_id`，
+  `type_text` 补 `submitted`，`upload_file` 补 `name`/`size`，
+  `download` 补 `url`/`mime`，`cookie_set` 统一 `written`/`skipped`，
+  `list_tabs` 补 `tab_count`，`execute_js`/`hover`/键盘鼠标补 `url`，
+  `scroll`/`mouse_wheel` 去掉多余字段……
+  **现在两个后端可以任意互换而模型无感。**
+- ✅ 新增回归检查组：**两后端返回契约一致性**（真的把两个后端都调一遍，
+  收集实际返回的字段，与渲染层要读的字段比对）
 
 ### v2.1.1（2026-09-15）
 

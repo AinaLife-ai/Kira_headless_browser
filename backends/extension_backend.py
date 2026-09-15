@@ -144,8 +144,21 @@ class ExtensionBackend(Backend):
                                  "limit": int(limit or 50), "tab_id": tab_id})
 
     async def navigate(self, url: str, new_tab: bool = False, tab_id=None) -> OpResult:
-        return await self._send(self._P.CMD_NAVIGATE,
-                                {"url": url, "tab_id": tab_id, "new_tab": bool(new_tab)})
+        r = await self._send(self._P.CMD_NAVIGATE,
+                             {"url": url, "tab_id": tab_id, "new_tab": bool(new_tab)})
+        if not r.ok:
+            return r
+        # 与无头后端保持同样的字段（无头侧会回 title，这边也补上，
+        # 否则模型拿到的信息随路由而变）
+        d = dict(r.data or {}) if isinstance(r.data, dict) else {}
+        if "title" not in d:
+            try:
+                info = await self._send(self._P.CMD_GET_INFO, {"tab_id": d.get("tab_id")})
+                if info.ok and isinstance(info.data, dict):
+                    d["title"] = info.data.get("title", "")
+            except Exception:
+                d.setdefault("title", "")
+        return OpResult(data=d, backend=self.name)
 
     async def click(self, selector=None, text=None, index=None, **kw) -> OpResult:
         return await self._send(self._P.CMD_CLICK,
@@ -225,10 +238,17 @@ class ExtensionBackend(Backend):
                     chunks.append(base64.b64encode(block).decode())
             # 仍然一次下发（扩展侧需要一个完整 File 才能塞进 input.files），
             # 但插件侧不再额外留一份 raw 副本；上限由 upload_max_bytes 控制。
-            return await self._send(self._P.CMD_UPLOAD, {
+            r = await self._send(self._P.CMD_UPLOAD, {
                 "selector": selector, "name": name,
                 "mime": _guess_mime(name), "chunks": chunks, "limit": self.max_upload_bytes,
             }, timeout=max(60.0, size / (1024 * 1024) * 3))
+            if not r.ok:
+                return r
+            d = dict(r.data or {}) if isinstance(r.data, dict) else {}
+            # 与无头后端字段对齐
+            d.setdefault("path", resolved)
+            d.setdefault("size", size)
+            return OpResult(data=d, backend=self.name)
         except Exception as e:
             return OpResult.fail(f"上传失败: {e}", self.name)
 
@@ -303,8 +323,14 @@ class ExtensionBackend(Backend):
         return await self._send(cmd, {"button": button})
 
     async def mouse_wheel(self, delta_x: int = 0, delta_y: int = 0) -> OpResult:
-        return await self._send(self._P.CMD_MOUSE_WHEEL,
-                                {"delta_x": delta_x, "delta_y": delta_y})
+        # 滚轮不改变 URL —— 与无头后端保持同样的返回形状
+        r = await self._send(self._P.CMD_MOUSE_WHEEL,
+                             {"delta_x": delta_x, "delta_y": delta_y})
+        if not r.ok:
+            return r
+        d = dict(r.data or {}) if isinstance(r.data, dict) else {}
+        d.pop("url", None)
+        return OpResult(data=d, backend=self.name)
 
     async def mouse_drag(self, start_x: int, start_y: int, end_x: int, end_y: int,
                          button: str = "left", steps: int = 10) -> OpResult:
