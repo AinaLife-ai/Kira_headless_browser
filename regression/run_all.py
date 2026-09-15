@@ -17,6 +17,14 @@
 from __future__ import annotations
 
 import sys
+
+# ⚠️ 必须在**导入任何检查模块之前**关掉字节码写入。
+#    security_rules 先于 file_hygiene 执行，它通过 load_module() 加载
+#    security.py，那条路径会写出 PLUGIN_DIR/__pycache__/*.pyc；
+#    而 file_hygiene 的 _all_files() 会把 __pycache__ 算进去 →
+#    D1/D2 就会莫名其妙失败（时有时无，取决于是否有缓存残留）。
+sys.dont_write_bytecode = True
+
 import traceback
 from pathlib import Path
 

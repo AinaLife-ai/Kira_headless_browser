@@ -681,10 +681,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       case "status": {
         const st = (await chrome.storage.local.get(STORE.LAST_STATUS))[STORE.LAST_STATUS] || {};
+        // ⚠️ 顺序很重要：**先铺存下来的，再盖上实时的**。
+        //    setStatus 会把 `connected` 一起持久化进 STORE.LAST_STATUS。
+        //    MV3 的 service worker 被回收重启后 state.socket 是 null，
+        //    但 st.connected 还是 true —— 若把 ...st 放后面，弹窗就会
+        //    显示「已连接」，而实际根本没有 socket（和 test_ping
+        //    要防的是同一种假阳性）。
         sendResponse({
+          ...st,
           connected: !!state.socket && state.socket.readyState === WebSocket.OPEN,
           readyState: state.socket ? state.socket.readyState : -1,
-          ...st,
         });
         break;
       }

@@ -204,17 +204,21 @@ def run(r) -> None:
 
         # 下载分块 → 流式落盘
         import tempfile
-        out = Path(tempfile.mkdtemp()) / "dl.bin"
-        cid = "testdl"
-        bridge.open_download_sink(cid, str(out), limit=10 * 1024 * 1024)
-        try:
-            await bridge.send_command(P.CMD_DOWNLOAD,
-                                      {"url": "https://example.com/f"},
-                                      timeout=15, cmd_id=cid)
-        except Exception as e:
-            results["dl_err"] = str(e)
-        results["dl_size"] = out.stat().st_size if out.exists() else 0
-        results["dl_sink_cleared"] = cid not in bridge._sinks
+        # ⚠️ 用 TemporaryDirectory：mkdtemp 不会清理，
+        #    每跑一次就留下一个含 ~1MiB dl.bin 的目录。
+        with tempfile.TemporaryDirectory(prefix="kira_dl_") as _dl_dir:
+            out = Path(_dl_dir) / "dl.bin"
+            cid = "testdl"
+            bridge.open_download_sink(cid, str(out), limit=10 * 1024 * 1024)
+            try:
+                await bridge.send_command(P.CMD_DOWNLOAD,
+                                          {"url": "https://example.com/f"},
+                                          timeout=15, cmd_id=cid)
+            except Exception as e:
+                results["dl_err"] = str(e)
+            # 读数值要在**退出 with 之前**（目录一关文件就没了）
+            results["dl_size"] = out.stat().st_size if out.exists() else 0
+            results["dl_sink_cleared"] = cid not in bridge._sinks
 
         # 断线感知 + 重连
         proc.terminate()

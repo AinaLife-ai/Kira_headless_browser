@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.9
+# 浏览器插件 (Browser Plugin) 2.1.10
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -470,6 +470,29 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.10（2026-09-15）
+
+**按 CodeRabbit 第八轮审查修复 4 项**：
+
+- 🔴 **弹窗会假报「已连接」**：`setStatus` 会把 `connected` 一起持久化进
+  `STORE.LAST_STATUS`。`status` 分支里 `...st` 被放在 `connected` **之后**，
+  于是**存下来的旧值覆盖了实时值**。MV3 的 service worker 被回收重启后
+  `state.socket` 是 `null`，但 `st.connected` 还是 `true` →
+  弹窗显示「已连接」，实际根本没有 socket。
+  → 改成**先铺 stored、再盖上实时字段**。
+- 🔴 **回归套件会自己生成 `__pycache__` 把自己判失败**：
+  `security_rules` 先于 `file_hygiene` 执行，它通过 `load_module()` 加载
+  `security.py`；那条路径会写出 `PLUGIN_DIR/__pycache__/*.pyc`，
+  而 `file_hygiene` 的 `_all_files()` 会把 `__pycache__` 算进去 →
+  **D1/D2 随机失败**（取决于有没有缓存残留）。
+  → 在 `run_all.py` **导入任何检查模块之前**设 `sys.dont_write_bytecode = True`。
+- **`bridge_e2e` 每次跑留下一个含 ~1MiB `dl.bin` 的临时目录**
+  → 改用 `TemporaryDirectory`，并在退出上下文**之前**读取 `dl_size`。
+- **`tool_merge` 的 C8 只检查三个独立子串**：即使 `credentials` 被改成
+  无条件的 `"include"`（HTTP 也带会话 Cookie → 明文泄漏），只要那三个词
+  还在，断言照样通过。→ 限定在 `downloadViaSession` 内，并要求凭据表达式
+  **带 HTTPS 条件且有 `"omit"` 分支**。
 
 ### v2.1.9（2026-09-15）
 

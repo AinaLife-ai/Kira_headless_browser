@@ -176,10 +176,19 @@ def run(r) -> None:
          "async function upload(" in cap and "DataTransfer" in src("browser-bridge/content.js"))
     # 看**意图**而不是写死的字面量：现在凭据是按协议条件携带的
     # （HTTPS 才带，防止明文泄漏），所以断言"用用户会话"这一点。
-    _dl = cap.split("async function downloadViaSession(")[-1][:1500]
+    # ⚠️ 只看"有三个子串"是不够的：即使 credentials 被改成无条件
+    #    `"include"`（HTTP 也带会话 Cookie → 明文泄漏），只要这三个词
+    #    还在，断言照样通过。
+    #    必须**限定在 downloadViaSession 内**，并且要求凭据表达式
+    #    **带 HTTPS 条件 + 有 omit 分支**。
+    _dl = cap.split("async function downloadViaSession(")[-1][:2000] \
+        if "async function downloadViaSession(" in cap else ""
+    _creds = re.search(r'credentials\s*:\s*([^,\n]+)', _dl)
+    _expr = (_creds.group(1) if _creds else "")
+    _cond_ok = (":" in _expr) and ('"include"' in _expr) and ('"omit"' in _expr)
     r.ok("C8 扩展侧实现 download（用户会话 + 分块）",
-         "async function downloadViaSession(" in cap
-         and "credentials" in _dl and '"include"' in _dl
-         and "sendChunk" in cap)
+         bool(_dl) and _cond_ok and "sendChunk" in _dl,
+         "凭据必须是按协议条件的表达式（HTTPS->include, 否则 omit），"
+         f"且 sendChunk 在 downloadViaSession 内；实际 credentials={_expr!r}")
     r.ok("C9 扩展侧实现 cookie 导出/写入",
          "async function cookieGet(" in cap and "async function cookieSet(" in cap)
