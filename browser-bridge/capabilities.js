@@ -1,0 +1,242 @@
+/**
+ * 扩展桥补齐的三项能力（在 background.js 里实现）：
+ *
+ *   1. exec_js    —— 执行任意 JS。MV3 下 `chrome.scripting.executeScript` 的
+ *                    eval 会被**页面 CSP** 挡掉（MV3 起不再豁免），所以走
+ *                    `chrome.userScripts` API —— 官方专为"运行任意代码字符串"
+ *                    设计、明确豁免远端代码策略。
+ *                    ⚠️ Chrome 138+ 需要用户在扩展详情页手动打开
+ *                    「Allow User Scripts」开关，否则会报错。这里会把这种情况
+ *                    翻译成一句用户能照做的话。
+ *
+ *   2. upload     —— 把本地文件塞进 input[type=file]。MV3 拿不到真实文件路径，
+ *                    所以改由**插件把文件内容分块送过来**，扩展在页面里
+ *                    用 `DataTransfer` + `new File([blob])` 构造 FileList 塞进去。
+ *                    （这正好绕开了"扩展读不到本地文件"的限制，因为内容是从
+ *                    插件那边来的。）
+ *
+ *   3. download   —— 用**用户浏览器的会话**去抓 URL，再分块回传给插件落盘。
+ *                    比 `chrome.downloads` 好：能带用户的 Cookie/登录态，
+ *                    也不会把文件塞进 Chrome 的下载目录。
+ */
+
+// ─── 1. 执行任意 JS ──────────────────────────────────────────────────────
+
+let userScriptsUsable = null;   // 缓存探测结果
+
+async function ensureUserScripts() {
+  if (userScriptsUsable !== null) return userScriptsUsable;
+  if (!chrome.userScripts) {
+    userScriptsUsable = { ok: false, reason: "no_api" };
+    return userScriptsUsable;
+  }
+  try {
+    // 探测开关是否已打开：读一下配置即可，没权限会抛
+    await chrome.userScripts.getScripts({});
+    userScriptsUsable = { ok: true };
+  } catch (e) {
+    userScriptsUsable = { ok: false, reason: "toggle_off", detail: e.message };
+  }
+  return userScriptsUsable;
+}
+
+async function execJs(params) {
+  const { script, tab_id } = params;
+  if (!script || !script.trim()) throw new Error("缺少 script");
+
+  const tab = await resolveTab(tab_id);
+  assertInjectable(tab);
+
+  const chk = await ensureUserScripts();
+  if (!chk.ok) {
+    if (chk.reason === "no_api") {
+      throw new Error(
+        "当前浏览器不支持 chrome.userScripts（需要 Chrome/Edge 120+）。" +
+        "可以改用无头后端执行 JavaScript。"
+      );
+    }
+    throw new Error(
+      "执行任意 JavaScript 需要在扩展页手动打开一个开关：\n" +
+      "  打开 chrome://extensions → 找到 Kira Browser Bridge → 详情 → " +
+      "打开「允许用户脚本 / Allow User Scripts」，然后重试。\n" +
+      "（这是 Chrome 138+ 的安全要求，扩展无法代劳。）"
+    );
+  }
+
+  // 用 USER_SCRIPT world 跑：它不受页面 CSP 的 eval 限制
+  let results;
+  try {
+    results = await chrome.userScripts.execute({
+      target: { tabId: tab.id },
+      js: [{ code: `(function(){ return (${script}); })()` }],
+      world: "USER_SCRIPT",
+      injectImmediately: true,
+    });
+  } catch (e) {
+    // 有些版本不支持 world 参数或对象形式，退回字符串形式
+    results = await chrome.userScripts.execute({
+      target: { tabId: tab.id },
+      js: [{ code: `(function(){ return (${script}); })()` }],
+    });
+  }
+
+  const first = (results && results[0]) || {};
+  if (first.error) throw new Error("执行出错：" + first.error);
+  return { url: tab.url, result: first.result ?? null };
+}
+
+// ─── 2. 上传文件（内容由插件分块送来）──────────────────────────────────
+
+async function upload(params) {
+  const { selector, name, mime, chunks } = params;
+  if (!selector) throw new Error("缺少 selector");
+  if (!name) throw new Error("缺少文件名");
+
+  const tab = await resolveTab(params.tab_id);
+  assertInjectable(tab);
+
+  // chunks 是 base64 数组；在扩展侧拼回二进制
+  const parts = (chunks || []).map((b64) => {
+    const bin = atob(b64);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf;
+  });
+
+  const blob = new Blob(parts, { type: mime || "application/octet-stream" });
+  const fileBase64 = await blobToBase64(blob);
+
+  // 内容脚本负责把它塞进 input.files
+  const res = await callContent(tab, "upload_blob", {
+    selector,
+    name,
+    mime: mime || "application/octet-stream",
+    base64: fileBase64,
+  }, 60000);
+
+  return { ok: true, url: tab.url, name, size: blob.size, matched: res.matched };
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",", 2)[1] || "");
+    r.onerror = () => reject(new Error("读取文件内容失败"));
+    r.readAsDataURL(blob);
+  });
+}
+
+// ─── 3. 下载（用用户会话抓取，分块回传）────────────────────────────────
+
+const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+
+async function downloadViaSession(params, cmdId) {
+  const { url, max_bytes } = params;
+  if (!url) throw new Error("缺少 url");
+
+  const limit = Number(max_bytes) > 0 ? Number(max_bytes) : MAX_DOWNLOAD_BYTES;
+
+  // 在扩展自己的上下文里 fetch —— 会带上浏览器已存的 Cookie（同源）
+  const resp = await fetch(url, { credentials: "include" });
+  if (!resp.ok) throw new Error(`下载失败，HTTP ${resp.status}`);
+
+  const declared = Number(resp.headers.get("Content-Length") || 0);
+  if (declared && declared > limit) {
+    throw new Error(`文件过大（${declared} 字节 > 上限 ${limit}），已拒绝`);
+  }
+
+  const mime = resp.headers.get("Content-Type") || "application/octet-stream";
+  const reader = resp.body.getReader();
+  const CHUNK = 256 * 1024;          // 每块 256KB
+  let total = 0;
+  let buf = new Uint8Array(0);
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    // 把新到的拼到残留缓冲后面
+    const merged = new Uint8Array(buf.length + value.length);
+    merged.set(buf, 0);
+    merged.set(value, buf.length);
+    buf = merged;
+
+    while (buf.length >= CHUNK) {
+      const slice = buf.slice(0, CHUNK);
+      buf = buf.slice(CHUNK);
+      total += slice.length;
+      if (total > limit) {
+        try { await reader.cancel(); } catch (_) {}
+        throw new Error(`文件超过上限 ${limit} 字节，已中止`);
+      }
+      sendChunk(cmdId, slice);
+    }
+  }
+  if (buf.length) {
+    total += buf.length;
+    sendChunk(cmdId, buf);
+  }
+
+  return { ok: true, url, mime, bytes: total };
+}
+
+function sendChunk(cmdId, uint8) {
+  // 分块用独立消息类型，避免和 result 抢同一条通道的语义
+  let bin = "";
+  const step = 0x8000;
+  for (let i = 0; i < uint8.length; i += step) {
+    bin += String.fromCharCode.apply(null, uint8.subarray(i, i + step));
+  }
+  sendRaw({ type: MSG.CHUNK, id: cmdId, data: btoa(bin) });
+}
+
+// ─── 4. Cookie 导出 / 导入（打通两个后端的登录态）──────────────────────
+
+async function cookieGet(params) {
+  const tab = await resolveTab(params.tab_id);
+  const url = params.url || tab.url;
+  if (!url || !/^https?:/i.test(url)) {
+    throw new Error("只能导出 http/https 页面的 cookie");
+  }
+  const cookies = await chrome.cookies.getAll({ url });
+  return {
+    url,
+    cookies: cookies.map((c) => ({
+      name: c.name, value: c.value, domain: c.domain, path: c.path,
+      secure: c.secure, httpOnly: c.httpOnly, sameSite: c.sameSite,
+      expirationDate: c.expirationDate,
+    })),
+  };
+}
+
+async function cookieSet(params) {
+  const list = params.cookies || [];
+  let ok = 0, failed = 0;
+  for (const c of list) {
+    if (!c || !c.name || !c.domain) { failed++; continue; }
+    const host = String(c.domain).replace(/^\./, "");
+    const scheme = c.secure ? "https" : "http";
+    const details = {
+      url: `${scheme}://${host}${c.path || "/"}`,
+      name: c.name,
+      value: c.value == null ? "" : String(c.value),
+      domain: c.domain,
+      path: c.path || "/",
+      secure: !!c.secure,
+      httpOnly: !!c.httpOnly,
+    };
+    const ss = String(c.sameSite || "").toLowerCase();
+    if (ss === "strict") details.sameSite = "strict";
+    else if (ss === "lax") details.sameSite = "lax";
+    else if (ss === "none" || ss === "no_restriction") details.sameSite = "no_restriction";
+    if (c.expirationDate) details.expirationDate = Number(c.expirationDate);
+    try {
+      await chrome.cookies.set(details);
+      ok++;
+    } catch (_) {
+      failed++;
+    }
+  }
+  return { ok, failed, total: list.length };
+}
+
+export { execJs, upload, downloadViaSession, cookieGet, cookieSet, ensureUserScripts };

@@ -1,0 +1,421 @@
+"""Bridge —— 与浏览器扩展的长连接管理与会话路由。
+
+设计要点：
+
+1. **扩展主动连出**。浏览器扩展无法监听端口，所以由扩展作为 WebSocket 客户端
+   连到 KiraAI 的 ``/ws/plugin/kira_browser_bridge/bridge``。
+
+2. **请求/应答配对**。插件下发 ``cmd``（带唯一 ``id``），为每个 id 建一个
+   ``asyncio.Future``，扩展返回 ``result`` 时按 id 唤醒。这样 Tool 调用可以
+   ``await`` 到扩展的返回值。
+
+3. **单连接模型**。同一时刻只接受一个扩展连接（新连接踢掉旧连接），避免多窗口
+   抢同一个浏览器造成不可预期的行为。握手时用 ``hello`` 上报自身信息。
+
+4. **事件回调**。扩展主动上报的 ``event`` 不等待应答，直接分发给注册的监听者，
+   用于"可感知"（页面加载、标签切换）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+import uuid
+from typing import Any, Awaitable, Callable, Dict, Optional
+
+from core.logging_manager import get_logger
+
+from . import protocol as P
+
+logger = get_logger("browser_bridge", "cyan")
+
+
+class BridgeNotConnected(RuntimeError):
+    """扩展尚未连接。"""
+
+
+class BridgeTimeout(RuntimeError):
+    """等待扩展响应超时。"""
+
+
+class BridgeError(RuntimeError):
+    """扩展返回了错误。"""
+
+
+class BrowserBridge:
+    """管理唯一的扩展连接，并提供 ``send_command`` 请求/应答能力。"""
+
+    #: 心跳间隔（秒）。扩展的 MV3 Service Worker 会被浏览器回收，
+    #: 这个间隔决定了回收后多久能被发现。
+    HEARTBEAT_INTERVAL = 25.0
+
+    def __init__(self, command_timeout: float = 20.0):
+        self.command_timeout = command_timeout
+
+        self._ws = None
+        self._session_id: Optional[str] = None
+        self._hello: Optional[P.HelloPayload] = None
+        self._connected_at: float = 0.0
+
+        # cmd_id -> Future[BridgeResult]
+        self._pending: Dict[str, asyncio.Future] = {}
+
+        # 顺序发送锁：避免同一 WebSocket 上多协程交错写
+        self._send_lock = asyncio.Lock()
+
+        # 事件监听者：name -> [callback]
+        self._event_listeners: Dict[str, list] = {}
+        self._any_listener: list = []
+
+        # 心跳任务
+        self._heartbeat_task: Optional[asyncio.Task] = None
+
+        # cmd_id -> [base64 分块]  下载时扩展会边收边回传
+        self._chunks: Dict[str, list] = {}
+
+        # 统计
+        self.commands_sent = 0
+        self.commands_failed = 0
+
+    # ─── 连接生命周期 ────────────────────────────────────────────────────
+
+    @property
+    def connected(self) -> bool:
+        return self._ws is not None
+
+    @property
+    def read_timeout(self) -> float:
+        """多久没收到扩展任何数据就判定连接已死。
+
+        取「心跳间隔的 2 倍」和「命令超时 + 余量」里更大的那个：
+        前者兜住半开连接，后者保证不会在正常等长命令时误判。
+        """
+        return max(self.HEARTBEAT_INTERVAL * 2, self.command_timeout + 10.0)
+
+    @property
+    def info(self) -> dict:
+        return {
+            "connected": self.connected,
+            "session_id": self._session_id,
+            "extension_version": getattr(self._hello, "extension_version", None),
+            "browser": getattr(self._hello, "browser", None),
+            "protocol": getattr(self._hello, "protocol", None),
+            "connected_at": self._connected_at or None,
+            "uptime": (time.time() - self._connected_at) if self._connected_at else 0,
+            "commands_sent": self.commands_sent,
+            "commands_failed": self.commands_failed,
+        }
+
+    async def handle_connection(self, ws) -> None:
+        """处理一条新的扩展连接。由插件 WS 端点调用。
+
+        **必须先 accept**：KiraAI 的插件 WS 路由把原始 ``WebSocket`` 对象直接交给
+        插件 handler（见 ``plugin_registry._register_plugin_ws_for``），鉴权依赖
+        ``require_ws_auth`` 只做校验、不负责握手。所以 ``accept()`` 由本函数负责。
+        漏掉它会得到「ASGI callable returned without sending handshake」，
+        客户端表现为连上即断、反复重连。
+        """
+        session_id = uuid.uuid4().hex[:8]
+
+        # 握手：接受连接后才能收发消息
+        try:
+            await ws.accept()
+        except Exception as e:
+            logger.warning(f"WebSocket 握手失败: {type(e).__name__}: {e}")
+            return
+
+        # 单连接模型：踢掉旧连接
+        if self._ws is not None:
+            logger.warning("已有扩展连接，主动断开旧连接")
+            await self._close_ws(self._ws, code=4001, reason="Replaced by a new connection")
+
+        self._ws = ws
+        self._session_id = session_id
+        self._connected_at = time.time()
+        self._hello = None
+
+        logger.info(f"扩展已连接 (session={session_id})")
+
+        try:
+            # 等扩展发 hello，最多 10 秒
+            try:
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+                msg = json.loads(raw)
+                if msg.get("type") == P.MSG_HELLO:
+                    self._hello = P.HelloPayload.from_wire(msg)
+                    logger.info(
+                        f"扩展握手成功: {self._hello.browser} / "
+                        f"v{self._hello.extension_version} / proto={self._hello.protocol}"
+                    )
+                    if self._hello.protocol != P.PROTOCOL_VERSION:
+                        logger.warning(
+                            f"协议版本不一致: 扩展={self._hello.protocol} "
+                            f"插件={P.PROTOCOL_VERSION}，可能出现兼容问题"
+                        )
+                else:
+                    logger.warning(f"扩展首帧不是 hello，实际为: {msg.get('type')}")
+            except asyncio.TimeoutError:
+                logger.warning("等待扩展 hello 超时，仍继续建立连接")
+
+            await self._send({"type": P.MSG_WELCOME, "protocol": P.PROTOCOL_VERSION,
+                              "session_id": session_id})
+
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+            # 主接收循环。
+            #
+            # 这里必须带读超时：只靠心跳发 ping 是不够的 —— 扩展被
+            # 休眠/唤醒、MV3 Service Worker 被系统回收之后，socket 会成为
+            # 半开连接：send 可能不报错，但对面永远不回。此时 `self._ws`
+            # 仍然非 None，`connected` 一直是 True，面板显示"已连接"，
+            # 而每个工具调用都卡到超时。读超时是唯一能兜住这种情况的闸门。
+            while True:
+                try:
+                    raw = await asyncio.wait_for(ws.receive_text(),
+                                                 timeout=self.read_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"{self.read_timeout:.0f}s 没收到扩展任何数据，"
+                        f"判定连接已失效，主动断开 (session={session_id})"
+                    )
+                    await self._force_close(ws, code=4002,
+                                            reason="No data from extension")
+                    break
+                if raw is None:
+                    # 显式收到关闭帧（部分实现回 None 而不是抛异常）
+                    break
+                await self._on_message(raw)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # 扩展正常关闭也会走到这里，所以不刷 ERROR；但要留下可诊断的痕迹
+            from starlette.websockets import WebSocketDisconnect
+            if isinstance(e, WebSocketDisconnect):
+                logger.info(
+                    f"扩展关闭连接 (session={session_id}, code={e.code})"
+                )
+            else:
+                logger.warning(
+                    f"扩展连接异常结束 (session={session_id}): "
+                    f"{type(e).__name__}: {e}"
+                )
+        finally:
+            self._cleanup(session_id)
+
+    async def _force_close(self, ws, code: int, reason: str) -> None:
+        """服务端判断连接已死时，自己把状态清干净。
+
+        先作废 session 再关 socket：关 socket 会让接收循环抛出
+        WebSocketDisconnect 并走到 ``_cleanup``，session 已变 None 时
+        那次 cleanup 是空操作，避免两边重复清理。
+        """
+        if self._ws is not ws:
+            return  # 已经被新连接替换了，不要动
+
+        self._session_id = None
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+        self._heartbeat_task = None
+
+        for cmd_id, fut in list(self._pending.items()):
+            if not fut.done():
+                fut.set_exception(BridgeNotConnected("扩展连接已失效"))
+        self._pending.clear()
+        self._chunks.clear()
+
+        self._ws = None
+        self._hello = None
+        self._connected_at = 0.0
+
+        await self._close_ws(ws, code=code, reason=reason)
+
+    def _cleanup(self, session_id: str) -> None:
+        if self._session_id != session_id:
+            # 已被新连接替换，交给新连接管理
+            return
+
+        logger.info(f"扩展断开 (session={session_id})")
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+        self._heartbeat_task = None
+
+        # 未完成的命令全部失败，避免调用方无限等待
+        for cmd_id, fut in list(self._pending.items()):
+            if not fut.done():
+                fut.set_exception(BridgeNotConnected("扩展连接已断开"))
+        self._pending.clear()
+        self._chunks.clear()
+
+        self._ws = None
+        self._session_id = None
+        self._hello = None
+        self._connected_at = 0.0
+
+    async def close(self) -> None:
+        """插件卸载时调用，干净地断开扩展。"""
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
+
+        for cmd_id, fut in list(self._pending.items()):
+            if not fut.done():
+                fut.set_exception(BridgeNotConnected("插件正在关闭"))
+        self._pending.clear()
+
+        if self._ws is not None:
+            await self._close_ws(self._ws, code=1001, reason="Plugin shutting down")
+
+        self._ws = None
+        self._session_id = None
+
+    @staticmethod
+    async def _close_ws(ws, code: int, reason: str) -> None:
+        try:
+            await ws.close(code=code, reason=reason)
+        except Exception:
+            pass
+
+    # ─── 收发 ────────────────────────────────────────────────────────────
+
+    async def _send(self, payload: dict) -> None:
+        ws = self._ws
+        if ws is None:
+            raise BridgeNotConnected("扩展未连接")
+        async with self._send_lock:
+            await ws.send_text(json.dumps(payload, ensure_ascii=False))
+
+    async def _on_message(self, raw: str) -> None:
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("收到无法解析的扩展消息")
+            return
+
+        mtype = msg.get("type")
+
+        if mtype == P.MSG_RESULT:
+            result = P.BridgeResult.from_wire(msg)
+            fut = self._pending.pop(result.cmd_id, None)
+            if fut and not fut.done():
+                fut.set_result(result)
+            else:
+                logger.debug(f"收到无人认领的命令结果: {result.cmd_id}")
+
+        elif mtype == P.MSG_CHUNK:
+            # 下载分块：先攒着，等 result 到了再一起交给调用方组装
+            cid = str(msg.get("id", ""))
+            data = msg.get("data")
+            if cid and data:
+                self._chunks.setdefault(cid, []).append(data)
+
+        elif mtype == P.MSG_PONG:
+            pass
+
+        elif mtype == P.MSG_EVENT:
+            await self._dispatch_event(str(msg.get("name", "")), msg.get("data") or {})
+
+        elif mtype == P.MSG_ERROR:
+            logger.warning(f"扩展上报错误: {msg.get('error')}")
+
+        else:
+            logger.debug(f"忽略未知消息类型: {mtype}")
+
+    async def _heartbeat_loop(self) -> None:
+        """定期 ping，探测扩展是否还活着（MV3 的 Service Worker 会被回收）。
+
+        ping 发不出去说明 socket 已经烂了：这里必须**主动**把连接判死，
+        不能只 `return` —— 接收循环可能正卡在半开连接上永远等下去，
+        那样 `connected` 会一直显示 True。
+        """
+        try:
+            while True:
+                await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+                ws = self._ws
+                if ws is None:
+                    return
+                try:
+                    await self._send({"type": P.MSG_PING, "ts": int(time.time())})
+                except Exception as e:
+                    logger.warning(f"心跳发送失败（{type(e).__name__}），判定连接已失效")
+                    await self._force_close(ws, code=4002, reason="Heartbeat failed")
+                    return
+        except asyncio.CancelledError:
+            return
+
+    # ─── 命令下发 ────────────────────────────────────────────────────────
+
+    async def send_command(self, name: str, params: Optional[dict] = None,
+                           timeout: Optional[float] = None) -> Any:
+        """下发一条命令并等待扩展返回结果。
+
+        Args:
+            name: 命令名，见 ``protocol.CMD_*``
+            params: 命令参数
+            timeout: 覆盖默认超时
+
+        Returns:
+            扩展返回的 ``data`` 字段
+
+        Raises:
+            BridgeNotConnected: 扩展没连上
+            BridgeTimeout: 超时
+            BridgeError: 扩展执行失败
+        """
+        if not self.connected:
+            raise BridgeNotConnected(
+                "浏览器扩展未连接。请确认已在浏览器中安装并启用了 Kira Browser Bridge 扩展"
+            )
+
+        if name not in P.ALL_COMMANDS:
+            raise BridgeError(f"未知命令: {name}")
+
+        cmd_id = uuid.uuid4().hex
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[cmd_id] = fut
+
+        wait = timeout if timeout is not None else self.command_timeout
+
+        try:
+            await self._send(P.BridgeCommand(cmd_id, name, params or {}).to_wire())
+            self.commands_sent += 1
+            result: P.BridgeResult = await asyncio.wait_for(fut, timeout=wait)
+        except asyncio.TimeoutError:
+            self._pending.pop(cmd_id, None)
+            self.commands_failed += 1
+            raise BridgeTimeout(f"命令 {name} 超时（{wait}s），扩展没有响应") from None
+        except Exception:
+            self._pending.pop(cmd_id, None)
+            self.commands_failed += 1
+            raise
+
+        if not result.ok:
+            self.commands_failed += 1
+            raise BridgeError(result.error or f"命令 {name} 执行失败")
+
+        # 有分块的话一并交出去（下载场景）
+        chunks = self._chunks.pop(cmd_id, None)
+        if chunks:
+            if isinstance(result.data, dict):
+                result.data["chunks"] = chunks
+            else:
+                result.data = {"data": result.data, "chunks": chunks}
+        return result.data
+
+    # ─── 事件订阅（"可感知"） ────────────────────────────────────────────
+
+    def on_event(self, name: str, callback: Callable[[dict], Awaitable[None]]) -> None:
+        """注册某个扩展事件的异步回调。``name`` 传 ``"*"`` 表示监听全部。"""
+        if name == "*":
+            self._any_listener.append(callback)
+        else:
+            self._event_listeners.setdefault(name, []).append(callback)
+
+    async def _dispatch_event(self, name: str, data: dict) -> None:
+        callbacks = list(self._event_listeners.get(name, [])) + list(self._any_listener)
+        for cb in callbacks:
+            try:
+                await cb(data)
+            except Exception as e:
+                logger.error(f"事件回调 {name} 执行失败: {e}")

@@ -1,0 +1,277 @@
+"""域名白名单 / 黑名单校验。
+
+规则：
+    - 黑名单优先级最高，命中即拒绝（读和写都拒）
+    - 白名单为空 → 读操作放行、写操作放行（但受黑名单约束）
+    - 白名单非空 → 只有命中白名单的域名允许**写**操作，读操作仍然放行
+    - 支持 ``*`` 通配符，如 ``*.example.com``、``*.bank*``
+    - 特殊 scheme（``chrome://`` / ``file://`` / ``about:`` 等）默认拒绝
+
+匹配对象是 host（不含端口），从 URL 中解析。扩展侧也会做一次同样的校验，
+这里是服务端的权威判定 —— 不能只依赖扩展。
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import ipaddress
+import re
+from typing import Iterable, List, Optional, Tuple
+from urllib.parse import urlparse
+
+#: 明确不支持的 scheme（扩展也拿不到权限）
+BLOCKED_SCHEMES = frozenset({
+    "chrome", "chrome-extension", "edge", "about", "devtools",
+    "view-source", "data", "javascript", "file", "blob",
+})
+
+#: 本机地址的等价写法。
+#: ``127.0.0.1`` / ``localhost`` 靠默认黑名单就能挡住，但 ``[::1]``（IPv6
+#: 回环）、``2130706433``（十进制 IP）、``0.0.0.0``、``localhost.``（尾点）
+#: 指向的是同一个地方 —— 也就是 KiraAI 自己的 WebUI。少挡一个就等于
+#: 黑名单里那两条形同虚设。
+_LOCAL_HOSTS = frozenset({
+    "localhost", "localhost.localdomain", "127.0.0.1", "0.0.0.0", "::1", "::",
+})
+
+
+def is_local_host(host: str) -> bool:
+    """判断 host 是否指向本机（含各种等价写法）。"""
+    h = (host or "").strip().strip("[]").rstrip(".").lower()
+    if not h:
+        return False
+    if h in _LOCAL_HOSTS or h.endswith(".localhost"):
+        return True
+
+    # 纯数字是十进制形式的 IPv4（2130706433 == 127.0.0.1）
+    try:
+        if h.isdigit():
+            return ipaddress.ip_address(int(h)).is_loopback
+        ip = ipaddress.ip_address(h)
+        return ip.is_loopback or ip.is_unspecified
+    except ValueError:
+        return False
+
+
+def parse_host(url: str) -> Optional[str]:
+    """从 URL 提取 host（小写，不含端口）。解析失败返回 None。"""
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme in BLOCKED_SCHEMES:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    # 注意：这里**不**剥离 "www." 前缀。
+    # 剥离会让 host 与用户规则失去对称性 —— 用户写规则 "www.example.com" 时
+    # 却拿 "example.com" 去比，反而误判。www 与裸域的等价由 _matches 的
+    # 子域匹配规则自然覆盖（www.example.com 是 example.com 的子域）。
+    #
+    # 也**不**去掉尾点（``localhost.``）：改写 host 会让它和用户写的规则对不上，
+    # 尾点等价交给 _matches 处理。
+    return host or None
+
+
+def parse_scheme(url: str) -> str:
+    try:
+        return (urlparse(url).scheme or "").lower()
+    except Exception:
+        return ""
+
+
+def _normalize_pattern(pattern: str) -> str:
+    """把用户填的规则归一化成 host 形式的 glob。"""
+    p = (pattern or "").strip().lower()
+    if not p:
+        return ""
+    # 允许用户直接填完整 URL，这里只取 host 部分
+    if "://" in p:
+        p = urlparse(p).hostname or p
+    # 去掉端口
+    p = re.sub(r":\d+$", "", p)
+    # 去掉路径残留
+    p = p.split("/")[0]
+    return p
+
+
+def _matches(host: str, pat: str) -> bool:
+    """单条规则的匹配判定。
+
+    这是整个安全校验的核心，规则必须可预测。四条语义，按顺序判定：
+
+    1. **纯字面量域名**（``github.com``）：匹配它自己，也匹配所有子域
+       （``gist.github.com``）。按**标签边界**比较，绝不做裸子串 ——
+       否则 ``evil-github.com`` 和 ``github.com.evil.com`` 都会命中白名单。
+
+    2. **两端通配的关键词模式**（``*bank*``、``*pay*``）：在整串 host 上做
+       子串匹配。用户这样写就是在明确要求「关键词拦截」，误伤面大是其固有代价。
+
+    3. **子域模式**（``*.example.com``）：匹配 ``example.com`` 本身及所有子域，
+       按标签边界对齐。特意不走 fnmatch —— fnmatch 的 ``*`` 跨 ``.``，
+       会把 ``example.com.evil.com`` 也判成命中，白名单就形同虚设了。
+
+    4. **字面量 + 通配**（``*.bank*``、``github.*``）：通配符左边的字面量必须在
+       某个标签的**起始位置**对齐，右边剩余部分再按 fnmatch 比。
+       所以 ``*.bank*`` 命中 ``bankofamerica.com``（标签以 bank 开头）、
+       ``bank.com.cn``（标签就叫 bank）、``bankofamerica.com.evil.com`` 不命中。
+
+       ⚠️ 这条**不做任意位置子串匹配**，是有意为之：默认黑名单里的
+       ``*.bank*`` / ``*.pay*`` 若按子串理解，会顺带拦掉 ``repayment.xyz``、
+       ``newspay.cn`` 这类与支付无关的站点，规则行为变得不可预测。
+       代价是 ``my-bank-of-china.com``（关键词在标签中间）不再被 ``*.bank*``
+       拦下 —— 要覆盖这种写法，请用 ``*bank*``。
+
+    5. 大小写不敏感（host 已在 :func:`parse_host` 里小写化，模式在
+       :func:`_normalize_pattern` 里小写化）；尾点写法（``localhost.``）
+       与不带尾点等价。
+    """
+    if not pat:
+        return False
+
+    # 尾点只在比较时归一，不去改 parse_host 的返回值（那会让 host 与用户规则失配）
+    h = (host or "").rstrip(".")
+    if not h:
+        return False
+
+    labels = h.split(".")
+
+    # 1) 纯字面量域名：自己 + 所有子域，按标签边界
+    if not any(ch in pat for ch in "*?["):
+        return h == pat or h.endswith("." + pat)
+
+    # 2) 两端通配的关键词模式：整串子串匹配
+    if pat.startswith("*") and pat.endswith("*") and pat.count("*") == 2:
+        core = pat.strip("*").lstrip(".")
+        return bool(core) and core in h
+
+    # 拆成「通配符左边的字面量」+「含通配符的剩余部分」。
+    #
+    # "*." 前缀要单独处理：直接按第一个通配符切，字面量会剩下一个孤零零的 "."
+    # （"*.example.com" -> literal=".", tail="*"），既丢掉了真实后缀，
+    # 又会让 "*.example.com" 匹配不上裸域 "example.com"。所以这里把 "*."
+    # 当作「任意子域前缀」整个吃掉，剩下的完整模式留在 tail 里，
+    # 由下面的标签边界循环逐段对齐。
+    if pat.startswith("*."):
+        literal = ""
+        tail = pat[2:]
+    else:
+        wildcard_at = len(pat)
+        for ch in "*?[":
+            i = pat.find(ch)
+            if i != -1:
+                wildcard_at = min(wildcard_at, i)
+        literal = pat[:wildcard_at]
+        tail = pat[wildcard_at:]
+        # 字面量里残留的点是分隔符，不属于标签内容（"example.*" -> "example"）
+        literal = literal.rstrip(".")
+
+    # 3) "*.example.com" / "*.bank*"：literal 为空，每个标签边界都试一次。
+    #    tail 仍可能含通配符（"*.bank*" 的 "bank*"），交给 fnmatch；
+    #    也可能不含（"*.example.com" 的 "example.com"），那就是精确后缀匹配，
+    #    绝不会命中 "example.com.evil.com"。
+    if not literal:
+        return any(_glob_match(".".join(labels[i:]), tail)
+                   for i in range(len(labels)))
+
+    # 4) "bank*" / "github.*"：字面量必须从某个标签起始处对齐
+    for i in range(len(labels)):
+        rest = ".".join(labels[i:])
+        if rest.startswith(literal) and _glob_match(rest[len(literal):], tail):
+            return True
+
+    return False
+
+
+def _glob_match(text: str, pattern: str) -> bool:
+    """通配符匹配的收口入口。
+
+    ``fnmatch`` 的 ``*`` 跨 ``.``，这正是子域规则容易出错的地方，所以只允许
+    它在已经确定好对齐位置的**剩余部分**上使用 —— 对齐由调用方负责。
+    """
+    if not pattern:
+        return text == ""
+    return fnmatch.fnmatch(text, pattern)
+
+
+def _match_any(host: str, patterns: Iterable[str]) -> Optional[str]:
+    for raw in patterns or []:
+        pat = _normalize_pattern(raw)
+        if not pat:
+            continue
+        if _matches(host, pat):
+            return raw
+    return None
+
+
+def check_url(
+    url: str,
+    allowed: Iterable[str] = (),
+    blocked: Iterable[str] = (),
+    for_write: bool = False,
+) -> Tuple[bool, str]:
+    """校验一个 URL 是否允许被访问。
+
+    Args:
+        url: 目标地址
+        allowed: 白名单规则
+        blocked: 黑名单规则
+        for_write: 是否为写操作（白名单非空时，写操作必须命中白名单）
+
+    Returns:
+        ``(ok, reason)`` —— ``ok`` 为 False 时 ``reason`` 是给用户/日志看的说明。
+    """
+    if not url:
+        return False, "URL 为空"
+
+    scheme = parse_scheme(url)
+    if scheme in BLOCKED_SCHEMES:
+        return False, f"不支持的页面类型（{scheme}://），扩展无权访问"
+
+    host = parse_host(url)
+    if not host:
+        return False, f"无法解析域名: {url}"
+
+    # 本机地址优先拦，且不看黑名单配置 —— 默认黑名单只写了 127.0.0.1 和
+    # localhost 两种写法，[::1] / 2130706433 / 0.0.0.0 / localhost. 都能绕过去，
+    # 而它们指向的是 KiraAI 自己的 WebUI 端口。
+    if is_local_host(host):
+        return False, (
+            f"域名 {host} 指向本机地址，已拒绝（避免 AI 操作 KiraAI 自身的服务）"
+        )
+
+    blocked_hit = _match_any(host, blocked)
+    if blocked_hit:
+        return False, f"域名 {host} 命中黑名单规则「{blocked_hit}」，已拒绝"
+
+    allowed_list: List[str] = [a for a in (allowed or []) if str(a).strip()]
+
+    if not allowed_list:
+        # 白名单空：读写都放行（已过黑名单）
+        return True, ""
+
+    allowed_hit = _match_any(host, allowed_list)
+    if allowed_hit:
+        return True, ""
+
+    if for_write:
+        return False, (
+            f"域名 {host} 不在白名单内，写操作被拒绝。"
+            f"如需允许，请在插件配置的「域名白名单」中添加"
+        )
+    # 读操作在白名单非空时仍然放行
+    return True, ""
+
+
+def check_write_targets(urls: Iterable[str], allowed: Iterable[str],
+                        blocked: Iterable[str]) -> Tuple[bool, str]:
+    """批量校验写操作涉及的多个 URL，任一失败即整体拒绝。"""
+    for url in urls:
+        ok, reason = check_url(url, allowed, blocked, for_write=True)
+        if not ok:
+            return False, reason
+    return True, ""

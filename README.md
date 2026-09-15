@@ -1,440 +1,518 @@
-# 无头浏览器插件 (Headless Browser Plugin) 1.2.0
+# 浏览器插件 (Browser Plugin) 2.1.0
 
-让 KiraAI 能够控制无头浏览器进行网页浏览、截图、下载、上传等操作，支持自动加载 cookie 文件实现各账号的半持久化登录。
+> 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
+
+一个插件，**两个能力完全对称的后端**，自动挑选：
+
+```
+                ┌──────────────────────────────────────┐
+                │  BrowserPlugin（12 个动作式工具）      │
+                └───────────────┬──────────────────────┘
+                                │  BackendRouter（自动挑）
+                 ┌──────────────┴──────────────┐
+                 ▼                             ▼
+    扩展桥（你自己的浏览器）            无头后端（插件自己的浏览器）
+    · 扩展主动连出，零冲突              · Playwright 拉起，独立 profile
+    · 登录态天然可用                    · 空闲自动关闭，释放 CPU/内存
+                 └──── 没连上就自动回退 ─────┘
+```
+
+**为什么这么设计**：原版无头插件默认去接管你真实浏览器的数据目录，而 Playwright
+会**独占**这个目录（ProcessSingleton 锁）——结果就是**你开着浏览器插件用不了，
+插件开着你的浏览器打不开**。现在两条路彻底分开：扩展桥**根本不启动浏览器**
+（用的是你已经开的那个），无头后端**只用自己的 profile**。
+
+---
 
 ## 功能特性
 
-- 🌐 **浏览器控制**: 访问网页、点击元素、填写表单、滚动页面
-- 🖥️ **真实浏览器接管**: 默认直接使用本机默认浏览器及其真实用户数据，登录态开箱即用；多级回退，无浏览器时自动下载内置 Chromium
-- 📸 **截图功能**: 截取页面或元素，自动发送给 AI 查看
-- 📁 **文件管理**: 下载文件、保存截图、发送文件给用户
-- 🔧 **JS执行**: 在页面中执行 JavaScript 代码
-- 🍪 **Cookie管理**: 自动加载 `data/files/cookie/` 目录下所有网站的 Cookie 文件，多站点独立存储，分享插件时安全隔离
-- ⚙️ **灵活配置**: 支持无头/可视模式、自定义视口、User-Agent 等
+- 🖥️ **用你自己的浏览器**：装配套扩展后，直接操作用户眼前那个浏览器，登录态、
+  已打开的标签页全都可用，**且不需要用户关闭浏览器**
+- 🧬 **真实数据可选继承**：无头后端可以把真实浏览器的用户数据**复制**一份来用
+  （登录态/Cookie/书签都在），因为是副本所以**不占用**原目录
+- 🧠 **两个后端能力完全对称**：读/点击/输入/执行 JS/上传/下载/Cookie/键盘鼠标，两边都有
+- 🛡️ **CPU / 内存防护**：保留 Chromium 的后台节流、补齐防崩溃参数、空闲自动关闭
+- 🔁 **页面自愈**：标签页被关掉或页面崩溃后自动恢复，不会永久卡死
+- 🪟 **有头 / 无头都支持**：可视模式下窗口参数齐备
+- 📄 **内容可分页续读**：单次返回长度不是硬上限，AI 自己能决定读多少
+- 🍪 **Cookie 跨后端打通**：一键把浏览器的登录态带到无头后端
+- ⚙️ **动作式工具接口**：12 个工具名覆盖 30+ 种能力，模型不用记一堆近义名字
 
-## 安装依赖
+---
 
-插件自带 `requirements.txt`，安装/重载插件时 KiraAI 会自动执行 `pip install playwright aiohttp`，**无需手动安装 pip 依赖**。
+## 安装
 
-浏览器本体也无需手动准备——插件启动时按以下顺序自动选择（见下节"浏览器来源"），前三级都找不到时会**自动下载内置 Chromium**。
+### 1. 安装插件
 
-> 老版本手动执行过 `playwright install chromium` 的用户不受影响。
+把本仓库整个目录放到 KiraAI 的 `data/plugins/` 下（或从 WebUI 上传 zip）。
 
-## 浏览器来源（v1.2.0 新机制）
+依赖会自动装（`requirements.txt`：`playwright` + `aiohttp`）。浏览器本体也会在
+需要时自动下载（见下方「浏览器来源」）。
 
-插件启动浏览器时按优先级依次尝试，全部失败会自动下载内置 Chromium：
+### 2. 装浏览器扩展（**推荐**，不装也能用）
 
-1. **真实浏览器模式（默认开，`use_real_browser_profile`）**：直接使用你本机的默认浏览器（自动探测 Chrome → Edge → Chromium）及其**真实用户数据目录**，完整继承你已登录的账号、书签等数据。
-   - ⚠️ 使用前请**完全退出正在运行的该浏览器**（用户数据目录被占用会自动回退到下一级）；
-   - ⚠️ 自动化操作将以你的**真实账号身份**执行，请注意隐私与安全风险，不需要时可在配置中关闭；
-   - 高级用户可用 `custom_user_data_dir` 手动指定用户数据目录。
-2. **插件持久化 profile（默认开，`use_persistent_profile`）**：插件专用浏览器数据目录（登录一次后跨重启保留），不污染真实浏览器。
-3. **系统浏览器普通模式**：用系统已装的 Chrome/Edge/Chromium 开一个全新会话。
-4. **自动下载内置 Chromium**：以上都不可用时自动执行 `playwright install chromium` 并验证启动。
+扩展已经**随插件打包**在 `browser-bridge/` 目录里，不用另外下载。
 
-当前实际使用的来源会写入日志，也可用 `browser_debug` 工具查看。
+不装扩展也能正常使用（走无头后端），**装了之后 AI 才能直接操作你正在用的浏览器**。
+
+插件首次用到浏览器工具时，会**自动把下面的引导交给 AI**，让它转述给你——
+你不需要自己去翻插件目录：
+
+```
+📁 扩展就在插件目录里：<插件目录>/browser-bridge
+
+📋 安装步骤：
+  1. 在 Chrome 地址栏打开：chrome://extensions
+  2. 打开右上角的「开发者模式 / Developer mode」开关
+  3. 点「加载已解压的扩展程序 / Load unpacked」
+  4. 选择 <插件目录>/browser-bridge
+  5. 点扩展图标，把「接入令牌」粘进去，点连接
+```
+
+也可以随时问 AI：「**怎么让你看我现在的浏览器？**」→ 它会调用
+`browser_extension_help` 给出当前机器上检测到的浏览器、对应地址、绝对路径和令牌。
+
+#### 支持的浏览器
+
+| 浏览器 | 支持 | 说明 |
+|---|---|---|
+| Chrome | ✅ 116+ | |
+| Edge | ✅ 116+ | 同为 Chromium 内核，扩展机制一致；打开的是 `edge://extensions` |
+| Brave / Vivaldi / Opera | ✅ | Chromium 系，`chrome.*` API 一致 |
+| Firefox | ❌ | Firefox 的 MV3 用 event page，**不接受** `background.service_worker` |
+| Safari | ❌ | 扩展格式完全不同 |
+
+#### 为什么不能自动安装扩展
+
+Chromium 没有给本地程序留"静默安装扩展"的正规接口：
+
+- `--load-extension` 命令行参数只对**我们自己拉起的那个 Chromium 实例**有效，
+  管不到用户已经在用的浏览器；且 Google 从 2025 起在收紧它。
+- `ExtensionInstallForcelist` 企业策略确实能静默安装，但要改注册表/组策略——
+  那是管理员操作，插件不该去动用户的系统。
+
+所以这里选择了「**把它做到一键可复制**」：扩展随插件打包 + 首次运行主动告诉你在哪、
+怎么装、令牌是什么。**不会去做看起来能自动装、实际偷偷改你注册表的事。**
+
+---
+
+## 浏览器来源与后端策略
+
+### `backend_strategy`（默认 `auto`）
+
+| 值 | 行为 |
+|---|---|
+| `auto` | 优先扩展桥（你自己的浏览器）；扩展没连上就自动回退到无头后端 |
+| `extension` | **只用**你的浏览器，连不上就报错（不偷偷降级） |
+| `headless` | **只用**插件自己的无头浏览器 |
+
+> 为什么默认 `auto`：装了扩展就享受真实登录态，没装也照样能用。
+> 而无论哪条路，无头后端都不会碰你的真实 profile。
+
+### 无头后端的浏览器来源（`browser_channel`）
+
+按优先级依次尝试，全部失败会自动下载内置 Chromium：
+
+1. `auto` —— 系统默认浏览器 → Chrome → Edge → Chromium → 内置
+2. `chrome` / `msedge` / `chromium` —— 指定某一个
+3. `bundled` —— 只用 Playwright 自带的 Chromium
+
+### 无头后端的 profile 模式（`headless_profile_mode`，默认 `inherit`）
+
+| 值 | 行为 |
+|---|---|
+| `inherit` | **复制**你真实浏览器的用户数据到插件目录，跑在那个副本上 |
+| `persistent` | 插件自己的 profile（与真实浏览器无关） |
+| `temp` | 临时目录，用完即弃 |
+
+**关于 `inherit`**：登录态、Cookie、书签全都在。为什么复制出来的 Cookie 还能用？
+Chrome 80+ 的 Cookie 用 AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/
+OSCrypt（Linux）包裹，这三者都是**用户级、与路径无关**的——同一台机器同一个用户，
+副本照样能解密。
+
+复制时会跳过 `Cache` / `GPUCache` / `Service Worker` 等大目录（否则要复制好几个 GB），
+并删掉副本里的 `SingletonLock` 等锁文件（否则 Playwright 会以为"profile 正在运行"）。
+
+> ⚠️ 与旧版的区别：旧版那个「直接指向真实目录」的开关（v1.x 的 `use-real-browser-profile`，已移除）
+是**直接指向**真实目录，
+> 会持有锁、导致你和插件互相排斥。现在改为复制，**你自己的浏览器照常能用**。
+
+---
 
 ## 配置说明
 
-在 WebUI 的插件配置中设置以下选项：
-
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `headless` | switch | `true` | 是否以无头模式运行（后台运行） |
-| `browser_channel` | enum | `auto` | 浏览器来源：`auto`=自动探测（优先系统默认浏览器）；`chrome`/`msedge`/`chromium`=指定；`bundled`=只用内置 Chromium |
-| `use_real_browser_profile` | switch | `true` | 使用真实浏览器的用户数据目录（继承登录态）。使用前需完全退出该浏览器，操作以真实账号身份执行 |
-| `custom_user_data_dir` | string | - | 手动指定用户数据目录（留空自动定位），仅真实浏览器模式生效 |
-| `use_persistent_profile` | switch | `true` | 真实浏览器不可用时使用插件专用持久化 profile（登录跨重启保留） |
-| `default_viewport` | string | `1920x1080` | 浏览器视口大小 |
-| `screenshot_dir` | string | `插件数据目录/screenshots` | 截图保存路径 |
-| `download_dir` | string | `插件数据目录/downloads` | 文件下载路径 |
+| `enabled` | switch | `true` | 是否启用插件 |
+| `backend_strategy` | enum | `auto` | 后端策略：`auto`/`extension`/`headless` |
+| `extension_enabled` | switch | `true` | 是否启用扩展桥后端 |
+| `headless_enabled` | switch | `true` | 是否允许回退到无头后端 |
+| `read_only` | switch | `false` | 只读模式：打开后写工具会从模型可见的工具表里整个摘掉 |
+| `require_confirm` | switch | `false` | 写操作前在浏览器弹通知，需用户点「允许」（仅扩展桥支持） |
+| `allowed_domains` | list | `[]` | 域名白名单。留空=不限制写操作；填写后写操作只允许命中规则的域名 |
+| `blocked_domains` | list | `["127.0.0.1","localhost","*.bank*","*.pay*"]` | 域名黑名单，读写都拦 |
+| `max_content_chars` | integer | `8000` | 单次返回正文的字符上限（配合 `content_page_size` 使用） |
+| `content_page_size` | integer | `8000` | `browser_page` 单次默认返回多少字符。**不是硬上限**，可用 offset 续读 |
+| `inject_page_state` | switch | `true` | 是否把当前浏览状态注入提示词 |
+| `panel_auth_required` | switch | `true` | 配置面板需要登录 |
+| `command_timeout` | number | `20` | 扩展命令超时（秒）。开了二次确认会自动抬高 |
+| `headless` | switch | `true` | 无头模式；关闭则显示窗口 |
+| `browser_channel` | enum | `auto` | 浏览器来源（见上） |
+| `headless_profile_mode` | enum | `inherit` | profile 模式（见上） |
+| `custom_user_data_dir` | string | - | 自定义 profile 目录。⚠️ **不要填你真实浏览器的 User Data**，那会导致互相抢锁 |
+| `default_viewport` | string | `1920x1080` | 视口大小（无头模式生效） |
 | `user_agent` | string | - | 自定义 User-Agent |
-| `timeout` | integer | `60` | 页面加载超时时间（秒） |
-| `auto_send_screenshot` | enum | `auto` | 截图发送模式：`auto`=自动发送，`manual`=AI决定何时发送 |
-| `auto_describe_screenshot` | boolean | `true` | 是否使用VLM自动描述截图 |
-| `vlm_model` | model_select | - | 选择用于描述截图的VLM模型（下拉框显示所有已配置模型） |
-| `vlm_describe_prompt` | string | - | 自定义VLM提示词（可选，未设置则使用默认模板） |
-| `vlm_timeout` | integer | `10` | VLM描述超时时间（秒） |
-| `cookies_dir` | string | `data/files/cookie` | Cookie文件存放目录，启动时自动加载该目录下所有 *.json 文件 |
-| `upload_allow_any_path` | switch | `true` | 是否允许上传任意目录的文件（true=允许任何路径，false=仅允许白名单目录） |
-| `upload_allowed_dirs` | list | `["data/files", "data/temp"]` | 允许上传的目录白名单（每行一个，仅在 `upload_allow_any_path=false` 时生效） |
+| `timeout` | integer | `45` | 页面加载超时（秒） |
+| `default_wait_until` | enum | `domcontentloaded` | 等待策略。**不推荐** `networkidle`：现代页面有轮询/长连接，可能永远不空闲，只会白等到超时、期间还在烧 CPU |
+| `op_timeout` | integer | `120` | 页面操作超时（秒）。**默认与框架工具超时脱钩**——框架是到点直接取消我们的协程，会留下状态不明的页面 |
+| `op_timeout_follows_framework` | switch | `false` | 打开后把 `op_timeout` 限制在「框架工具超时 × 比例」内 |
+| `op_timeout_ratio` | number | `0.8` | 仅在上项打开时生效 |
+| `action_timeout` | integer | `20` | 点击/输入等交互的超时（秒） |
+| `idle_close_seconds` | integer | `300` | 空闲这么久后自动关闭无头浏览器，释放 CPU 和内存。`0`=不关 |
+| `screenshot_dir` | string | 插件数据目录/screenshots | 截图保存路径 |
+| `download_dir` | string | 插件数据目录/downloads | 下载保存路径 |
+| `screenshot_max_count` | integer | `50` | 截图最多保留张数（元素截图也计入清理） |
+| `screenshot_auto_clean` | switch | `true` | 自动清理旧截图 |
+| `download_auto_clean` | switch | `true` | 自动清理下载目录 |
+| `download_max_count` | integer | `100` | 下载目录最多保留文件数 |
+| `download_max_bytes` | integer | `2147483648` | 单个下载大小上限（2GB）。下载是**流式落盘**，无论多大都不占内存 |
+| `upload_max_bytes` | integer | `209715200` | 上传大小上限（200MB）。内容要经 WebSocket 传输，别设太大 |
 
-### 截图发送模式
+---
 
-**`auto` 模式（默认）：**
-- 截图后自动发送给用户
-- AI 会收到 VLM 对截图的描述
-- 适合快速响应，不需要 AI 判断的场景
+## 可用工具（12 个）
 
-**`manual` 模式：**
-- 截图后不会自动发送
-- AI 会先查看截图内容（通过 VLM 分析）
-- AI 可以根据内容决定是否发送给用户
-- 适合需要 AI 判断截图是否有价值的场景
-- AI 可以使用 `browser_send_file` 手动发送
+工具按「**动作 + 传参**」组织：同类操作合并成一个工具，用 `action` / `mode` 选做什么。
+能力一个没少，但模型不用在一堆近义名字里挑。
 
-**切换模式：**
-在插件配置中修改 `auto_send_screenshot` 选项，然后重载插件。
+### 📄 `browser_page` —— 读页面
 
-### VLM 模型配置
+| 参数 | 说明 |
+|---|---|
+| `mode` | `info`（只要标题网址）· `text`（正文，默认）· `outline`（标题结构+可交互元素+链接）· `html`（原始 HTML）· `selector`（取某个选择器内文本）· `extract`（抽多条结构化数据） |
+| `selector` | `mode=selector/extract` 时的 CSS 选择器 |
+| `attr` | `mode=extract`：取这个属性（如 `href`），省略取文本 |
+| `limit` | `mode=extract`：最多几条，默认 50 |
+| `offset` | 从正文第几个字符开始读（长页面续读用） |
+| `max_chars` | 本次最多返回多少字符 |
 
-截图后插件可以使用 VLM（视觉语言模型）自动分析截图内容，提取页面信息供后续 AI 调用工具使用。
+> **内容不受长度限制**：单次返回 8000 字符只是「一次给多少」。返回值里会带
+> `has_more` / `next_offset` / `total_chars`，AI 看到「还有 26512 字符未读」
+> 就能自己带 `offset` 接着读。
 
-**重要说明：**
-基于KiraAI框架传统，用于描述截图的 VLM 模型必须是 **LLM 类型**（不是图像类型）。即使模型支持视觉分析，也需要在 LLM 模型组中配置才能用于描述功能。
+### 🖱️ `browser_interact` —— 所有交互（18 个动作）
 
-**配置步骤：**
-1. 在**提供商**设置中，将视觉模型（如 Qwen-VL）添加到 **大语言模型** 组（而不是图像组）
-2. 保存提供商配置
-3. 在插件配置的 `vlm_model` 下拉框中选择该模型
+用 `action` 选：
 
-**支持的视觉模型：**
-- `Qwen/Qwen2-VL-72B-Instruct` (硅基流动)
-- `gpt-4o` (OpenAI)
-- `claude-3-opus` (Anthropic)
-- `kimi-k2-0905` (Moonshot)
+| 分类 | action |
+|---|---|
+| 元素类 | `click` · `fill` · `type` · `hover` · `scroll` · `upload` |
+| 导航类 | `go_back` · `refresh` |
+| 键盘 | `key_press` · `key_down` · `key_up` · `key_type` |
+| 鼠标 | `mouse_click` · `mouse_move` · `mouse_down` · `mouse_up` · `mouse_wheel` · `mouse_drag` |
 
-**方式二：使用系统默认VLM**
-在系统设置-默认模型中配置VLM模型，插件会自动使用。
+常用参数：`selector` / `text` / `index`（定位）、`value`（填写内容）、
+`key`（按键，如 `Control+a`）、`direction`、`file_path`、`x`/`y`。
 
-**检查VLM配置：**
-调用 `browser_check_vlm` 工具查看当前配置状态和可用模型列表。
+### 🌐 `browser_navigate` —— 打开网址
+`url`、`new_tab`
 
-### VLM 提示词模板
+### 📑 `browser_tabs` —— 列出所有标签页
 
-插件内置了专门为**浏览器自动化优化**的 VLM 提示词模板。当 VLM 分析截图时，会输出以下结构化信息：
+### 📸 `browser_screenshot` —— 截图
+`full_page`、`selector`（只截某元素）、`send`（是否发给用户，默认 true）
 
-```
-### 1. 页面基本信息
-- 页面标题、URL、页面类型
+### ⏱️ `browser_wait` —— 等待
+给了 `selector`/`text` 就等它们出现（更准）；否则等 `seconds` 秒。
 
-### 2. 可交互元素清单（关键！）
-- 搜索框：位置、placeholder文字
-- 按钮：文字和大概位置
-- 链接：重要导航链接
-- 表单字段：输入框、下拉菜单
+### ⚡ `browser_script` —— 执行 JavaScript
+`script`。返回表达式的结果。
 
-### 3. 当前状态
-- 页面是否已完全加载？
-- 是否有错误提示、弹窗、警告？
-- 是否需要登录才能操作？
+> 扩展桥后端执行任意 JS 需要用户在扩展详情页打开「**允许用户脚本 / Allow User Scripts**」
+> 开关（Chrome 138+ 的安全要求）。这是 Chrome 强制的，扩展无法代劳——
+> 插件会把这个情况翻译成一句能照做的话。**只有这一个能力需要该开关**。
 
-### 4. 关键内容
-- 页面的主要内容/搜索结果是什么？
-- 是否有验证码、人机验证？
-- 是否有弹窗广告遮挡？
+### 📁 `browser_file` —— 文件
+| mode | 说明 |
+|---|---|
+| `download` | 下载 URL 到本地并发给用户（**会带上浏览器的登录态**） |
+| `list` | 列出已下载/截图目录里的文件 |
 
-### 5. 建议的下一步操作
-- 如果要搜索：点击哪里、输入什么
-- 如果要点击：建议的CSS选择器
-- 如果要填写表单：每个字段填什么
+上传文件用 `browser_interact(action="upload", selector=..., file_path=...)`。
 
-### 6. 坐标参考
-- 重要元素的大致坐标（基于1920x1080）
-```
+### 🍪 `browser_cookie` —— 打通登录态
+| action | 说明 |
+|---|---|
+| `export` | 导出当前站点（或指定 url）的 cookie |
+| `import` | 把 cookie 写进当前后端 |
 
-这样后续 LLM 拿到描述后，可以直接调用浏览器工具完成操作！
+典型用法：先从扩展桥导出，再写入无头后端——这样降级到无头时也不用重新登录。
 
-**自定义提示词：**
-如需覆盖默认模板，在插件配置中填写 `vlm_describe_prompt`。自定义提示词将完全替代默认模板。
+### 🔧 `browser_debug` —— 后端状态
+当前用哪个后端、profile 模式、超时设置、空闲多久、开着几张页面。排障用。
 
-### 🍪 Cookie 管理
+### 🖥️ `browser_test_visible` —— 确认窗口可见
+打开一个测试页，用来确认可视模式下浏览器窗口是否真的显示出来了。
 
-插件支持自动加载 **多个网站** 的 Cookie，方便 AI 以已登录状态操作各类网站。
+### 🔌 `browser_extension_help` —— 扩展安装引导
+给出扩展的绝对路径、按浏览器区分的安装步骤、接入令牌、兼容性说明。
 
-**存储方式：**
-- Cookie 文件统一存放在 `data/files/cookie/` 目录
-- 每个网站一个独立的 JSON 文件，如 `chatgpt.json`、`claude.json`、`gemini.json`
-- 插件启动或浏览器重启时，自动扫描并加载该目录下所有 `*.json` 文件
+---
 
-**文件格式（标准 Chrome 导出格式）：**
-```json
-[
-  {
-    "name": "session-token",
-    "value": "xxx",
-    "domain": ".chatgpt.com",
-    "path": "/",
-    "secure": true,
-    "httpOnly": true,
-    "sameSite": "Lax",
-    "expirationDate": 11451418881
-  }
-]
-```
-支持嵌套格式（如 `{"cookies": [...]}`），插件会自动解包。
+## 两个后端的能力对照
 
-**如何使用：**
-1. 从浏览器扩展（如 EditThisCookie、Get cookies.txt）导出对应网站的 Cookie
-2. 保存为 JSON 文件，放入 `data/files/cookie/` 目录，插件启动时自动加载（cookie 值仅注入浏览器会话，不会出现在 AI 可见的上下文中）
-3. 建议按站点名命名方便管理，如 `chatgpt.json`
-4. 重载插件或重启 KiraAI 即可自动加载
+| 能力 | 扩展桥 | 无头 |
+|---|---|---|
+| 读页面 / 提取 / 列表签 | ✅ | ✅ |
+| 跳转 / 点击 / 输入 / 滚动 | ✅ | ✅ |
+| 截图 | ✅ | ✅ |
+| 执行 JavaScript | ✅（需开 userScripts 开关） | ✅ |
+| 上传文件 | ✅ | ✅ |
+| 下载（带登录态） | ✅ | ✅ |
+| Cookie 导出 / 写入 | ✅ | ✅ |
+| 键盘 / 鼠标精细控制 | ✅ | ✅ |
+| 返回 / 刷新 | ✅ | ✅ |
+| 用你现有的登录态 | ✅ 天然 | ✅（`inherit` 复制） |
 
-**安全隔离：**
-`data/files/cookie/` 目录位于项目数据目录下，**不随插件文件打包**：已在 `manifest.json` 的 `exclude` 字段中声明打包排除，并在仓库 `.gitignore` 中忽略该目录。分享插件源码时，你的 Cookie 信息不会泄露。如需分享，请确保移除该目录。
-**然而必须注意，你发送的任何内容实际上都经手了你的模型提供商与服务商，请自行评估风险**
+**两个后端接口完全对称** —— 换后端不丢能力，只是"在谁的浏览器里做"不同。
 
-## 可用工具
-
-### 浏览器控制
-
-- **`browser_navigate`** - 访问指定 URL
-  - `url`: 要访问的网址
-  - `wait_until`: 等待状态 (`load`/`domcontentloaded`/`networkidle`)
-
-- **`browser_click`** - 点击页面元素
-  - `selector`: CSS 选择器
-  - `button`: 鼠标按钮 (`left`/`right`/`middle`)
-
-- **`browser_fill`** - 填写表单字段
-  - `selector`: CSS 选择器
-  - `value`: 要填写的文本
-  - `clear_first`: 是否先清空字段
-
-- **`browser_scroll`** - 滚动页面
-  - `direction`: 方向 (`down`/`up`/`bottom`/`top`)
-  - `amount`: 滚动距离（像素）
-
-- **`browser_go_back`** - 返回上一页
-
-- **`browser_refresh`** - 刷新页面
-
-### 截图与内容获取
-
-- **`browser_screenshot`** - 截图（根据配置自动发送或由AI决定）
-  - `selector`: 元素选择器（可选，默认截取整页）
-  - `filename`: 文件名（可选）
-  - `full_page`: 是否截取完整页面
-  - `send_now`: 是否立即发送（仅manual模式下有效）
-
-- **`browser_get_text`** - 获取页面文本内容
-  - `selector`: 元素选择器（可选）
-  - `max_length`: 最大返回长度
-
-- **`browser_get_info`** - 获取页面基本信息（标题、URL）
-
-### JavaScript 执行
-
-- **`browser_execute_js`** - 执行 JavaScript 代码
-  - `script`: JS 代码字符串
-
-### 文件管理
-
-- **`browser_upload_file`** - 上传文件到指定文件输入框（绕过系统文件对话框）
-  - `selector`: 文件输入框的 CSS 选择器（如 `#upload-files`、`input[type=file]`）
-  - `file_path`: 要上传文件的**绝对路径**（默认允许任意目录；可通过 `upload_allow_any_path=false` 限定仅允许白名单目录内的文件，出于安全考虑会拒绝其他路径）
-  - 返回: 上传成功或失败的信息
-
-- **`browser_download`** - 下载文件（自动发送给用户）
-  - `url`: 文件 URL
-  - `filename`: 保存文件名（可选）
-
-- **`browser_list_files`** - 列出下载/截图目录的文件
-  - `dir_type`: 目录类型 (`downloads`/`screenshots`)
-  - `limit`: 最大显示数量
-
-- **`browser_send_file`** - 发送指定文件给用户
-  - `filepath`: 文件完整路径
-  - `as_image`: 是否作为图片发送
-
-### 键盘模拟
-
-- **`browser_keyboard_type`** - 模拟键盘输入文本
-  - `text`: 要输入的文本
-  - `delay`: 每个字符之间的延迟（毫秒）
-
-- **`browser_keyboard_press`** - 模拟按下按键
-  - `key`: 按键名称，如 `Enter`, `Tab`, `Control+a`, `Shift+Tab`
-
-- **`browser_keyboard_down_up`** - 按住或释放键盘按键（用于复杂组合键）
-  - `action`: `down` 或 `up`
-  - `key`: 按键名称
-
-### 鼠标模拟
-
-- **`browser_mouse_move`** - 移动鼠标到指定坐标
-  - `x`: X坐标
-  - `y`: Y坐标
-  - `steps`: 步数（越大越平滑）
-
-- **`browser_mouse_click`** - 在指定坐标点击
-  - `x`, `y`: 坐标（可选，不指定则在当前位置点击）
-  - `button`: 按钮 (`left`/`right`/`middle`)
-  - `click_count`: 点击次数
-
-- **`browser_mouse_down_up`** - 按住或释放鼠标按键
-  - `action`: `down` 或 `up`
-  - `button`: 鼠标按钮
-
-- **`browser_mouse_wheel`** - 鼠标滚轮滚动
-  - `delta_x`: 水平滚动距离
-  - `delta_y`: 垂直滚动距离（正数向下）
-
-- **`browser_mouse_drag`** - 鼠标拖拽
-  - `start_x`, `start_y`: 起始坐标
-  - `end_x`, `end_y`: 目标坐标
-  - `button`: 鼠标按钮
-  - `steps`: 移动步数
-
-- **`browser_hover`** - 将鼠标悬停在指定元素上
-  - `selector`: CSS选择器
-
-### 其他
-
-- **`browser_wait`** - 等待元素出现或等待指定时间
-  - `seconds`: 等待秒数
-  - `selector`: 等待该元素出现
-
-### 调试工具
-
-- **`browser_debug`** - 调试浏览器状态
-
-- **`browser_check_vlm`** - 检查VLM模型配置状态
-
-- **`browser_test_visible`** - 测试浏览器可视模式
+---
 
 ## 使用示例
 
-### 示例 1: 访问网页并截图
+### 示例 1：看用户正在浏览的页面
 
 ```
-用户: 帮我打开 https://www.example.com 并截图看看
-
-AI:
-1. browser_navigate(url="https://www.example.com")
-2. browser_screenshot()
+（用户）"帮我看看我当前这个页面"
+→ browser_page(mode="outline")     # 先看结构，找下一步点哪里
+→ browser_page(mode="text")        # 再读正文
 ```
 
-### 示例 2: 填写表单
+### 示例 2：搜索并点进结果
 
 ```
-用户: 打开登录页，输入用户名 test 和密码 123456
-
-AI:
-1. browser_navigate(url="https://example.com/login")
-2. browser_screenshot()  # 查看页面结构
-3. browser_fill(selector="#username", value="test")
-4. browser_fill(selector="#password", value="123456")
-5. browser_click(selector="#submit-btn")
-6. browser_screenshot()  # 确认结果
+browser_navigate(url="https://www.baidu.com")
+browser_interact(action="fill", selector="#kw", value="Python 教程")
+browser_interact(action="key_press", key="Enter")
+browser_wait(selector="#content_left", timeout=10)
+browser_page(mode="outline")
+browser_interact(action="click", text="Python 官方教程")
 ```
 
-### 示例 3: 下载文件
+### 示例 3：长文档分页读完
 
 ```
-用户: 下载这个文件 https://example.com/file.pdf
-
-AI:
-browser_download(url="https://example.com/file.pdf", filename="document.pdf")
+r = browser_page(mode="text")                  # 返回 has_more=true, next_offset=8000
+r = browser_page(mode="text", offset=8000)     # 接着读
+r = browser_page(mode="text", offset=16000)
 ```
 
-### 示例 4: 执行 JavaScript
+### 示例 4：下载需要登录的文件
 
 ```
-用户: 获取当前页面的 cookie
-
-AI:
-browser_execute_js(script="document.cookie")
+browser_file(mode="download", url="https://example.com/private/report.pdf")
+# 扩展桥会用你浏览器的会话去抓 —— 登录态资源也能下
 ```
 
-### 示例 5: 使用键盘操作
+### 示例 5：降级时不丢登录态
 
 ```
-用户: 在搜索框输入 "Python" 然后按回车搜索
-
-AI:
-1. browser_navigate(url="https://www.baidu.com")
-2. browser_click(selector="#kw")  # 聚焦搜索框
-3. browser_keyboard_type(text="Python")
-4. browser_keyboard_press(key="Enter")
-5. browser_wait(seconds=2)
-6. browser_screenshot()
+browser_cookie(action="export")                          # 从浏览器导出
+browser_cookie(action="import", cookies=[...])           # 写进无头后端
 ```
 
-### 示例 6: 使用鼠标点击坐标
+### 示例 6：上传文件
 
 ```
-用户: 点击屏幕中央（假设按钮在 960, 540）
-
-AI:
-1. browser_navigate(url="https://www.example.com")
-2. browser_mouse_move(x=960, y=540)
-3. browser_mouse_click()  # 在当前位置点击
-4. browser_screenshot()
+browser_interact(action="upload", selector="input[type=file]",
+                 file_path="/path/to/resume.pdf")
 ```
 
-### 示例 7: 鼠标拖拽
+### 示例 7：鼠标拖拽（滑块 / 拖动排序）
 
 ```
-用户: 把左边的滑块拖到右边
-
-AI:
-1. browser_navigate(url="https://www.example.com/drag")
-2. browser_mouse_drag(start_x=100, start_y=300, end_x=400, end_y=300, steps=20)
-3. browser_screenshot()
+browser_interact(action="mouse_drag",
+                 start_x=100, start_y=200, end_x=400, end_y=200, steps=15)
 ```
 
-### 示例 8: 模拟组合键
+### 示例 8：执行 JS 取数据
 
 ```
-用户: 全选页面内容并复制
-
-AI:
-1. browser_click(selector="body")  # 聚焦页面
-2. browser_keyboard_press(key="Control+a")  # 全选
-3. browser_keyboard_press(key="Control+c")  # 复制
-4. browser_keyboard_type(text="已复制页面内容")
+browser_script(script="[...document.querySelectorAll('.item a')].map(a => a.href)")
 ```
 
-## 注意事项
+---
 
-1. **首次使用需要安装 Playwright**: 运行 `playwright install chromium` 安装浏览器
-2. **截图会自动发送**: 使用 `browser_screenshot` 后，图片会自动发送给用户
-3. **下载文件会自动发送**: 使用 `browser_download` 后，文件会自动发送给用户
-4. **文件保存位置**: 截图和下载的文件保存在插件数据目录下
+## 常见问题
+
+### 为什么装了扩展之后，我的浏览器还能正常开？
+
+因为扩展桥这条路**根本不启动浏览器** —— 它让扩展作为 WebSocket 客户端主动连出，
+插件借用的是**你已经开着的那个**浏览器。没有第二个进程，也就没有目录占用。
+
+（旧版会**直接指向**你的 User Data 目录，Playwright 一启动就持有
+`ProcessSingleton` 锁，于是你和插件互相排斥。现在改成复制副本。）
+
+### 执行 JavaScript 报「需要打开 Allow User Scripts」？
+
+这是 Chrome 138+ 的安全要求。打开 `chrome://extensions` → 找到
+Kira Browser Bridge → 详情 → 打开「允许用户脚本」。扩展无法代劳。
+
+**只有执行 JS 需要这个开关**，其它能力（点击/输入/上传/下载/读页面）都不受影响。
+
+### 页面看起来没问题，但工具一直报「页面已关闭」？
+
+这是旧版的老问题：用户关掉标签页后插件不会自愈，会永久失败。现在已经有
+页面自愈（`_page_alive` / `_ensure_page`）——原页面失效时会自动换一张，
+连错两次直接重建浏览器。
+
+### CPU 占用高？
+
+三个已知原因，都在 2.x 里修了：
+
+1. **旧版主动关掉了 Chromium 的后台节流**（`--disable-background-timer-throttling`
+   等三个参数）。Chromium M87 起后台标签的 JS 定时器被节流到每分钟一次，
+   官方称**CPU 最多降低 5 倍**——而 bot 的浏览器窗口常年被挡在后面，正好全命中。
+   现在这三个参数**已从代码里删除**，并有双重过滤防止被重新塞回。
+2. **缺少防崩溃参数**：`/dev/shm` 写满会让渲染进程崩溃、反复重载，
+   于是 CPU 飙升。现在补齐了 `--disable-dev-shm-usage`、`--disable-gpu`、
+   `--js-flags=--max-old-space-size=512`、`--renderer-process-limit=N`。
+3. **默认等待 `networkidle`**：Playwright 官方标注 **DISCOURAGED**，
+   现代页面可能永远不空闲，导致每次都硬等到超时、期间页面还在跑。
+   现在默认是 `domcontentloaded`。
+
+另外 `idle_close_seconds`（默认 300）会在空闲后自动关掉无头浏览器，
+把 CPU 和内存一起释放。
+
+### 磁盘占用一直在涨？
+
+旧版有三个泄漏点，都已修：
+
+- 元素截图存的是 `element_*.png`，而清理只扫 `screenshot_*.png`
+  → 元素截图**一张都不会被清理**。现在两类一起清理。
+- 下载目录完全没有清理机制 → 新增自动清理（保留最近 `download_max_count` 个）。
+- 页面开出的弹窗（`target=_blank`）无人回收，会在后台堆积
+  → 现在注册了 `context.on("page")`，非插件页面立即关闭。
+
+### 下载大文件会撑爆内存吗？
+
+不会。下载是**流式落盘**（64KB 一块），无论文件多大内存曲线都是平的。
+`download_max_bytes`（默认 2GB）只用来拦住异常的超大文件。
+
+### 页面内容太长，AI 只能看到一部分？
+
+不是。单次返回长度（`content_page_size`，默认 8000 字符）只是「一次给多少」，
+不是「最多能看到多少」。返回值会告诉 AI 还有多少没读、从哪个 offset 接着读，
+它可以自己续读到底，也可以用 `browser_page(mode="extract")` 只取要的那部分。
+
+### 工具调用总是卡在 60 秒然后失败？
+
+那是框架的 `tool_call_timeout`（默认 60s）。它是**直接取消**我们的协程，
+会让 Playwright 留下状态不明的页面。所以本插件的 `op_timeout`（默认 120s）
+**默认与它脱钩**——由插件自己决定何时收手。如果你想让它不超过框架上限，
+打开 `op_timeout_follows_framework`。
+
+---
 
 ## 故障排除
 
-### ImportError: playwright
+### `ImportError: playwright`
+
 ```bash
-pip install playwright
-playwright install chromium
+pip install playwright aiohttp
 ```
 
-### 页面加载超时
-- 检查网络连接
-- 增加 `timeout` 配置值
-- 使用 `wait_until="domcontentloaded"` 替代 `networkidle`
+插件带 `requirements.txt`，重新安装插件会自动执行。
 
-### 元素找不到
-- 先截图查看页面结构
-- 检查 CSS 选择器是否正确
-- 等待页面完全加载后再操作
+### 浏览器启动失败 / 找不到浏览器
+
+用 `browser_debug` 看当前状态。会自动依次尝试
+系统默认浏览器 → Chrome → Edge → Chromium → 内置下载。
+网络不通时内置下载会超时，可以手动执行：
+
+```bash
+python -m playwright install chromium
+```
+
+### 可视模式下看不到窗口
+
+1. 先用 `browser_test_visible` 打开测试页
+2. 用 `browser_debug` 看 `headless` 是不是 `false`
+3. 检查窗口是否被其它窗口挡住（Windows 上会 `--start-maximized`）
+
+### 扩展连不上
+
+1. 确认扩展图标不是灰色（点一下看状态）
+2. 确认令牌是最新的（插件面板 → 复制接入令牌）
+3. 确认 KiraAI 的 WebUI 端口和扩展里填的一致
+4. 用 `browser_debug` 看 `bridge.connected`
+
+---
 
 ## 更新日志
 
-<details>
-<summary>点击展开</summary>
+### v2.1.0（2026-09-15）
 
-### v1.2.0（2026-08-23）
-- 新增：浏览器来源四级回退——默认接管本机真实浏览器及其用户数据目录（继承登录态），依次回退 插件持久化 profile → 系统浏览器普通模式 → 自动下载内置 Chromium（此前下载只能手动执行）
-- 新增：`browser_channel`（auto/chrome/msedge/chromium/bundled）、`use_real_browser_profile`（默认开）、`custom_user_data_dir`、`use_persistent_profile`（默认开）配置项
-- 新增：`requirements.txt`，pip 依赖由 KiraAI 自动安装，无需手动 pip install
-- 修复：浏览器启动加并发锁，避免多工具同时触发重复启动
-- 修复：关闭浏览器时单步异常不再中断后续清理
-- 安全：`browser_send_file` 纳入上传路径白名单限制，防止任意本地文件被外传
-- 安全：`browser_download` 文件名净化，防止路径穿越写出下载目录
-- 优化：`browser_download` 自动携带浏览器会话的 Cookie 与 User-Agent，可下载登录态资源
-- 优化：浏览器启动失败时工具返回友好中文提示（含回退链说明），不再把异常堆栈抛给 AI
-- 优化：`browser_debug` 显示当前浏览器来源；cookie 过期时间解析更健壮；配置项类型统一为 switch
-- 新增：插件图标（适配 KiraAI WebUI 插件列表显示）
-- 修复（按 CodeRabbit 审查意见）：Chromium 自动下载增加 600 秒超时保护；下载的内置 Chromium 复用插件持久化 profile（登录态不丢）；下载文件时 Cookie 按目标域名隔离存放（防跨域重定向泄露）；aiohttp 最低版本提升至 3.14.3（修复旧版本多个安全漏洞）；browser_download 启动前先确保浏览器就绪（登录态资源才能携带会话 cookie 下载）
+**扩展桥能力补齐 + 工具合并。**
 
-### v1.1.0
-- 历史版本：无头/可视模式、截图+VLM 描述、cookie 自动加载、下载/上传、键鼠模拟等
+- ✨ **扩展桥补齐三项关键能力**：执行任意 JS（走 `chrome.userScripts`，
+  绕开 MV3 下页面 CSP 对 eval 的拦截）、上传文件（插件分块送内容 +
+  扩展用 `DataTransfer` 塞进 `input.files`）、下载（扩展用用户会话 fetch +
+  分块回传，**能下登录态资源**）
+- ✨ **Cookie 导出/导入**：把浏览器的登录态带到无头后端，降级时不用重新登录
+- ✨ 扩展侧补齐 `getInfo`/`goBack`/`refresh`/`hover`/键盘 3 个/鼠标 6 个/
+  `listFiles`/`debugInfo`，**两个后端接口完全对称**
+- 🔀 **工具合并 31 → 12 个**，按「动作 + 传参」组织（`browser_interact` 用
+  `action` 选 18 种动作，`browser_page` 用 `mode` 选读什么）。**能力零丢失**，
+  逐条映射核对过
+- ✨ **内容分页续读**：`browser_page` 支持 `offset`/`max_chars`，
+  返回值带 `has_more`/`next_offset`，AI 自己决定读多少
+- ⚙️ `op_timeout` **与框架工具超时脱钩**（默认），由插件自己管，避免被硬取消
+- ⚙️ `headless_profile_mode=inherit`：**复制**真实浏览器数据（不抢锁），
+  登录态完整保留
+- ⚙️ `read_only` 默认改为 `false`（bot 有完整读写能力）
+- ⚙️ `download_max_bytes` 默认 2GB（流式落盘，不占内存）
+- 🐛 修复：`upload_max_bytes` 配置项加了但没接线
 
-</details>
+### v2.0.0（2026-09-15）
 
-## 许可证
+**双后端架构 + CPU/内存修复。**
 
-AGPL-3.0 License
+- ✨ **双后端自动路由**：扩展桥（用户自己的浏览器，零冲突）↔ 无头后端
+  （插件自己的浏览器），没连上自动回退；策略可固定为其中一种
+- 🔴 **修复 CPU 问题（三条根因）**：
+  - 删除旧版**反向**加上的 `--disable-background-timer-throttling` /
+    `--disable-backgrounding-occluded-windows` / `--disable-renderer-backgrounding`
+    （Chromium 的后台节流能把后台标签 CPU 降到 1/5，而 bot 的浏览器窗口
+    常年被挡在后面，正好全命中）
+  - 补齐 `--disable-dev-shm-usage`（`/dev/shm` 写满会让渲染进程崩溃→反复重载→CPU 飙升）、
+    `--disable-gpu`、`--js-flags=--max-old-space-size=512`、`--renderer-process-limit=N`
+  - 默认等待 `networkidle` → `domcontentloaded`（前者官方标注 DISCOURAGED）
+- 🔴 **修复"卡死"真凶**：旧版 `_ensure_browser()` 从不检查页面死活，
+  用户一关标签页插件就**永久失败且不自愈**。现在有页面自愈 + 致命错误重建
+- 🔴 **修复"互相抢锁"**：不再直接占用真实 profile（见
+  「为什么装了扩展之后，我的浏览器还能正常开」）
+- 🐛 **修复内存持续增长**：弹窗页面无人回收、`element_*.png` 从不被清理、
+  下载目录无清理 → 全部补上
+- 🐛 **修复下载漏洞**：旧版把整个文件读进内存且无大小上限、不限协议
+  → 改为流式落盘 + 大小上限 + 只允许 http/https
+- ✨ **空闲回收**：`idle_close_seconds`（默认 300），空闲后自动关闭释放 CPU 内存
+- ✨ 有头模式补回窗口可见性参数（`--start-maximized` / `--window-position` /
+  `--force-device-scale-factor`）
+- ✨ 首次运行会主动提示扩展的安装方法
+
+### v1.2.1
+
+- 浏览器来源四级回退（接管真实浏览器 / 插件持久 profile / 系统浏览器 / 内置 Chromium）
+- 下载超时保护、cookie 按域隔离、CodeRabbit 审查修复
+
+---
+
+## 致谢
+
+- 原始插件：nyx
+- 扩展桥（Kira Browser Bridge）：随插件提供，Chrome / Edge / Brave 等 Chromium 系可用
+
+## 许可
+
+见仓库 LICENSE。

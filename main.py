@@ -1,1942 +1,1014 @@
-"""
-无头浏览器插件 - Headless Browser Plugin
+"""浏览器插件（合并版）—— 一个插件，两种后端，自动挑选。
 
-让 AI 能够控制无头浏览器进行网页浏览、截图、下载等操作
-功能包括：
-- 浏览器控制：访问页面、点击、填写表单、滚动等
-- 截图功能：截取页面或元素，返回给 AI 查看
-- 文件管理：下载文件、保存截图到指定目录
-- 页面信息获取：标题、URL、HTML内容、页面文本等
+## 为什么合并
+
+原来的两个插件各自只能覆盖一半场景：
+
+  * `headless_browser`：能操作，但 Playwright 必须独占 user-data-dir，
+    **和用户开着的浏览器互斥**（用户开着 → 插件用不了；插件开着 → 用户打不开浏览器）。
+  * `kira_browser_bridge`：用扩展驱动用户自己的浏览器，**零冲突**，
+    但需要用户在浏览器里装扩展并保持连接。
+
+合并后按可用性自动挑：**扩展连上就用扩展（用户自己的浏览器，登录态天然可用），
+扩展没连上就自动起无头**。并且无头后端**永不碰用户真实 profile** ——
+所以"抢锁"这件事从设计上就不存在了。
+
+## CPU 侧的改动（详见 backends/headless_backend.py 文件头）
+
+1. 删掉 `--disable-background-timer-throttling` /
+   `--disable-backgrounding-occluded-windows` / `--disable-renderer-backgrounding`
+   这三个**反向**参数（原版在 Windows 可视模式下主动加了它们）。
+2. 补上 `--disable-dev-shm-usage` / `--disable-gpu` /
+   `--js-flags=--max-old-space-size=512` / `--renderer-process-limit=N`。
+3. 默认等待从 `networkidle`（官方标注 DISCOURAGED）改成 `domcontentloaded`。
+4. 空闲回收：默认 300 秒没用就关掉无头浏览器。
 """
+
+from __future__ import annotations
 
 import asyncio
-import base64
 import os
 import time
-from datetime import datetime
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional
 
-from core.plugin import BasePlugin, logger, register, on
-from core.chat.message_utils import MessageChain
-from core.chat.message_elements import Image, Text, File
+from core.plugin import BasePlugin, Priority, PageMenu, PluginPage, on, register
+from core.logging_manager import get_logger
+from core.provider import LLMRequest
+from core.chat.message_elements import File, Image, Text
+from core.chat.message_utils import MessageChain, KiraMessageBatchEvent
 
+from . import protocol as P
+from . import security
+from . import setup_guide
+from .backends import BackendRouter, ExtensionBackend, HeadlessBackend
+from .bridge import BrowserBridge, BridgeError, BridgeNotConnected, BridgeTimeout
+from .tokens import ensure_token, is_current_token, token_expiry
 
-# ============ VLM 提示词 ============
-VLM_TOOL_OPTIMIZED_PROMPT = """你是一名专业的网页分析助手。请分析这张网页截图，提取对后续自动化操作有用的信息。
+logger = get_logger("browser_merged", "cyan")
 
-## 请按以下格式输出：
+PLUGIN_ID = "browser"
 
-### 1. 页面基本信息
-- 页面标题：
-- 当前URL（如有显示）：
-- 页面类型（搜索页/表单页/内容页/错误页等）：
+#: 扩展侧二次确认弹窗的等待秒数（与 browser-bridge/protocol.js 对齐）
+CONFIRM_WAIT_SECONDS = 45
 
-### 2. 可交互元素清单（关键！）
-请列出所有可见的按钮、链接、输入框：
-- 搜索框：是否有？位置大概在哪？placeholder文字是什么？
-- 按钮：列出所有按钮的文字和大概位置（如"左上角搜索按钮"）
-- 链接：重要的导航链接
-- 表单字段：有哪些输入框、下拉菜单
-
-### 3. 当前状态
-- 页面是否已完全加载？
-- 是否有加载中/转圈动画？
-- 是否有错误提示、弹窗、警告？
-- 是否需要登录才能操作？
-
-### 4. 关键内容
-- 页面的主要内容/搜索结果是什么？
-- 是否有验证码、人机验证？
-- 是否有弹窗广告遮挡？
-
-### 5. 建议的下一步操作
-基于当前页面，建议：
-- 如果要搜索：点击哪里、输入什么
-- 如果要点击某个内容：建议点击哪个元素（用CSS选择器描述，如 #id、.class）
-- 如果要填写表单：每个字段填什么
-- 如果需要等待：建议等待什么元素出现
-
-### 6. 坐标参考（如需要鼠标操作）
-- 重要元素的大致坐标（基于1920x1080分辨率）
-- 如：搜索框在屏幕中央偏上 (960, 450)
-
-请尽量详细，让另一个AI能根据你的描述直接调用浏览器工具完成操作。"""
+#: 写工具名 —— 只读模式下从当次请求的工具表里摘掉
+WRITE_TOOL_NAMES = (
+    "browser_navigate", "browser_click", "browser_type", "browser_scroll",
+)
 
 
-# ============ 工具使用提示 ============
-BROWSER_TOOLS_PROMPT = """\
-## 无头浏览器工具使用说明
+class BrowserPlugin(BasePlugin):
+    """合并后的浏览器插件。"""
 
-你可以使用浏览器工具帮助用户完成网页操作任务。
-
-### 📸 截图发送模式（重要）
-
-根据 `auto_send_screenshot` 配置：
-
-**auto 模式（默认）：**
-- `browser_screenshot()` 截图后会【自动发送】图片给用户
-- 你只需告诉用户"截图已发送，可以看到..."
-- 【严禁】再次调用 `browser_send_file()`
-
-**manual 模式：**
-- `browser_screenshot()` 截图后【不会自动发送】
-- 你会收到截图的 VLM 分析描述
-- 根据内容决定是否发送：`browser_send_file(filepath="...", as_image=true)`
-
-**下载文件：**
-- `browser_download()` 下载后会【自动发送】文件给用户
-- 【严禁】再次调用 `browser_send_file()`
-
-### 🛠️ 工具分类
-
-**页面导航：**
-- `browser_navigate(url)` - 访问网页
-- `browser_click(selector)` - 点击元素（推荐）
-- `browser_fill(selector, value)` - 填写表单
-- `browser_upload_file(selector, file_path)` - 上传文件到 file input（绕过系统对话框）
-- `browser_scroll(direction)` - 滚动页面
-- `browser_go_back()` / `browser_refresh()` - 返回/刷新
-
-**内容获取：**
-- `browser_screenshot()` - 截图
-- `browser_get_text(selector)` - 获取页面文本
-- `browser_get_info()` - 获取标题和URL
-- `browser_execute_js(script)` - 执行JS
-
-**等待：**
-- `browser_wait(seconds)` - 等待秒数
-- `browser_wait(selector="...")` - 等待元素出现
-
-**键盘模拟：**
-- `browser_keyboard_type(text)` - 输入文本
-- `browser_keyboard_press(key)` - 按键（支持组合键如 "Control+a"）
-- `browser_keyboard_down_up(action, key)` - 按住/释放键
-
-**鼠标模拟：**
-- `browser_mouse_move(x, y)` - 移动鼠标
-- `browser_mouse_click(x, y)` - 点击（不传坐标则在当前位置点击）
-- `browser_mouse_down_up(action, button)` - 按住/释放鼠标键
-- `browser_mouse_wheel(delta_y)` - 滚轮滚动
-- `browser_mouse_drag(start_x, start_y, end_x, end_y)` - 拖拽
-
-### ⌨️ 键盘常用按键
-
-- 单键: `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`
-- 组合键: `Control+a`, `Control+c`, `Control+v`, `Control+Enter`
-- 修饰键: `Shift`, `Control`, `Alt`（用于 browser_keyboard_down_up）
-
-### 🖱️ 鼠标坐标系
-
-- 左上角为原点 (0, 0)
-- X 向右增加，Y 向下增加
-- 视口大小默认为 1920x1080
-
-**参数区分：**
-- 键盘工具用 `key`: `browser_keyboard_down_up(action="down", key="Control")`
-- 鼠标工具用 `button`: `browser_mouse_down_up(action="down", button="left")`
-
-### 📋 标准操作流程
-
-**推荐步骤：**
-1. `browser_navigate(url="...")` - 访问页面
-2. `browser_screenshot()` - 截图确认页面状态
-3. 根据 VLM 分析，使用 `browser_click(selector)` 或 `browser_fill(selector, value)` 操作
-4. `browser_wait(seconds=2)` - 等待加载
-5. `browser_screenshot()` - 查看结果
-
-**示例：搜索操作**
-```
-browser_navigate(url="https://www.baidu.com")
-browser_screenshot()
-browser_click(selector="#kw")  # 或 browser_mouse_click(x=960, y=450)
-browser_keyboard_type(text="Python教程")
-browser_keyboard_press(key="Enter")
-browser_wait(selector="#content_left", seconds=3)
-browser_screenshot()
-```
-
-**示例：鼠标拖拽**
-```
-browser_mouse_move(x=100, y=200)
-browser_mouse_down_up(action="down", button="left")
-browser_mouse_move(x=400, y=200, steps=10)
-browser_mouse_down_up(action="up", button="left")
-browser_keyboard_press(key="Control+c")
-```
-
-### 🖼️ VLM 截图描述
-
-VLM 会分析截图并返回结构化信息：
-1. 页面基本信息（标题、URL、类型）
-2. 可交互元素清单（按钮、输入框位置）
-3. 当前状态（加载完成、错误弹窗）
-4. 关键内容（验证码、广告）
-5. 建议的下一步操作
-6. 坐标参考（用于鼠标操作）
-
-### 🔧 处理隐藏元素
-
-如果按钮存在但不可见（CSS display:none）：
-1. 使用 JS 点击: `browser_execute_js(script="document.querySelector('#id').click()")`
-2. 或直接按 Enter 提交表单
-3. 尝试点击其他可见按钮
-
-**表单提交备选方案：**
-- 点击提交按钮: `browser_click(selector="#submit")`
-- 按 Enter 键: `browser_keyboard_press(key="Enter")`
-- JS 提交: `browser_execute_js(script="document.querySelector('form').submit()")`
-"""
-
-
-class HeadlessBrowserPlugin(BasePlugin):
-    """
-    无头浏览器插件主类
-    基于 Playwright 实现浏览器自动化控制
-    """
-    
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
-        # 解析 headless 配置（处理字符串和布尔值）
-        headless_val = cfg.get("headless", True)
-        if isinstance(headless_val, str):
-            self.headless: bool = headless_val.lower() in ("true", "1", "yes", "on")
-        else:
-            self.headless: bool = bool(headless_val)
-        self.default_viewport = self._parse_viewport(cfg.get("default_viewport", "1920x1080"))
-        self.timeout: int = cfg.get("timeout", 60)
-        self.user_agent: Optional[str] = cfg.get("user_agent") or None
-        self.auto_send: str = cfg.get("auto_send_screenshot", "auto")
-        self.auto_describe: bool = bool(cfg.get("auto_describe_screenshot", True))
-        self.vlm_model: str = cfg.get("vlm_model", "")
-        self.vlm_describe_prompt: str = cfg.get("vlm_describe_prompt", "")
-        self.vlm_timeout: int = cfg.get("vlm_timeout", 10)
+        self.bridge = BrowserBridge()
+        self._apply_config(cfg)
 
-        # 浏览器来源策略
-        # auto=按顺序探测 chrome/msedge/chromium；bundled=跳过系统浏览器直接用内置 Chromium
-        self.browser_channel: str = cfg.get("browser_channel", "auto") or "auto"
-        # 默认开：直接使用用户真实浏览器的用户数据目录（继承登录态/书签等数据）
-        self.use_real_browser_profile: bool = bool(cfg.get("use_real_browser_profile", True))
-        # 高级选项：手动指定用户数据目录，留空则按系统+浏览器自动定位
-        self.custom_user_data_dir: str = (cfg.get("custom_user_data_dir") or "").strip()
-        # 次级方案：插件专用持久化 profile（登录态跨重启保留，不污染真实浏览器）
-        self.use_persistent_profile: bool = bool(cfg.get("use_persistent_profile", True))
-        
-        # 设置目录
-        data_dir = ctx.get_plugin_data_dir()
-        # 截图默认保存到 data/temp，支持自动清理
-        self.screenshot_dir = cfg.get("screenshot_dir") or str(Path("data/temp"))
-        self.download_dir = cfg.get("download_dir") or str(data_dir / "downloads")
-        self.screenshot_max_count: int = cfg.get("screenshot_max_count", 50)  # 最多保留50张截图
-        self.screenshot_auto_clean: bool = bool(cfg.get("screenshot_auto_clean", True))  # 自动清理开关
-        # Cookie目录：存放各网站的cookie JSON文件，启动时自动加载
-        self.cookies_dir = cfg.get("cookies_dir", "data/files/cookie")
-        # 上传限制：默认允许上传任意目录；关闭后仅允许 upload_allowed_dirs 中的目录
-        self.upload_allow_any_path: bool = bool(cfg.get("upload_allow_any_path", True))
-        _raw_dirs = cfg.get("upload_allowed_dirs", ["data/files", "data/temp"])
-        if isinstance(_raw_dirs, str):
-            _raw_dirs = _raw_dirs.splitlines()
-        self.upload_allowed_dirs = [str(d).strip() for d in _raw_dirs if str(d).strip()]
-        
-        # 浏览器实例
-        self._data_dir = data_dir
-        self._browser_lock = asyncio.Lock()
-        self._browser_desc = ""
-        self._playwright = None
-        self._browser = None
-        self._context = None
-        self._page = None
-        self._initialized = False
-        
-    def _parse_viewport(self, viewport_str: str) -> dict:
-        """解析视口大小字符串"""
+        self._last_state: dict = {}
+        self._confirm_log: list = []
+        self._token: Optional[str] = None
+        self._headless: Optional[HeadlessBackend] = None
+        self.router: Optional[BackendRouter] = None
+        # 首次运行引导：只在"扩展没连上"且还没提醒过时提醒一次
+        self._setup_notice: Optional[str] = None
+        self._setup_notified = False
+
+    # ══════════════════════════════════════════════════════════════════
+    #  配置
+    # ══════════════════════════════════════════════════════════════════
+
+    def _apply_config(self, cfg: dict) -> None:
+        """把配置摊平到实例属性。initialize 会重入，必须幂等。"""
+        self.enabled = _b(cfg.get("enabled", True))
+        # —— 后端策略 ——
+        self.backend_strategy = (cfg.get("backend_strategy", "auto") or "auto").lower()
+        self.extension_enabled = _b(cfg.get("extension_enabled", True))
+        self.headless_enabled = _b(cfg.get("headless_enabled", True))
+
+        # —— 安全策略（沿用桥接插件那套，读写分离）——
+        # 默认 false：让 bot 拥有完整的读写能力（点击/输入/跳转）。
+        # 想收紧的话在配置里打开；打开后写工具会从模型可见的工具表里整个摘掉。
+        self.read_only = _b(cfg.get("read_only", False))
+        self.allowed_domains = list(cfg.get("allowed_domains") or [])
+        self.blocked_domains = list(cfg.get("blocked_domains") or [])
+        self.require_confirm = _b(cfg.get("require_confirm", False))
+        self.inject_page_state = _b(cfg.get("inject_page_state", True))
+        self.panel_auth_required = _b(cfg.get("panel_auth_required", True))
+        self.max_content_chars = max(500, int(cfg.get("max_content_chars", 8000) or 8000))
+
         try:
-            width, height = map(int, viewport_str.lower().split("x"))
-            return {"width": width, "height": height}
-        except:
-            return {"width": 1920, "height": 1080}
-    
+            ct = float(cfg.get("command_timeout"))
+        except (TypeError, ValueError):
+            ct = 20.0
+        if self.require_confirm:
+            ct = max(ct, CONFIRM_WAIT_SECONDS + 5)
+        self.bridge.command_timeout = max(3.0, min(ct, 300.0))
+
+        # —— 无头后端参数 ——
+        # 页面操作超时是否与框架的 tool_call_timeout 挂钩：
+        #   默认 False = **完全脱钩**。框架那个超时（默认 60s）是"到点直接
+        #   cancel 我们的协程"，中途取消会让 Playwright 留下状态不明的页面。
+        #   脱钩后由插件自己决定何时收手，行为可预测。
+        #   如果你希望插件永远不超过框架上限，把它设为 true 再配合
+        #   op_timeout_ratio 使用。
+        # 扩展桥的大小限制（走 WebSocket 传输，需要单独钳制）
+        self.upload_max_bytes = int(cfg.get("upload_max_bytes", 200 * 1024 * 1024) or 0)
+        self.download_timeout = float(cfg.get("download_timeout", 600) or 600)
+
+        self.op_timeout_follows_framework = _b(cfg.get("op_timeout_follows_framework", False))
+        self.op_timeout_ratio = float(cfg.get("op_timeout_ratio", 0.8) or 0.8)
+
+        self._headless_cfg = {
+            "headless": cfg.get("headless", True),
+            "browser_channel": cfg.get("browser_channel", "auto"),
+            "timeout": cfg.get("timeout", 45),
+            "default_viewport": cfg.get("default_viewport", "1920x1080"),
+            "user_agent": cfg.get("user_agent"),
+            "headless_profile_mode": cfg.get("headless_profile_mode", "persistent"),
+            "custom_user_data_dir": cfg.get("custom_user_data_dir"),
+            "screenshot_dir": cfg.get("screenshot_dir") or str(Path("data/temp")),
+            "download_dir": cfg.get("download_dir"),
+            "screenshot_max_count": cfg.get("screenshot_max_count", 50),
+            "screenshot_auto_clean": cfg.get("screenshot_auto_clean", True),
+            "download_auto_clean": cfg.get("download_auto_clean", True),
+            "download_max_count": cfg.get("download_max_count", 100),
+            "download_max_bytes": cfg.get("download_max_bytes", 2 * 1024 ** 3),
+            "content_page_size": cfg.get("content_page_size", 8000),
+            "idle_close_seconds": cfg.get("idle_close_seconds", 300),
+            "op_timeout": cfg.get("op_timeout", 40),
+            "action_timeout": cfg.get("action_timeout", 20),
+            "default_wait_until": cfg.get("default_wait_until", "domcontentloaded"),
+        }
+
+    # ══════════════════════════════════════════════════════════════════
+    #  生命周期
+    # ══════════════════════════════════════════════════════════════════
+
     async def initialize(self):
-        """插件初始化"""
-        # 创建目录
-        os.makedirs(self.screenshot_dir, exist_ok=True)
-        os.makedirs(self.download_dir, exist_ok=True)
-        
-        # 如果浏览器已在运行，先关闭（支持配置热重载）
-        if self._browser is not None:
-            logger.info("[HeadlessBrowser] 检测到浏览器已在运行，关闭以应用新配置")
-            await self._close_browser()
-        
-        logger.info(f"[HeadlessBrowser] 无头浏览器插件已加载")
-        logger.info(f"[HeadlessBrowser] 无头模式: {self.headless}")
-        logger.info(f"[HeadlessBrowser] 视口大小: {self.default_viewport}")
-        logger.info(f"[HeadlessBrowser] 截图目录: {self.screenshot_dir}")
-        logger.info(f"[HeadlessBrowser] 截图自动清理: {'开启' if self.screenshot_auto_clean else '关闭'} (最大保留 {self.screenshot_max_count} 张)")
-        logger.info(f"[HeadlessBrowser] 下载目录: {self.download_dir}")
-        
-        if not self.headless:
-            logger.info("[HeadlessBrowser] 当前为可视模式，浏览器窗口将会显示")
-            import platform
-            if platform.system() == "Windows":
-                logger.info("[HeadlessBrowser] Windows 系统：请确保未最小化浏览器窗口")
-    
+        self._apply_config(self.plugin_cfg)
+
+        if not self.enabled:
+            logger.info("浏览器插件已禁用，跳过初始化")
+            await self.bridge.close()
+            return
+
+        # 事件回调（先清再注册，热重载不会重复累积）
+        self.bridge.clear_event_listeners()
+        self.bridge.on_event(P.EVT_PAGE_LOADED, self._on_page_event)
+        self.bridge.on_event(P.EVT_TAB_ACTIVATED, self._on_page_event)
+        self.bridge.on_event(P.EVT_USER_CONFIRMED, self._on_user_confirmed)
+
+        if self.extension_enabled:
+            try:
+                self._token = ensure_token()
+                logger.info("扩展接入令牌已就绪（重新生成会另打日志）")
+            except Exception as e:
+                logger.error(f"生成扩展令牌失败: {e}")
+
+        data_dir = Path(self.ctx.get_plugin_data_dir())
+        self._headless = HeadlessBackend(data_dir, self._headless_cfg)
+
+        # op_timeout 脱钩：读一次框架的 tool_call_timeout，仅用于"要不要挂钩"
+        if self.op_timeout_follows_framework:
+            try:
+                fw = float(self.ctx.config.get_config(
+                    "bot_config.agent.tool_call_timeout", 60.0) or 60.0)
+                if fw > 0:
+                    tuned = max(5.0, fw * self.op_timeout_ratio)
+                    self._headless_cfg["op_timeout"] = round(tuned, 1)
+                    self._headless_cfg["action_timeout"] = round(min(tuned, fw * 0.5), 1)
+                    logger.info(
+                        f"op_timeout 已跟随框架（{fw}s × {self.op_timeout_ratio}）"
+                        f"= {tuned}s")
+            except Exception as e:
+                logger.debug(f"读取框架 tool_call_timeout 失败，保持插件默认: {e}")
+        else:
+            logger.info(
+                "op_timeout 与框架工具超时**脱钩**"
+                f"（插件自己管：{self._headless_cfg.get('op_timeout')}s）")
+
+        self.router = BackendRouter(self.backend_strategy)
+        if self.extension_enabled:
+            self.router.register(ExtensionBackend(
+                self.bridge, P,
+                max_upload_bytes=self.upload_max_bytes or None,
+                max_download_bytes=int(self._headless_cfg.get("download_max_bytes") or 0) or None,
+                download_timeout=self.download_timeout,
+            ))
+        if self.headless_enabled:
+            self.router.register(self._headless)
+
+        logger.info(f"浏览器插件已就绪：{self.router.describe()}")
+        logger.info(
+            f"安全策略：只读={self.read_only}，白名单 {len(self.allowed_domains)} 条，"
+            f"黑名单 {len(self.blocked_domains)} 条"
+        )
+        if self._headless_cfg.get("idle_close_seconds"):
+            logger.info(f"无头浏览器空闲 {self._headless_cfg['idle_close_seconds']}s 后自动关闭")
+
+        # —— 首次运行引导 ——
+        # 扩展还没连上时，把「扩展在哪、怎么装、装完怎么连」准备好，
+        # 等模型第一次用到浏览器工具时顺手带给用户。
+        plugin_dir = Path(__file__).resolve().parent
+        self._setup_notice = setup_guide.first_run_notice(
+            plugin_dir, connected=self.bridge.connected)
+        if self._setup_notice:
+            logger.info(
+                "扩展尚未连接。已准备好安装引导；扩展包位置：%s",
+                setup_guide.extension_dir(plugin_dir),
+            )
+        for line in setup_guide.compatibility_report().splitlines():
+            logger.info(line)
+
     async def terminate(self):
-        """插件卸载清理"""
-        await self._close_browser()
-        logger.info("[HeadlessBrowser] 无头浏览器插件已卸载")
-    
-    def _detect_default_browser_channel(self) -> str:
-        """尽力探测系统默认浏览器，返回 playwright channel 名；失败返回 'chrome' 作为首选尝试"""
+        if self.router:
+            for b in self.router.candidates():
+                try:
+                    await b.close()
+                except Exception as e:
+                    logger.debug(f"关闭后端失败: {e}")
+        await self.bridge.close()
+        logger.info("浏览器插件已停止")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  后端路由 —— 所有工具都走这里
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _call(self, method: str, *, for_write: bool = False, **kw):
+        """在候选后端上依次尝试某个能力。
+
+        优先用扩展桥（用户自己的浏览器）；它没连上或调用失败时，
+        如果策略允许就自动切到无头，并把降级原因带回给模型 ——
+        不做"静默降级"，否则用户会莫名其妙发现自己在看另一个浏览器。
+        """
+        if self.router is None:
+            return f"❌ 插件尚未初始化完成，请稍后重试。"
+
+        candidates = self.router.candidates()
+        if not candidates:
+            return f"❌ {self.router.hint()}"
+
+        tried, last_err = [], None
+        for backend in candidates:
+            if not backend.available and not await self._probe(backend):
+                tried.append(f"{backend.display}（不可用）")
+                continue
+            if for_write:
+                # 写操作前校验目标页面（扩展后端能拿到 URL，无头后端用当前页）
+                err = await self._check_write(backend, kw.get("url"))
+                if err:
+                    return err
+            fn = getattr(backend, method, None)
+            if fn is None:
+                tried.append(f"{backend.display}（不支持 {method}）")
+                continue
+            res = await fn(**kw)
+            if res.ok:
+                out = self._render(method, res, backend)
+                # 首次成功调用：如果扩展没连上，顺手把安装引导捎给用户
+                # （只带一次，不刷屏）
+                return self._attach_setup_notice(out)
+            last_err = res.error
+            tried.append(f"{backend.display}: {res.error}")
+            logger.warning(f"[{method}] {backend.display} 失败：{res.error}")
+
+        detail = "；".join(tried)
+        msg = (f"❌ 操作失败。已尝试：{detail}\n"
+               f"（若希望只用其中一种，可在插件配置里调整「后端策略」）")
+        return self._attach_setup_notice(msg)
+
+    async def _probe(self, backend) -> bool:
+        """懒启动：无头后端第一次被用到时才拉起，不拖慢插件加载。"""
+        if backend.name != "headless":
+            return backend.available
+        if self.backend_strategy == "extension":
+            return False
+        err = await backend.start()
+        if err:
+            logger.warning(f"无头后端启动失败: {err}")
+            return False
+        logger.info("扩展桥不可用，已自动切换到无头浏览器")
+        return True
+
+    async def _check_write(self, backend, url=None) -> Optional[str]:
+        if self.read_only:
+            return ("当前处于「只读模式」，无法执行点击/输入/跳转等写操作。"
+                    "如确实需要，请在插件配置里关闭只读模式。")
+        if url:
+            ok, reason = security.check_url(url, allowed=self.allowed_domains,
+                                            blocked=self.blocked_domains, for_write=True)
+            return None if ok else reason
+        # 没给 URL：拿当前页面地址来判
+        cur = await self._current_url(backend)
+        if not cur:
+            return ("无法确认当前页面地址，出于安全考虑已拒绝本次写操作。"
+                    "请确认扩展已连接，或先让无头后端打开一个页面。")
+        ok, reason = security.check_url(cur, allowed=self.allowed_domains,
+                                        blocked=self.blocked_domains, for_write=True)
+        return None if ok else reason
+
+    async def _current_url(self, backend) -> Optional[str]:
         try:
-            import platform
-            system = platform.system()
-            if system == "Windows":
-                import winreg
-                try:
-                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                        r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice") as k:
-                        progid = winreg.QueryValueEx(k, "ProgId")[0].lower()
-                    if "chrome" in progid:
-                        return "chrome"
-                    if "edge" in progid or "msedge" in progid:
-                        return "msedge"
-                except Exception:
-                    pass
-            elif system == "Darwin":
-                import subprocess
-                try:
-                    out = subprocess.run(
-                        ["defaults", "read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"],
-                        capture_output=True, text=True, timeout=5).stdout.lower()
-                    # 粗略判断默认浏览器
-                    if "chrome" in out:
-                        return "chrome"
-                    if "edge" in out:
-                        return "msedge"
-                except Exception:
-                    pass
+            r = await backend.list_tabs()
+            if not r.ok:
+                return None
+            tabs = (r.data or {}).get("tabs") or []
+            active = next((t for t in tabs if t.get("active")), None)
+            return (active or {}).get("url")
+        except Exception:
+            return None
+
+    def _attach_setup_notice(self, text: str) -> str:
+        """首次成功调用时，把「装扩展」的引导捎带一次。
+
+        这里是**工具返回值**，不是发给用户的聊天消息：它进的是模型的上下文，
+        和 browser_navigate 返回"✅ 已打开页面"走同一条路。插件不会主动往
+        聊天窗口发消息 —— 用户能否看到，取决于模型有没有转述。
+
+        为了让转述率尽量高，下面把引导包在明确的「请转述给用户」指令里。
+        """
+        if self._setup_notified or not self._setup_notice:
+            return text
+        if self.bridge.connected:
+            return text
+        self._setup_notified = True
+
+        return (f"{text}\n\n---\n"
+                f"【系统提示：以下内容请**原样转述给用户**，不要省略】\n"
+                f"{self._setup_notice}\n\n"
+                f"（这段提示只会出现一次。装了扩展之后，AI 就能直接操作你正在用的浏览器；"
+                f"不装也不影响使用，会继续用插件自带的无头浏览器。）")
+
+    def _render(self, method: str, res, backend) -> str:
+        """把后端返回渲染成给模型看的文本（含来源标注）。"""
+        d = res.data or {}
+        tag = f"（来源：{backend.display}）"
+
+        if method in ("navigate",):
+            return f"✅ 已打开 {d.get('url', '')}\n📄 标题: {d.get('title', '')} {tag}"
+        if method == "list_tabs":
+            tabs = d.get("tabs") or []
+            if not tabs:
+                return f"当前没有打开的标签页 {tag}"
+            lines = [f"共 {len(tabs)} 个标签页 {tag}"]
+            for t in tabs:
+                mark = " ← 当前" if t.get("active") else ""
+                lines.append(f"- [id={t.get('id')}] {t.get('title') or '(无标题)'}{mark}")
+                lines.append(f"  {t.get('url')}")
+            return "\n".join(lines)
+        if method == "get_page":
+            content = d.get("content") or ""
+            total = d.get("total_chars")
+            head = f"# {d.get('title') or '(无标题)'}\n{d.get('url', '')}\n"
+            out = f"{head}\n{content}\n{tag}"
+            # 分页信息：让 bot 知道"还有多少没读、怎么接着读"，
+            # 而不是被一个硬上限卡住 —— 它需要更多内容时自己带 offset 再取即可。
+            if d.get("has_more"):
+                out += (f"\n\n📄 本次读到第 {d.get('offset')}–{(d.get('offset') or 0) + (d.get('returned') or 0)}"
+                        f" 字符，全文共 {total} 字符，还有 {total - ((d.get('offset') or 0) + (d.get('returned') or 0))} 字符未读。"
+                        f"\n   需要继续就读时，用 browser_get_page(offset={d.get('next_offset')}) 接下去；"
+                        f"也可以直接用 browser_extract 只取你要的那部分。")
+            return out
+        if method == "extract":
+            import json as _json
+            items = d.get("items") or []
+            if not items:
+                return f"没有匹配到任何元素 {tag}"
+            return f"{_json.dumps(items, ensure_ascii=False, indent=1)}\n{tag}"
+        if method == "screenshot":
+            return f"✅ 截图已保存: {d.get('path')} {tag}"
+        if method == "download":
+            return f"✅ 文件已下载: {d.get('path')}（{d.get('size')} 字节）{tag}"
+        if method == "wait_for":
+            if d.get("found"):
+                return f"✅ 已出现（耗时 {d.get('elapsed', '?')}s）{tag}"
+            return f"⏱️ 等待超时，元素未出现 {tag}"
+        if method == "execute_js":
+            return f"✅ JavaScript 执行结果:\n{d.get('result')} {tag}"
+        if method == "get_text":
+            return f"📄 页面文本内容:\n{d.get('content', '')}\n{tag}"
+        if method == "click":
+            return f"✅ 已点击 {tag}"
+        if method == "type_text":
+            return f"✅ 已输入内容 {tag}"
+        if method == "scroll":
+            return f"✅ 已滚动 {tag}"
+        return f"✅ 完成 {tag}"
+
+    # ══════════════════════════════════════════════════════════════════
+    #  WebSocket 端点（扩展接入）
+    # ══════════════════════════════════════════════════════════════════
+
+    @register.ws("/bridge", auth=True)
+    async def bridge_endpoint(self, ws):
+        if await self._reject_superseded_token(ws):
+            return
+        await self.bridge.handle_connection(ws)
+
+    async def _reject_superseded_token(self, ws) -> bool:
+        incoming = ws.query_params.get("token")
+        if is_current_token(incoming):
+            return False
+        logger.warning("拒绝了使用过期令牌的扩展连接（请到面板复制新令牌）")
+        try:
+            await ws.accept()
+            await ws.close(code=4003, reason="Token superseded, please re-pair")
         except Exception:
             pass
-        return "chrome"
+        return True
 
-    def _default_user_data_dir(self, channel: str) -> Optional[str]:
-        """按系统与浏览器类型返回真实用户数据目录；不存在则返回 None"""
-        import platform
-        system = platform.system()
-        home = Path.home()
-        candidates = {
-            "chrome": {
-                "Windows": Path(os.environ.get("LOCALAPPDATA", home / "AppData/Local")) / "Google/Chrome/User Data",
-                "Darwin": home / "Library/Application Support/Google/Chrome",
-                "Linux": home / ".config/google-chrome",
-            },
-            "msedge": {
-                "Windows": Path(os.environ.get("LOCALAPPDATA", home / "AppData/Local")) / "Microsoft/Edge/User Data",
-                "Darwin": home / "Library/Application Support/Microsoft Edge",
-                "Linux": home / ".config/microsoft-edge",
-            },
-            "chromium": {
-                "Windows": Path(os.environ.get("LOCALAPPDATA", home / "AppData/Local")) / "Chromium/User Data",
-                "Darwin": home / "Library/Application Support/Chromium",
-                "Linux": home / ".config/chromium",
-            },
-        }
-        path = candidates.get(channel, {}).get(system)
-        if path and path.is_dir():
-            return str(path)
-        return None
+    # ══════════════════════════════════════════════════════════════════
+    #  Hook
+    # ══════════════════════════════════════════════════════════════════
 
-    def _channel_try_order(self) -> list:
-        """根据 browser_channel 配置返回要尝试的 channel 顺序（None 表示内置 Chromium）"""
-        ch = (self.browser_channel or "auto").lower()
-        if ch == "auto":
-            # 优先尝试系统默认浏览器，再补其余
-            order = [self._detect_default_browser_channel(), "chrome", "msedge", "chromium"]
-            seen, result = set(), []
-            for c in order:
-                if c not in seen:
-                    seen.add(c)
-                    result.append(c)
-            return result
-        if ch == "bundled":
-            return [None]
-        return [ch]
-
-    def _build_launch_kwargs(self) -> dict:
-        """构建 launch 公共参数（含 Windows 可视模式参数）"""
-        launch_args = {
-            "headless": self.headless,
-            "downloads_path": self.download_dir,
-        }
-        if not self.headless:
-            import platform
-            if platform.system() == "Windows":
-                # Windows 可视模式需要的关键参数
-                launch_args["args"] = [
-                    "--start-maximized",
-                    "--window-position=100,100",
-                    "--window-size=1920,1080",
-                    "--force-device-scale-factor=1",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--disable-features=TranslateUI",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox"
-                ]
-                # 使用较慢的启动确保窗口可见
-                launch_args["slow_mo"] = 100
-                logger.info("[HeadlessBrowser] Windows 可视模式已启用")
-        return launch_args
-
-    def _build_context_options(self) -> dict:
-        """构建上下文参数（无头=固定视口，可视=跟随窗口）"""
-        context_options = {"accept_downloads": True}
-        if self.headless:
-            context_options["viewport"] = self.default_viewport
-        else:
-            context_options["viewport"] = None
-            context_options["no_viewport"] = True
-        if self.user_agent:
-            context_options["user_agent"] = self.user_agent
-        return context_options
-
-    async def _download_chromium(self):
-        """真正自动下载内置 Chromium（带验证），失败给出手动命令提示"""
-        import sys
-        logger.info("[HeadlessBrowser] 未找到可用浏览器，开始自动下载内置 Chromium...")
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "playwright", "install", "chromium",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeError(
-                "Chromium 自动下载超时（600 秒）\n"
-                f"请检查网络后重试，或手动运行: {sys.executable} -m playwright install chromium"
-            )
-        if proc.returncode != 0:
-            tail = (out or b"").decode(errors="ignore")[-500:]
-            raise RuntimeError(
-                f"Chromium 自动下载失败（退出码 {proc.returncode}）: {tail}\n"
-                f"请手动运行: {sys.executable} -m playwright install chromium"
-            )
-        logger.info("[HeadlessBrowser] Chromium 下载完成")
-
-    async def _ensure_browser(self):
-        """确保浏览器已启动。带并发锁与多级回退：真实浏览器profile → 插件持久profile → 系统channel → 自动下载内置Chromium"""
-        if self._browser is not None or self._context is not None:
+    @on.llm_request(priority=Priority.HIGH)
+    async def drop_write_tools_in_read_only(self, event, req: LLMRequest, *_):
+        if not self.enabled or not self.read_only:
             return
-        async with self._browser_lock:
-            if self._browser is not None or self._context is not None:
-                return
-            try:
-                from playwright.async_api import async_playwright
-            except ImportError:
-                raise RuntimeError(
-                    "未安装 Playwright 库，请先执行: pip install playwright"
-                    "（插件带 requirements.txt，重新安装插件可自动安装）"
-                )
+        ts = getattr(req, "tool_set", None)
+        if ts is not None:
+            ts.remove(*WRITE_TOOL_NAMES)
 
-            self._playwright = await async_playwright().start()
-            launch_kwargs = self._build_launch_kwargs()
-            context_options = self._build_context_options()
-            channels = self._channel_try_order()
-            errors = []
-
-            try:
-                started = False
-
-                # 第1级：用户真实浏览器 + 真实用户数据目录（继承登录态）
-                if self.use_real_browser_profile:
-                    for ch in channels:
-                        if ch is None:
-                            continue
-                        user_dir = self.custom_user_data_dir or self._default_user_data_dir(ch)
-                        if not user_dir:
-                            errors.append(f"{ch}: 未找到用户数据目录")
-                            continue
-                        try:
-                            logger.info(f"[HeadlessBrowser] 尝试真实浏览器模式: channel={ch}, user_data_dir={user_dir}")
-                            kw = dict(launch_kwargs)
-                            kw.pop("downloads_path", None)  # persistent context 单独传
-                            self._context = await self._playwright.chromium.launch_persistent_context(
-                                user_dir, channel=ch, downloads_path=self.download_dir,
-                                **{**kw, **context_options})
-                            self._browser = self._context.browser  # persistent 模式下可能为 None
-                            self._browser_desc = f"真实浏览器 ({ch}) + 用户数据目录"
-                            logger.info(f"[HeadlessBrowser] 已接管真实浏览器: {ch}（继承用户数据）")
-                            started = True
-                            break
-                        except Exception as e:
-                            msg = str(e).splitlines()[0] if str(e) else repr(e)
-                            errors.append(f"{ch}(真实profile): {msg}")
-                            logger.warning(f"[HeadlessBrowser] 真实浏览器模式失败 [{ch}]: {msg}")
-                            if "user data directory is already in use" in str(e) or "ProcessSingleton" in str(e):
-                                logger.warning("[HeadlessBrowser] 提示：请先完全退出正在运行的该浏览器再试，或在配置中关闭 use_real_browser_profile")
-                            self._context = None
-
-                # 第2级：系统浏览器 + 插件专用持久化 profile
-                if not started and self.use_persistent_profile:
-                    profile_dir = str(Path(self._data_dir) / "browser_profile")
-                    os.makedirs(profile_dir, exist_ok=True)
-                    for ch in channels:
-                        try:
-                            logger.info(f"[HeadlessBrowser] 尝试插件持久化模式: channel={ch or 'bundled'}")
-                            kw = dict(launch_kwargs)
-                            kw.pop("downloads_path", None)
-                            launch_ch = {"channel": ch} if ch else {}
-                            self._context = await self._playwright.chromium.launch_persistent_context(
-                                profile_dir, downloads_path=self.download_dir,
-                                **{**kw, **launch_ch, **context_options})
-                            self._browser = self._context.browser
-                            self._browser_desc = f"{ch or '内置Chromium'} + 插件持久化profile"
-                            logger.info(f"[HeadlessBrowser] 已启动: {self._browser_desc}")
-                            started = True
-                            break
-                        except Exception as e:
-                            msg = str(e).splitlines()[0] if str(e) else repr(e)
-                            errors.append(f"{ch or 'bundled'}(插件profile): {msg}")
-                            logger.warning(f"[HeadlessBrowser] 插件持久化模式失败 [{ch or 'bundled'}]: {msg}")
-                            self._context = None
-
-                # 第3级：系统浏览器 channel 普通模式（无持久化）
-                if not started:
-                    for ch in channels:
-                        if ch is None:
-                            continue
-                        try:
-                            logger.info(f"[HeadlessBrowser] 尝试系统浏览器普通模式: channel={ch}")
-                            self._browser = await self._playwright.chromium.launch(channel=ch, **launch_kwargs)
-                            self._context = await self._browser.new_context(**context_options)
-                            self._browser_desc = f"系统浏览器 ({ch})"
-                            logger.info(f"[HeadlessBrowser] 已启动: {self._browser_desc}")
-                            started = True
-                            break
-                        except Exception as e:
-                            msg = str(e).splitlines()[0] if str(e) else repr(e)
-                            errors.append(f"{ch}: {msg}")
-                            logger.warning(f"[HeadlessBrowser] 系统浏览器启动失败 [{ch}]: {msg}")
-
-                # 第4级：自动下载内置 Chromium（开启持久化时复用插件 profile，登录态不丢）
-                if not started:
-                    await self._download_chromium()
-                    try:
-                        if self.use_persistent_profile:
-                            profile_dir = str(Path(self._data_dir) / "browser_profile")
-                            os.makedirs(profile_dir, exist_ok=True)
-                            kw = dict(launch_kwargs)
-                            kw.pop("downloads_path", None)
-                            self._context = await self._playwright.chromium.launch_persistent_context(
-                                profile_dir, downloads_path=self.download_dir,
-                                **{**kw, **context_options})
-                            self._browser = self._context.browser
-                            self._browser_desc = "内置 Chromium（自动下载）+ 插件持久化profile"
-                        else:
-                            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-                            self._context = await self._browser.new_context(**context_options)
-                            self._browser_desc = "内置 Chromium（自动下载）"
-                        logger.info("[HeadlessBrowser] 内置 Chromium 启动验证通过")
-                        started = True
-                    except Exception as e:
-                        errors.append(f"bundled: {e}")
-                        raise RuntimeError(f"内置 Chromium 安装后仍无法启动: {e}")
-
-                if not started:
-                    raise RuntimeError("所有浏览器启动方式均失败")
-
-                # 创建/复用页面
-                if self._context.pages:
-                    self._page = self._context.pages[0]
-                else:
-                    self._page = await self._context.new_page()
-                self._page.set_default_timeout(self.timeout * 1000)
-
-                # 自动加载 cookie 目录下所有站点的 cookie 文件
-                await self._load_cookies()
-
-                logger.info(f"[HeadlessBrowser] 浏览器已启动: {self._browser_desc}")
-            except Exception:
-                # 启动失败时清理半成品状态
-                await self._close_browser()
-                err_lines = "\n".join(f"  - {e}" for e in errors[-6:])
-                logger.error(f"[HeadlessBrowser] 启动浏览器失败，各级尝试结果:\n{err_lines}")
-                raise
-
-    async def _require_browser(self) -> Optional[str]:
-        """启动浏览器并把失败转成给 LLM 的友好提示；成功返回 None"""
-        try:
-            await self._ensure_browser()
-            return None
-        except Exception as e:
-            msg = str(e).splitlines()[0] if str(e) else repr(e)
-            return (f"❌ 浏览器启动失败: {msg}\n"
-                    f"提示：插件会自动依次尝试 真实浏览器→插件持久profile→系统浏览器→自动下载Chromium；"
-                    f"如使用真实浏览器模式，请先完全退出正在运行的该浏览器。详细原因见插件日志。")
-
-    async def _load_cookies(self):
-        """自动加载 cookie 目录下所有站点的 cookie 文件"""
-        cookies_dir = self.cookies_dir
-        os.makedirs(cookies_dir, exist_ok=True)
-        try:
-            import glob, json
-            cookie_files = sorted(glob.glob(os.path.join(cookies_dir, "*.json")))
-            for cookie_file in cookie_files:
-                try:
-                    with open(cookie_file, "r", encoding="utf-8") as f:
-                        cookies = json.load(f)
-                    # 兼容嵌套格式：如果数据在 cookies 字段内则提取
-                    if isinstance(cookies, dict) and 'cookies' in cookies:
-                        cookies = cookies['cookies']
-                    if not isinstance(cookies, list):
-                        cookies = [cookies]
-                    # sameSite 映射
-                    ss_map = {'strict': 'Strict', 'lax': 'Lax', 'none': 'None', 'no_restriction': 'None', 'unspecified': 'Lax'}
-                    pw_cookies = []
-                    for c in cookies:
-                        if not isinstance(c, dict):
-                            continue
-                        if not all(k in c for k in ("name", "value", "domain")):
-                            logger.warning(
-                                "[HeadlessBrowser] cookie缺少必要字段，已跳过: 文件=%s，字段=%s",
-                                os.path.basename(cookie_file),
-                                sorted(c.keys()),
-                            )
-                            continue
-                        ss_raw = str(c.get('sameSite', 'Lax')).lower()
-                        ss = ss_map.get(ss_raw, 'Lax')
-                        cookie = {
-                            'name': c['name'],
-                            'value': c['value'],
-                            'domain': c['domain'],
-                            'path': c.get('path', '/'),
-                            'secure': c.get('secure', False),
-                            'httpOnly': c.get('httpOnly', False),
-                            'sameSite': ss,
-                        }
-                        try:
-                            if c.get('expirationDate'):
-                                cookie['expires'] = int(float(c['expirationDate']))
-                        except (ValueError, TypeError):
-                            pass
-                        pw_cookies.append(cookie)
-                    if pw_cookies:
-                        await self._context.add_cookies(pw_cookies)
-                        logger.info(f"[HeadlessBrowser] 已加载cookie: {os.path.basename(cookie_file)} ({len(pw_cookies)} 个)")
-                except Exception as e:
-                    logger.warning(f"[HeadlessBrowser] 跳过cookie文件 {os.path.basename(cookie_file)}: {e}")
-        except Exception as e:
-            logger.error(f"[HeadlessBrowser] 扫描cookie目录失败: {e}")
-
-    async def _close_browser(self):
-        """关闭浏览器（每步独立保护，保证尽量清理）"""
-        if self._page:
-            try:
-                await self._page.close()
-            except Exception as e:
-                logger.debug(f"[HeadlessBrowser] 关闭页面失败: {e}")
-            self._page = None
-        if self._context:
-            try:
-                await self._context.close()
-            except Exception as e:
-                logger.debug(f"[HeadlessBrowser] 关闭上下文失败: {e}")
-            self._context = None
-        if self._browser:
-            try:
-                await self._browser.close()
-            except Exception as e:
-                logger.debug(f"[HeadlessBrowser] 关闭浏览器失败: {e}")
-            self._browser = None
-        if self._playwright:
-            try:
-                await self._playwright.stop()
-            except Exception as e:
-                logger.debug(f"[HeadlessBrowser] 停止playwright失败: {e}")
-            self._playwright = None
-        logger.info("[HeadlessBrowser] 浏览器已关闭")
-    
-    def _is_path_allowed(self, resolved_path: str) -> bool:
-        """路径白名单校验（upload_allow_any_path=True 时直接放行）"""
-        if self.upload_allow_any_path:
-            return True
-        for d in self.upload_allowed_dirs:
-            root = os.path.realpath(d)
-            try:
-                if os.path.commonpath((root, resolved_path)) == root:
-                    return True
-            except ValueError:
-                continue
-        return False
-
-    def _generate_filename(self, prefix: str = "screenshot", ext: str = "png") -> str:
-        """生成带时间戳的文件名"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{prefix}_{timestamp}.{ext}"
-    
-    def _clean_old_screenshots(self):
-        """自动清理旧的截图文件，保留最新的指定数量"""
-        if not self.screenshot_auto_clean:
+    @on.llm_request(priority=Priority.MEDIUM)
+    async def inject_browser_state(self, event, req: LLMRequest, *_):
+        """注入当前可用后端和用户正在看的页面，让模型知道"我在操作谁"。"""
+        if not self.enabled or not self.inject_page_state or self.router is None:
             return
-        
-        try:
-            import glob
-            # 获取所有截图文件
-            pattern = os.path.join(self.screenshot_dir, "screenshot_*.png")
-            files = glob.glob(pattern)
-            
-            if len(files) <= self.screenshot_max_count:
-                return
-            
-            # 按修改时间排序
-            files.sort(key=lambda x: os.path.getmtime(x))
-            
-            # 删除最旧的文件
-            files_to_delete = files[:len(files) - self.screenshot_max_count]
-            deleted_count = 0
-            
-            for file_path in files_to_delete:
-                try:
-                    os.remove(file_path)
-                    deleted_count += 1
-                except Exception as e:
-                    logger.debug(f"[HeadlessBrowser] 删除旧截图失败: {file_path}, {e}")
-            
-            if deleted_count > 0:
-                logger.info(f"[HeadlessBrowser] 自动清理了 {deleted_count} 张旧截图，保留最新的 {self.screenshot_max_count} 张")
-        
-        except Exception as e:
-            logger.debug(f"[HeadlessBrowser] 清理旧截图时出错: {e}")
-    
-    async def _send_image_to_session(self, session_str: str, image: Image) -> bool:
-        """
-        通过适配器直接发送图片到指定会话
-        """
-        try:
-            parts = session_str.split(":")
-            if len(parts) != 3:
-                logger.error(f"[HeadlessBrowser] 无效的session格式: {session_str}")
-                return False
-            
-            adapter_name, chat_type, pid = parts
-            logger.debug(f"[HeadlessBrowser] 准备发送图片，适配器: {adapter_name}, 类型: {chat_type}, ID: {pid}")
-            
-            adapter = self.ctx.adapter_mgr.get_adapter(adapter_name)
-            if not adapter:
-                logger.error(f"[HeadlessBrowser] 未找到适配器: {adapter_name}")
-                return False
-            
-            from core.chat.message_utils import MessageChain
-            chain = MessageChain([image])
-            
-            if chat_type == "gm":
-                logger.debug(f"[HeadlessBrowser] 调用 send_group_message，群ID: {pid}")
-                result = await adapter.send_group_message(pid, chain)
-            else:
-                logger.debug(f"[HeadlessBrowser] 调用 send_direct_message，用户ID: {pid}")
-                result = await adapter.send_direct_message(pid, chain)
-            
-            logger.debug(f"[HeadlessBrowser] 发送结果: {result}, ok={getattr(result, 'ok', False)}")
-            
-            if result and getattr(result, 'ok', False):
-                logger.info(f"[HeadlessBrowser] 图片发送成功: {session_str}")
-                return True
-            else:
-                logger.error(f"[HeadlessBrowser] 图片发送失败: {result}")
-                return False
-        except Exception as e:
-            logger.error(f"[HeadlessBrowser] 发送图片异常: {e}")
-            import traceback
-            logger.debug(f"[HeadlessBrowser] 发送异常详情: {traceback.format_exc()}")
-            return False
-    
-    async def _send_file_to_session(self, session_str: str, file_obj: File) -> bool:
-        """
-        通过适配器直接发送文件到指定会话
-        """
-        try:
-            parts = session_str.split(":")
-            if len(parts) != 3:
-                logger.error(f"[HeadlessBrowser] 无效的session格式: {session_str}")
-                return False
-            
-            adapter_name, chat_type, pid = parts
-            logger.debug(f"[HeadlessBrowser] 准备发送文件，适配器: {adapter_name}, 类型: {chat_type}, ID: {pid}")
-            
-            adapter = self.ctx.adapter_mgr.get_adapter(adapter_name)
-            if not adapter:
-                logger.error(f"[HeadlessBrowser] 未找到适配器: {adapter_name}")
-                return False
-            
-            from core.chat.message_utils import MessageChain
-            chain = MessageChain([file_obj])
-            
-            if chat_type == "gm":
-                logger.debug(f"[HeadlessBrowser] 调用 send_group_message，群ID: {pid}")
-                result = await adapter.send_group_message(pid, chain)
-            else:
-                logger.debug(f"[HeadlessBrowser] 调用 send_direct_message，用户ID: {pid}")
-                result = await adapter.send_direct_message(pid, chain)
-            
-            logger.debug(f"[HeadlessBrowser] 发送结果: {result}, ok={getattr(result, 'ok', False)}")
-            
-            if result and getattr(result, 'ok', False):
-                logger.info(f"[HeadlessBrowser] 文件发送成功: {session_str}")
-                return True
-            else:
-                logger.error(f"[HeadlessBrowser] 文件发送失败: {result}")
-                return False
-        except Exception as e:
-            logger.error(f"[HeadlessBrowser] 发送文件异常: {e}")
-            import traceback
-            logger.debug(f"[HeadlessBrowser] 发送异常详情: {traceback.format_exc()}")
-            return False
-    
-    def _is_vision_model(self, model_client) -> bool:
-        """
-        宽松判断模型是否可用于视觉任务。
+        act = self.router.active
+        lines = ["[浏览器状态]"]
+        lines.append(f"可用后端：{self.router.describe()}")
+        if act and act.is_user_browser:
+            state = await self._collect_state()
+            if state.get("tab_url"):
+                lines.append(f"用户正在浏览：{state.get('tab_title') or '(无标题)'}")
+                lines.append(f"网址：{state['tab_url']}")
+                if state.get("tab_count"):
+                    lines.append(f"打开的标签页数量：{state['tab_count']}")
+        lines.append(f"能力：{self._capability_summary()}")
+        block = "\n".join(lines)
 
-        KiraAI 的 desc_img 本身不做视觉能力校验，模型是否支持视觉由实际调用决定，
-        这里只排除明确不具备视觉能力的模型类型，避免硬编码关键词误杀视觉模型。
-        """
-        if not model_client or not model_client.model:
-            return False
-        model_id = model_client.model.model_id.lower()
-        # 仅排除明确无视觉能力的类型/模型
-        non_vision_markers = ['embedding', 'rerank', 'tts', 'stt', 'davinci', 'babbage', 'whisper']
-        return not any(marker in model_id for marker in non_vision_markers)
-    
-    async def _get_vlm_client(self):
-        """获取用于图片描述的VLM客户端（必须是LLMModelClient）"""
-        from core.provider import LLMModelClient
-        
-        # 优先使用配置的VLM模型
-        if self.vlm_model:
-            try:
-                client = self.ctx.get_llm_client(model_uuid=self.vlm_model)
-                if client and isinstance(client, LLMModelClient):
-                    if self._is_vision_model(client):
-                        logger.info(f"[HeadlessBrowser] 使用配置的VLM模型: {self.vlm_model}")
-                        return client
-                    else:
-                        logger.warning(f"[HeadlessBrowser] 配置的模型 {self.vlm_model} 不支持视觉")
-                else:
-                    logger.warning(f"[HeadlessBrowser] 配置的模型 {self.vlm_model} 不是LLM类型")
-            except Exception as e:
-                logger.warning(f"[HeadlessBrowser] 获取配置的VLM模型失败: {e}")
-        
-        # 回退到系统默认VLM（default_vlm，即系统默认识图模型）
+        injected = False
+        for p in req.system_prompt:
+            if getattr(p, "name", None) == "memory":
+                p.content += f"\n{block}"
+                injected = True
+                break
+        if not injected and req.system_prompt:
+            req.system_prompt[-1].content += f"\n{block}"
+
+    def _capability_summary(self) -> str:
+        if self.read_only:
+            return "只读（可查看页面内容，不能点击或输入）"
+        if self.allowed_domains:
+            return f"可读可写（写操作仅限白名单 {len(self.allowed_domains)} 条规则内的域名）"
+        return "可读可写（无白名单限制，请注意风险）"
+
+    async def _collect_state(self) -> dict:
+        if self._last_state and time.time() - self._last_state.get("_ts", 0) < 120:
+            return self._last_state
+        act = self.router.active if self.router else None
+        if act is None:
+            return {}
         try:
-            vlm_client = self.ctx.provider_mgr.get_default_vlm()
-            if vlm_client and isinstance(vlm_client, LLMModelClient):
-                if self._is_vision_model(vlm_client):
-                    logger.info(f"[HeadlessBrowser] 使用系统默认VLM模型: {vlm_client.model.model_id}")
-                    return vlm_client
-                else:
-                    logger.warning(f"[HeadlessBrowser] 系统默认VLM模型 {vlm_client.model.model_id} 不支持视觉")
+            r = await act.list_tabs()
+            tabs = (r.data or {}).get("tabs") or []
+            a = next((t for t in tabs if t.get("active")), None)
+            if a:
+                self._last_state = {"tab_title": a.get("title"), "tab_url": a.get("url"),
+                                    "tab_count": len(tabs), "_ts": time.time()}
         except Exception as e:
-            logger.warning(f"[HeadlessBrowser] 获取系统默认VLM失败（可能未配置）: {e}")
-        
-        # 最后尝试当前默认LLM（如果是视觉模型）
-        try:
-            current_llm = self.ctx.get_default_llm_client()
-            if current_llm and self._is_vision_model(current_llm):
-                logger.info(f"[HeadlessBrowser] 使用默认LLM模型(支持视觉): {current_llm.model.model_id}")
-                return current_llm
-        except Exception as e:
-            logger.warning(f"[HeadlessBrowser] 获取默认LLM失败: {e}")
-        
-        return None
-    
-    async def _describe_screenshot(self, image: Image) -> str:
-        """
-        使用VLM描述截图内容（带超时保护）
-        """
-        from core.utils.common_utils import desc_img
-        from core.provider import LLMModelClient
-        
-        try:
-            # 获取VLM客户端
-            vlm_client = await self._get_vlm_client()
-            
-            if not vlm_client:
-                logger.debug("[HeadlessBrowser] 未找到可用的VLM模型，跳过描述")
-                return ""
-            
-            # 检查模型类型
-            if not isinstance(vlm_client, LLMModelClient):
-                logger.warning("[HeadlessBrowser] VLM模型不是LLM类型，跳过描述")
-                return ""
-            
-            # 检查模型是否支持视觉
-            if not self._is_vision_model(vlm_client):
-                model_id = vlm_client.model.model_id if vlm_client.model else "unknown"
-                logger.warning(f"[HeadlessBrowser] 模型 {model_id} 不支持视觉，跳过描述")
-                return ""
-            
-            model_id = vlm_client.model.model_id if vlm_client.model else "unknown"
-            logger.info(f"[HeadlessBrowser] 使用模型 {model_id} 描述截图")
-            
-            # 使用自定义提示词（如果有），否则使用默认工具优化提示词
-            prompt = self.vlm_describe_prompt if self.vlm_describe_prompt else VLM_TOOL_OPTIMIZED_PROMPT
-            
-            # 使用VLM描述图片（带超时）
-            description = await asyncio.wait_for(
-                desc_img(
-                    client=vlm_client,
-                    image=image,
-                    prompt=prompt
-                ),
-                timeout=self.vlm_timeout
-            )
-            return description
-        except asyncio.TimeoutError:
-            logger.warning(f"[HeadlessBrowser] VLM描述超时（{self.vlm_timeout}秒），跳过描述")
-            return ""
-        except Exception as e:
-            logger.warning(f"[HeadlessBrowser] VLM描述失败: {e}")
-            return ""
-    
-    # ============ LLM提示注入 ============
-    
-    @on.llm_request(priority=10)
-    async def inject_tools_prompt(self, *args, **kwargs):
-        """向AI注入浏览器工具使用说明"""
-        from core.prompt_manager import Prompt
-        # args: (event, req, ...)
-        if len(args) >= 2:
-            req = args[1]
-        else:
-            req = kwargs.get('req')
-        if req and hasattr(req, 'system_prompt'):
-            req.system_prompt.append(Prompt(
-                name="headless_browser_tools",
-                content=BROWSER_TOOLS_PROMPT
-            ))
-    
-    # ============ 浏览器控制工具 ============
-    
+            logger.debug(f"获取浏览状态失败: {e}")
+        return self._last_state
+
+    async def _on_page_event(self, data: dict) -> None:
+        self._last_state = {
+            "tab_title": data.get("title"),
+            "tab_url": data.get("url"),
+            "tab_count": data.get("tab_count") or self._last_state.get("tab_count"),
+            "_ts": time.time(),
+        }
+
+    async def _on_user_confirmed(self, data: dict) -> None:
+        self._confirm_log.append({**data, "ts": time.time()})
+        del self._confirm_log[:-50]
+
+    # ══════════════════════════════════════════════════════════════════
+    #  Tool —— 动作式接口
+    #
+    #  原版是 31 个平铺工具名。这里按「同类动作」合并成 12 个：
+    #  模型只要记住「要干什么」+「对谁干」，不用记十几个近义名字。
+    #  能力一个都没少（合并后用 verify_tools 逐条核对）。
+    # ══════════════════════════════════════════════════════════════════
+
+    # ── 1. 看：拿页面内容 ────────────────────────────────────────────
+
     @register.tool(
-        name="browser_navigate",
-        description="访问指定URL，打开网页。如果超时失败，可以尝试使用 wait_until='domcontentloaded' 或 'load'",
-        params={
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "要访问的网址URL"},
-                "wait_until": {"type": "string", "enum": ["load", "domcontentloaded", "networkidle"], "description": "等待页面加载完成的状态。networkidle等待网络空闲(较慢但完整)，domcontentloaded等待DOM加载(较快)，load等待load事件。默认为networkidle", "default": "networkidle"}
-            },
-            "required": ["url"]
-        }
+        name="browser_page",
+        description=(
+            "读取页面内容，用 mode 选读什么：\n"
+            "  mode=info    —— 只要标题和网址（最省 token）\n"
+            "  mode=text    —— 正文文本（默认）\n"
+            "  mode=outline —— 标题结构 + 可交互元素 + 主要链接（判断下一步点什么）\n"
+            "  mode=html    —— 原始 HTML（很长，慎用）\n"
+            "  mode=selector—— 只取某个 CSS 选择器内的文本\n"
+            "  mode=extract —— 用选择器抽多条结构化数据（配 attr/limit）\n"
+            "长页面用 offset 续读：返回值会告诉你还有多少没读、下次从哪开始。"
+        ),
+        params={"type": "object", "properties": {
+            "mode": {"type": "string",
+                     "enum": ["info", "text", "outline", "html", "selector", "extract"],
+                     "description": "读什么，默认 text"},
+            "selector": {"type": "string", "description": "mode=selector/extract 时的 CSS 选择器"},
+            "attr": {"type": "string", "description": "mode=extract：取这个属性（如 href），省略取文本"},
+            "limit": {"type": "integer", "description": "mode=extract：最多几条，默认 50"},
+            "offset": {"type": "integer", "description": "正文从第几个字符开始读，默认 0"},
+            "max_chars": {"type": "integer", "description": "本次最多返回多少字符"},
+            "tab_id": {"type": "integer", "description": "目标标签页 id，可选"}},
+            "required": []},
     )
-    async def navigate(self, event, url: str, wait_until: str = "networkidle") -> str:
-        """访问指定URL"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.goto(url, wait_until=wait_until)
-            title = await self._page.title()
-            return f"✅ 已成功访问页面\n📄 标题: {title}\n🔗 URL: {self._page.url}"
-        except Exception as e:
-            return f"❌ 访问页面失败: {str(e)}"
-    
+    async def tool_page(self, event, mode: str = "text", selector: str = "",
+                        attr: str = "", limit: int = 50, offset: int = 0,
+                        max_chars: int = 0, tab_id=None, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        m = (mode or "text").lower()
+        if m == "info":
+            return await self._call("get_info")
+        if m == "extract":
+            if not selector:
+                return "mode=extract 需要提供 selector"
+            return await self._call("extract", selector=selector,
+                                    attr=(attr or None), limit=limit, tab_id=tab_id)
+        if m == "selector":
+            if not selector:
+                return "mode=selector 需要提供 selector"
+            return await self._call("get_page", detail="text", selector=selector,
+                                    tab_id=tab_id)
+        detail = m if m in ("text", "outline", "html") else "text"
+        return await self._call("get_page", detail=detail, tab_id=tab_id,
+                                offset=offset, max_chars=(max_chars or None))
+
+    @register.tool(
+        name="browser_tabs",
+        description="列出浏览器里打开的所有标签页（标题、网址、哪个是当前页）。",
+        params={"type": "object", "properties": {}, "required": []},
+    )
+    async def tool_tabs(self, event, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        return await self._call("list_tabs")
+
     @register.tool(
         name="browser_screenshot",
-        description="截取当前页面或指定元素的截图。根据auto_send_screenshot配置，图片可以自动发送或让AI决定何时发送",
-        params={
-            "type": "object",
-            "properties": {
-                "selector": {"type": "string", "description": "CSS选择器，如果指定则截取该元素，否则截取整个页面", "default": ""},
-                "filename": {"type": "string", "description": "截图文件名（可选，默认自动生成）", "default": ""},
-                "full_page": {"type": "boolean", "description": "是否截取完整页面（仅整页截图时有效）", "default": False},
-                "send_now": {"type": "boolean", "description": "是否立即发送图片（仅当auto_send_screenshot为manual时有效）", "default": False}
-            }
-        }
+        description="截图并保存（默认直接把图片发给用户）。selector 可只截某个元素。",
+        params={"type": "object", "properties": {
+            "full_page": {"type": "boolean", "description": "是否整页截图，默认 false"},
+            "selector": {"type": "string", "description": "只截这个元素"},
+            "send": {"type": "boolean", "description": "是否把图片发给用户，默认 true"}},
+            "required": []},
     )
-    async def screenshot(self, event, selector: str = "", filename: str = "", full_page: bool = False, send_now: bool = False) -> str:
-        """截图并返回图片"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        
-        try:
-            # 生成文件名
-            if not filename:
-                filename = self._generate_filename("screenshot" if not selector else "element", "png")
-            
-            # 确保有扩展名
-            if not filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                filename = filename + ".png"
-            
-            filepath = os.path.join(self.screenshot_dir, filename)
-            
-            # 截图
-            if selector:
-                element = await self._page.query_selector(selector)
-                if not element:
-                    return f"❌ 未找到元素: {selector}"
-                await element.screenshot(path=filepath)
-            else:
-                await self._page.screenshot(path=filepath, full_page=full_page)
-            
-            # 清理旧截图
-            self._clean_old_screenshots()
-            
-            # 创建图片对象
-            image_obj = Image(image=filepath)
-            
-            # 判断是否自动发送
-            should_send = (self.auto_send == "auto") or (self.auto_send == "manual" and send_now)
-            
-            if should_send:
-                # 发送图片给用户
-                sent = await self._send_image_to_session(str(event.session), image_obj)
-                
-                # 如果使用VLM自动描述（仅在自动发送时进行描述）
-                description = ""
-                if self.auto_describe:
-                    try:
-                        description = await self._describe_screenshot(image_obj)
-                    except Exception as e:
-                        logger.warning(f"[HeadlessBrowser] VLM描述截图失败: {e}")
-                
-                if sent:
-                    if description:
-                        return f"✅ 截图已保存: {filepath}\n✅ 图片已发送\n\n🖼️ 图片描述:\n{description}"
-                    return f"✅ 截图已保存: {filepath}\n✅ 图片已发送"
-                else:
-                    if description:
-                        return f"✅ 截图已保存: {filepath}\n❌ 图片发送失败\n\n🖼️ 图片描述:\n{description}"
-                    return f"✅ 截图已保存: {filepath}\n❌ 图片发送失败"
-            else:
-                # 手动模式：不发送，只返回信息让AI决定
-                # 使用VLM分析截图（如果配置了VLM）
-                description = ""
-                try:
-                    vlm_client = await self._get_vlm_client()
-                    if vlm_client and self._is_vision_model(vlm_client):
-                        from core.utils.common_utils import desc_img
-                        # 使用自定义提示词（如果有），否则使用默认工具优化提示词
-                        prompt = self.vlm_describe_prompt if self.vlm_describe_prompt else VLM_TOOL_OPTIMIZED_PROMPT
-                        description = await asyncio.wait_for(
-                            desc_img(
-                                client=vlm_client,
-                                image=image_obj,
-                                prompt=prompt
-                            ),
-                            timeout=self.vlm_timeout
-                        )
-                except asyncio.TimeoutError:
-                    logger.debug(f"[HeadlessBrowser] VLM分析截图超时（{self.vlm_timeout}秒），跳过")
-                except Exception as e:
-                    logger.debug(f"[HeadlessBrowser] VLM分析截图失败: {e}")
-                
-                result = f"✅ 截图已保存: {filepath}\n"
-                result += "⏳ 图片未发送（当前为手动模式，你可以查看截图内容后决定是否发送给用户）\n"
-                result += f"\n📂 文件路径: {filepath}\n"
-                
-                if description:
-                    result += f"\n🖼️ 截图内容分析:\n{description}\n"
-                
-                result += "\n💡 如需发送此图片给用户，请使用: browser_send_file(filepath=\"{}\", as_image=true)".format(filepath)
-                return result
-        except Exception as e:
-            return f"❌ 截图失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_click",
-        description="点击页面上的元素",
-        params={
-            "type": "object",
-            "properties": {
-                "selector": {"type": "string", "description": "CSS选择器，指定要点击的元素"},
-                "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "鼠标按钮，默认为left", "default": "left"},
-                "count": {"type": "integer", "description": "点击次数，默认为1", "default": 1}
-            },
-            "required": ["selector"]
-        }
-    )
-    async def click(self, event, selector: str, button: str = "left", count: int = 1) -> str:
-        """点击页面元素"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.click(selector, button=button, click_count=count)
-            return f"✅ 已点击元素: {selector}"
-        except Exception as e:
-            return f"❌ 点击失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_fill",
-        description="在表单字段中填写文本",
-        params={
-            "type": "object",
-            "properties": {
-                "selector": {"type": "string", "description": "CSS选择器，指定要填写的输入框"},
-                "value": {"type": "string", "description": "要填写的文本内容"},
-                "clear_first": {"type": "boolean", "description": "是否先清空字段，默认为true", "default": True}
-            },
-            "required": ["selector", "value"]
-        }
-    )
-    async def fill(self, event, selector: str, value: str, clear_first: bool = True) -> str:
-        """填写表单字段"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            if clear_first:
-                await self._page.fill(selector, value)
-            else:
-                await self._page.type(selector, value)
-            return f"✅ 已在 {selector} 填写文本"
-        except Exception as e:
-            return f"❌ 填写失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_upload_file",
-        description="上传文件到指定文件输入框（input type=file），绕过系统文件对话框，直接通过Playwright CDP设置文件路径",
-        params={
-            "type": "object",
-            "properties": {
-                "selector": {"type": "string", "description": "CSS选择器，指定文件输入框（如 #upload-files、input[type=file]）"},
-                "file_path": {"type": "string", "description": "要上传的文件的绝对路径"}
-            },
-            "required": ["selector", "file_path"]
-        }
-    )
-    async def upload_file(self, event, selector: str, file_path: str) -> str:
-        """
-        上传文件到文件输入框，使用 Playwright setInputFiles 绕过系统文件对话框。
-        默认允许上传任意目录；可通过配置关闭并限定可上传目录，避免本地敏感文件被外传。
-        """
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            # 文件必须存在且为常规文件
-            resolved = os.path.realpath(file_path)
-            if not os.path.isfile(resolved):
-                return f"❌ 文件不存在或不是常规文件: {file_path}"
+    async def tool_screenshot(self, event: KiraMessageBatchEvent, full_page: bool = False,
+                              selector: str = "", send: bool = True, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        prefix = "element" if selector else "screenshot"
+        if self._headless is not None:
+            path = os.path.join(self._headless.screenshot_dir,
+                                self._headless.new_filename(prefix))
+        else:
+            path = os.path.join("data/temp", f"{prefix}_{int(time.time())}.png")
+        r = await self._call("screenshot", path=path, full_page=full_page,
+                             selector=selector or None)
+        if send and isinstance(r, str) and r.startswith("✅") and os.path.isfile(path):
+            await self._send_image(event, path)
+            return r + "\n📤 图片已发送给用户"
+        return r
 
-            # 路径限制：默认放开（upload_allow_any_path=True）；关闭后仅允许白名单目录
-            if not self._is_path_allowed(resolved):
-                return f"❌ 出于安全考虑，仅允许上传以下目录中的文件: {', '.join(self.upload_allowed_dirs)}"
+    # ── 2. 等 ────────────────────────────────────────────────────────
 
-            # 使用 Playwright 的 set_input_files 上传文件（绕过系统文件对话框）
-            await self._page.set_input_files(selector, resolved)
-            return f"✅ 已上传文件到 {selector}: {os.path.basename(resolved)}"
-        except Exception as e:
-            return f"❌ 上传失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_get_text",
-        description="获取页面的文本内容，可指定选择器获取特定元素文本",
-        params={
-            "type": "object",
-            "properties": {
-                "selector": {"type": "string", "description": "CSS选择器，如果指定则获取该元素文本，否则获取页面所有文本", "default": ""},
-                "max_length": {"type": "integer", "description": "返回文本的最大长度，默认为3000", "default": 3000}
-            }
-        }
-    )
-    async def get_text(self, event, selector: str = "", max_length: int = 3000) -> str:
-        """获取页面文本内容"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            if selector:
-                element = await self._page.query_selector(selector)
-                if not element:
-                    return f"❌ 未找到元素: {selector}"
-                text = await element.inner_text()
-            else:
-                text = await self._page.inner_text("body")
-            
-            # 截断过长文本
-            if len(text) > max_length:
-                text = text[:max_length] + f"\n\n... (已截断，共 {len(text)} 字符)"
-            
-            return f"📄 页面文本内容:\n{text}"
-        except Exception as e:
-            return f"❌ 获取文本失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_get_info",
-        description="获取当前页面的基本信息（标题、URL等）",
-        params={
-            "type": "object",
-            "properties": {}
-        }
-    )
-    async def get_info(self, event) -> str:
-        """获取页面基本信息"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            title = await self._page.title()
-            url = self._page.url
-            return f"📄 页面标题: {title}\n🔗 URL: {url}"
-        except Exception as e:
-            return f"❌ 获取信息失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_scroll",
-        description="滚动页面",
-        params={
-            "type": "object",
-            "properties": {
-                "direction": {"type": "string", "enum": ["down", "up", "bottom", "top"], "description": "滚动方向"},
-                "amount": {"type": "integer", "description": "滚动距离（像素），默认为800", "default": 800}
-            },
-            "required": ["direction"]
-        }
-    )
-    async def scroll(self, event, direction: str, amount: int = 800) -> str:
-        """滚动页面"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            if direction == "down":
-                await self._page.evaluate(f"window.scrollBy(0, {amount})")
-            elif direction == "up":
-                await self._page.evaluate(f"window.scrollBy(0, -{amount})")
-            elif direction == "bottom":
-                await self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            elif direction == "top":
-                await self._page.evaluate("window.scrollTo(0, 0)")
-            
-            return f"✅ 已向{direction}滚动"
-        except Exception as e:
-            return f"❌ 滚动失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_go_back",
-        description="返回上一页",
-        params={
-            "type": "object",
-            "properties": {}
-        }
-    )
-    async def go_back(self, event) -> str:
-        """返回上一页"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.go_back()
-            return f"✅ 已返回上一页\n📄 当前页面: {await self._page.title()}"
-        except Exception as e:
-            return f"❌ 返回失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_refresh",
-        description="刷新当前页面",
-        params={
-            "type": "object",
-            "properties": {}
-        }
-    )
-    async def refresh(self, event) -> str:
-        """刷新页面"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.reload()
-            return f"✅ 页面已刷新\n📄 当前页面: {await self._page.title()}"
-        except Exception as e:
-            return f"❌ 刷新失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_execute_js",
-        description="在页面中执行JavaScript代码并返回结果",
-        params={
-            "type": "object",
-            "properties": {
-                "script": {"type": "string", "description": "要执行的JavaScript代码"}
-            },
-            "required": ["script"]
-        }
-    )
-    async def execute_js(self, event, script: str) -> str:
-        """执行JavaScript代码"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            result = await self._page.evaluate(script)
-            return f"✅ JavaScript执行结果:\n{result}"
-        except Exception as e:
-            return f"❌ 执行失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_download",
-        description="下载指定URL的文件到本地，下载完成后会自动发送给用户",
-        params={
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "要下载的文件URL"},
-                "filename": {"type": "string", "description": "保存的文件名（可选，默认从URL提取）", "default": ""}
-            },
-            "required": ["url"]
-        }
-    )
-    async def download(self, event, url: str, filename: str = "") -> str:
-        """下载文件（先确保浏览器启动，登录态资源才能携带会话 cookie 下载）"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            import aiohttp
-            
-            # 确定文件名（净化，防止路径穿越）
-            if not filename:
-                filename = os.path.basename(url.split("?")[0]) or f"download_{int(time.time())}"
-            filename = os.path.basename(filename.replace("\\", "/")) or f"download_{int(time.time())}"
-            
-            filepath = os.path.join(self.download_dir, filename)
-            
-            # 尽量带上浏览器会话的 cookie 与 UA（登录态资源才能下）；浏览器未启动则跳过
-            # 安全：cookie 按目标 URL 域名隔离存放，跨域重定向不会携带原站 cookie
-            headers = {}
-            jar = None
-            try:
-                if self._context is not None:
-                    from yarl import URL as _YarlURL
-                    jar = aiohttp.CookieJar(unsafe=False)
-                    scoped = {c["name"]: c["value"] for c in await self._context.cookies(url)}
-                    if scoped:
-                        jar.update_cookies(scoped, response_url=_YarlURL(url))
-                    if self.user_agent:
-                        headers["User-Agent"] = self.user_agent
-            except Exception as e:
-                logger.debug(f"[HeadlessBrowser] 获取下载用 cookie 失败（将匿名下载）: {e}")
-                jar = None
-            
-            # 下载文件
-            async with aiohttp.ClientSession(headers=headers, cookie_jar=jar) as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        content = await response.read()
-                        with open(filepath, "wb") as f:
-                            f.write(content)
-                        
-                        file_size = len(content)
-                        
-                        # 发送文件给用户
-                        file_obj = File(file=filepath, name=filename, size=str(file_size))
-                        sent = await self._send_file_to_session(str(event.session), file_obj)
-                        if not sent:
-                            return f"⚠️ 文件已下载: {filepath}\n📦 大小: {file_size} 字节\n❌ 但文件发送失败，请检查适配器配置"
-                        
-                        return f"✅ 文件已下载: {filepath}\n📦 大小: {file_size} 字节"
-                    else:
-                        return f"❌ 下载失败，HTTP状态码: {response.status}"
-        except Exception as e:
-            return f"❌ 下载失败: {str(e)}"
-    
     @register.tool(
         name="browser_wait",
-        description="等待指定时间或等待元素出现",
-        params={
-            "type": "object",
-            "properties": {
-                "seconds": {"type": "integer", "description": "等待秒数（如果指定了selector则忽略此项）", "default": 1},
-                "selector": {"type": "string", "description": "CSS选择器，等待该元素出现", "default": ""}
-            }
-        }
+        description=(
+            "等待。给 selector 或 text 就等它们出现（更准，优先用）；"
+            "什么都没给就单纯等 seconds 秒。"
+        ),
+        params={"type": "object", "properties": {
+            "selector": {"type": "string", "description": "等待出现的 CSS 选择器"},
+            "text": {"type": "string", "description": "等待出现的文字"},
+            "timeout": {"type": "integer", "description": "最长等待秒数，默认 10"},
+            "seconds": {"type": "number", "description": "不指定 selector/text 时，单纯等待的秒数"}},
+            "required": []},
     )
-    async def wait(self, event, seconds: int = 1, selector: str = "") -> str:
-        """等待"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            if selector:
-                await self._page.wait_for_selector(selector)
-                return f"✅ 元素 {selector} 已出现"
-            else:
-                await asyncio.sleep(seconds)
-                return f"✅ 已等待 {seconds} 秒"
-        except Exception as e:
-            return f"❌ 等待失败: {str(e)}"
-    
+    async def tool_wait(self, event, selector=None, text=None, timeout: int = 10,
+                        seconds: float = 0, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        if selector or text:
+            return await self._call("wait_for", selector=selector, text=text, timeout=timeout)
+        sec = max(0.0, min(float(seconds or 0), 300.0))
+        await asyncio.sleep(sec)
+        return f"⏱️ 已等待 {sec} 秒"
+
+    # ── 3. 动：所有交互合并成一个 ────────────────────────────────────
+
     @register.tool(
-        name="browser_list_files",
-        description="列出下载目录或截图目录中的文件",
-        params={
-            "type": "object",
-            "properties": {
-                "dir_type": {"type": "string", "enum": ["downloads", "screenshots"], "description": "目录类型"},
-                "limit": {"type": "integer", "description": "最多显示的文件数", "default": 20}
-            },
-            "required": ["dir_type"]
-        }
+        name="browser_interact",
+        description=(
+            "对页面做操作，用 action 选动作：\n"
+            "【元素类】\n"
+            "  click      点击（selector / text / index 三选一）\n"
+            "  fill       填写输入框（selector + value）\n"
+            "  type       在输入框逐字输入（selector + value），submit=true 会回车提交\n"
+            "  hover      悬停到元素上\n"
+            "  scroll     滚动，direction=up/down/top/bottom\n"
+            "  upload     把本地文件塞进 input[type=file]（selector + file_path）\n"
+            "【导航类】\n"
+            "  go_back    返回上一页\n"
+            "  refresh    刷新页面\n"
+            "【键盘】\n"
+            "  key_press  按键/组合键（key，如 Enter、Control+a）\n"
+            "  key_down / key_up   按住 / 释放某个键（key）\n"
+            "  key_type   键盘输入文本（text）\n"
+            "【鼠标】\n"
+            "  mouse_click  坐标点击（x,y），CSS 定位不到时用\n"
+            "  mouse_move   移动到 x,y\n"
+            "  mouse_down / mouse_up   按下 / 释放（button）\n"
+            "  mouse_wheel  滚轮（delta_y）\n"
+            "  mouse_drag   拖拽（start_x,start_y,end_x,end_y）"
+        ),
+        params={"type": "object", "properties": {
+            "action": {"type": "string", "enum": [
+                "click", "fill", "type", "hover", "scroll", "upload",
+                "go_back", "refresh",
+                "key_press", "key_down", "key_up", "key_type",
+                "mouse_click", "mouse_move", "mouse_down", "mouse_up",
+                "mouse_wheel", "mouse_drag"],
+                "description": "要做的动作"},
+            "selector": {"type": "string", "description": "CSS 选择器"},
+            "text": {"type": "string", "description": "按可见文字定位 / key_type 要输入的文本"},
+            "index": {"type": "integer", "description": "第几个可点击元素（从 0 开始）"},
+            "value": {"type": "string", "description": "要填/输入的文本"},
+            "file_path": {"type": "string", "description": "action=upload 时要上传的文件绝对路径"},
+            "key": {"type": "string", "description": "按键名，如 Enter / Tab / Control+a"},
+            "direction": {"type": "string", "enum": ["up", "down", "top", "bottom"],
+                          "description": "action=scroll 的方向"},
+            "amount": {"type": "integer", "description": "action=scroll 的滚动像素"},
+            "timeout": {"type": "integer", "description": "动作等待超时秒数"},
+            "x": {"type": "integer", "description": "鼠标坐标 X"},
+            "y": {"type": "integer", "description": "鼠标坐标 Y"},
+            "steps": {"type": "integer", "description": "鼠标移动步数"},
+            "delta_x": {"type": "integer", "description": "滚轮水平量"},
+            "delta_y": {"type": "integer", "description": "滚轮垂直量"},
+            "button": {"type": "string", "enum": ["left", "right", "middle"],
+                       "description": "鼠标键，默认 left"},
+            "click_count": {"type": "integer", "description": "点击次数，默认 1"},
+            "start_x": {"type": "integer", "description": "拖拽起点 X"},
+            "start_y": {"type": "integer", "description": "拖拽起点 Y"},
+            "end_x": {"type": "integer", "description": "拖拽终点 X"},
+            "end_y": {"type": "integer", "description": "拖拽终点 Y"},
+            "submit": {"type": "boolean", "description": "action=type 时是否回车提交"},
+            "clear_first": {"type": "boolean", "description": "action=fill/type 是否先清空，默认 true"},
+            "tab_id": {"type": "integer", "description": "目标标签页 id，可选"}},
+            "required": ["action"]},
     )
-    async def list_files(self, event, dir_type: str, limit: int = 20) -> str:
-        """列出文件"""
-        try:
-            if dir_type == "downloads":
-                target_dir = self.download_dir
-            else:
-                target_dir = self.screenshot_dir
-            
-            files = os.listdir(target_dir)
-            files.sort(key=lambda x: os.path.getmtime(os.path.join(target_dir, x)), reverse=True)
-            
-            if not files:
-                return f"📂 {target_dir}\n暂无文件"
-            
-            lines = [f"📂 {target_dir}", f"共 {len(files)} 个文件（显示最新 {limit} 个）：", ""]
-            
-            for i, f in enumerate(files[:limit], 1):
-                filepath = os.path.join(target_dir, f)
-                size = os.path.getsize(filepath)
-                mtime = datetime.fromtimestamp(os.path.getmtime(filepath)).strftime("%Y-%m-%d %H:%M:%S")
-                lines.append(f"{i}. {f} ({size} bytes, {mtime})")
-            
-            return "\n".join(lines)
-        except Exception as e:
-            return f"❌ 列出文件失败: {str(e)}"
-    
+    async def tool_interact(self, event, action: str, **kw):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        a = (action or "").lower()
+        w = True          # 默认按写操作处理
+
+        if a == "click":
+            if not any([kw.get("selector"), kw.get("text"), kw.get("index") is not None]):
+                return "action=click 需要 selector、text 或 index 之一"
+            return await self._call("click", for_write=w, selector=kw.get("selector"),
+                                    text=kw.get("text"), index=kw.get("index"))
+        if a == "fill":
+            if not kw.get("selector"):
+                return "action=fill 需要 selector"
+            return await self._call("type_text", for_write=w,
+                                    selector=kw["selector"], text=kw.get("value", ""),
+                                    clear_first=kw.get("clear_first", True))
+        if a == "type":
+            if not kw.get("selector"):
+                return "action=type 需要 selector"
+            return await self._call("type_text", for_write=w,
+                                    selector=kw["selector"], text=kw.get("value", ""),
+                                    submit=bool(kw.get("submit")),
+                                    clear_first=kw.get("clear_first", True))
+        if a == "hover":
+            if not kw.get("selector"):
+                return "action=hover 需要 selector"
+            return await self._call("hover", for_write=w, selector=kw["selector"])
+        if a == "scroll":
+            d = kw.get("direction")
+            if d not in ("up", "down", "top", "bottom"):
+                return "action=scroll 需要 direction（up/down/top/bottom）"
+            return await self._call("scroll", for_write=w, direction=d,
+                                    amount=kw.get("amount"))
+        if a == "upload":
+            if not kw.get("selector") or not kw.get("file_path"):
+                return "action=upload 需要 selector 和 file_path"
+            return await self._call("upload_file", for_write=w,
+                                    selector=kw["selector"], file_path=kw["file_path"])
+        if a == "go_back":
+            return await self._call("go_back", for_write=w)
+        if a == "refresh":
+            return await self._call("refresh", for_write=w)
+
+        if a in ("key_press", "key_down", "key_up", "key_type"):
+            if a == "key_type":
+                if not kw.get("text"):
+                    return "action=key_type 需要 text"
+                return await self._call("keyboard_type", for_write=w, text=kw["text"])
+            k = kw.get("key")
+            if not k:
+                return f"action={a} 需要 key"
+            if a == "key_press":
+                return await self._call("keyboard_press", for_write=w, key=k)
+            return await self._call("keyboard_down_up", for_write=w,
+                                    action=("down" if a == "key_down" else "up"), key=k)
+
+        if a in ("mouse_click", "mouse_move", "mouse_down", "mouse_up",
+                 "mouse_wheel", "mouse_drag"):
+            if a == "mouse_move":
+                if kw.get("x") is None or kw.get("y") is None:
+                    return "action=mouse_move 需要 x 和 y"
+                return await self._call("mouse_move", for_write=w,
+                                        x=kw["x"], y=kw["y"], steps=kw.get("steps", 1))
+            if a == "mouse_click":
+                return await self._call("mouse_click", for_write=w,
+                                        x=kw.get("x"), y=kw.get("y"),
+                                        button=kw.get("button", "left"),
+                                        click_count=kw.get("click_count", 1))
+            if a in ("mouse_down", "mouse_up"):
+                return await self._call("mouse_down_up", for_write=w,
+                                        action=("down" if a == "mouse_down" else "up"),
+                                        button=kw.get("button", "left"))
+            if a == "mouse_wheel":
+                return await self._call("mouse_wheel", for_write=w,
+                                        delta_x=kw.get("delta_x", 0),
+                                        delta_y=kw.get("delta_y", 0))
+            need = ("start_x", "start_y", "end_x", "end_y")
+            if any(kw.get(k) is None for k in need):
+                return "action=mouse_drag 需要 start_x/start_y/end_x/end_y"
+            return await self._call("mouse_drag", for_write=w,
+                                    start_x=kw["start_x"], start_y=kw["start_y"],
+                                    end_x=kw["end_x"], end_y=kw["end_y"],
+                                    button=kw.get("button", "left"),
+                                    steps=kw.get("steps", 10))
+
+        return (f"未知 action「{action}」。可用：click / fill / type / hover / scroll / "
+                f"upload / go_back / refresh / key_press / key_down / key_up / key_type / "
+                f"mouse_click / mouse_move / mouse_down / mouse_up / mouse_wheel / mouse_drag")
+
+    # ── 4. 去 ────────────────────────────────────────────────────────
+
     @register.tool(
-        name="browser_test_visible",
-        description="【可视模式测试】打开一个明显的测试页面，用于验证浏览器窗口是否可见。如果看不到窗口，请检查插件配置中的 headless 是否为 false",
-        params={
-            "type": "object",
-            "properties": {}
-        }
+        name="browser_navigate",
+        description="让浏览器打开网址。new_tab=true 会新开一个标签页。",
+        params={"type": "object", "properties": {
+            "url": {"type": "string", "description": "完整网址"},
+            "new_tab": {"type": "boolean", "description": "是否新开标签页，默认 false"}},
+            "required": ["url"]},
     )
-    async def test_visible(self, event) -> str:
-        """测试浏览器是否可见"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            # 创建一个本地测试页面
-            test_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>浏览器可视模式测试</title>
-    <style>
-        body { 
-            font-family: Arial, sans-serif; 
-            text-align: center; 
-            padding: 50px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            min-height: 100vh;
-            margin: 0;
-        }
-        h1 { font-size: 48px; margin-bottom: 20px; }
-        p { font-size: 24px; }
-        .box {
-            background: rgba(255,255,255,0.2);
-            padding: 30px;
-            border-radius: 20px;
-            margin: 30px auto;
-            max-width: 600px;
-        }
-    </style>
-</head>
-<body>
-    <div class="box">
-        <h1>🎉 浏览器窗口可见！</h1>
-        <p>如果您能看到这个页面，说明浏览器正在以可视模式运行。</p>
-        <p>当前时间：<span id="time"></span></p>
-    </div>
-    <script>
-        document.getElementById('time').textContent = new Date().toLocaleString();
-    </script>
-</body>
-</html>"""
-            
-            # 保存测试页面
-            test_path = os.path.join(self.screenshot_dir, "test_visible.html")
-            with open(test_path, "w", encoding="utf-8") as f:
-                f.write(test_html)
-            
-            # 打开测试页面
-            await self._page.goto(f"file:///{test_path}")
-            
-            if self.headless:
-                return f"⚠️ 当前为无头模式，浏览器窗口不可见\n测试页面已保存: {test_path}\n\n要看到浏览器窗口，请将插件配置中的 headless 改为 false 并重载插件"
-            else:
-                return f"✅ 可视模式测试页面已打开！\n\n如果您能看到一个紫色渐变背景的浏览器窗口，说明可视模式正常工作。\n如果看不到窗口，请检查:\n1. 窗口是否被其他窗口遮挡\n2. 是否在远程桌面环境（可能需要特殊配置）\n3. 尝试最小化其他窗口"
-        except Exception as e:
-            return f"❌ 测试失败: {str(e)}"
-    
+    async def tool_navigate(self, event, url: str, new_tab: bool = False, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url.lstrip("/")
+        return await self._call("navigate", for_write=True, url=url, new_tab=new_tab)
+
+    # ── 5. 脚本 ──────────────────────────────────────────────────────
+
+    @register.tool(
+        name="browser_script",
+        description=(
+            "在页面里执行 JavaScript 并返回结果（最灵活的能力）。\n"
+            "扩展桥后端需要用户在扩展详情页打开「允许用户脚本」开关（Chrome 138+ 的安全要求）。"
+        ),
+        params={"type": "object", "properties": {
+            "script": {"type": "string",
+                       "description": "JS 表达式，返回值会被回传。如 document.title 或 [...document.querySelectorAll('a')].map(a=>a.href)"}},
+            "required": ["script"]},
+    )
+    async def tool_script(self, event, script: str, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        return await self._call("execute_js", script=script)
+
+    # ── 6. 文件 ──────────────────────────────────────────────────────
+
+    @register.tool(
+        name="browser_file",
+        description=(
+            "文件相关操作，用 mode 选：\n"
+            "  mode=download —— 下载一个 URL 到本地并发给用户（会带上浏览器登录态）\n"
+            "  mode=list     —— 列出已下载/截图目录里的文件\n"
+            "上传文件请用 browser_interact(action='upload')。"
+        ),
+        params={"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["download", "list"],
+                     "description": "做什么，默认 download"},
+            "url": {"type": "string", "description": "mode=download 的 http/https 链接"},
+            "filename": {"type": "string", "description": "保存文件名，可选"},
+            "dir_type": {"type": "string", "enum": ["downloads", "screenshots"],
+                         "description": "mode=list 的目录"},
+            "limit": {"type": "integer", "description": "mode=list 最多显示几个"}},
+            "required": []},
+    )
+    async def tool_file(self, event: KiraMessageBatchEvent, mode: str = "download",
+                        url: str = "", filename: str = "", dir_type: str = "downloads",
+                        limit: int = 20, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        m = (mode or "download").lower()
+        if m == "list":
+            return await self._call("list_files", dir_type=dir_type, limit=limit)
+        if not url:
+            return "mode=download 需要提供 url"
+        if self._headless is None:
+            return "❌ 下载需要无头后端做落盘"
+        name = filename or (os.path.basename(url.split("?")[0]) or f"download_{int(time.time())}")
+        name = os.path.basename(name.replace("\\", "/"))
+        err = await self._headless.start()
+        if err:
+            return err
+        path = os.path.join(self._headless.download_dir, name)
+        # 优先让扩展桥去下（带用户的登录态）；失败或没连上再回退无头自己下
+        r = await self._call("download", for_write=True, url=url, path=path)
+        if isinstance(r, str) and r.startswith("❌") and self._headless is not None:
+            hr = await self._headless.download(url, path)
+            if not hr.ok:
+                return f"❌ {hr.error}"
+            r = f"✅ 文件已下载: {path}（{hr.data.get('size')} 字节）"
+        await self._send_file(event, path, name)
+        return r + f"\n📤 已发送给用户: {name}"
+
+    # ── 7. Cookie（打通两个后端的登录态）──────────────────────────────
+
+    @register.tool(
+        name="browser_cookie",
+        description=(
+            "导出/写入浏览器 cookie，用来把「你浏览器里的登录态」带到另一个后端。\n"
+            "  action=export —— 导出当前站点（或指定 url）的 cookie\n"
+            "  action=import —— 把 cookie 写进当前后端\n"
+            "典型用法：先从扩展桥导出，再写入无头后端，这样降级到无头时也不用重新登录。"
+        ),
+        params={"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["export", "import"],
+                       "description": "导出还是写入"},
+            "url": {"type": "string", "description": "action=export 的目标网址，省略用当前页"},
+            "cookies": {"type": "array", "description": "action=import 时要写入的 cookie 数组"}},
+            "required": ["action"]},
+    )
+    async def tool_cookie(self, event, action: str, url: str = "", cookies=None, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        a = (action or "").lower()
+        if a == "export":
+            return await self._call("cookie_get", url=url)
+        if a == "import":
+            if not cookies:
+                return "action=import 需要提供 cookies"
+            return await self._call("cookie_set", for_write=True, cookies=cookies)
+        return "action 只能是 export 或 import"
+
+    # ── 8. 排障 / 帮助 ───────────────────────────────────────────────
+
     @register.tool(
         name="browser_debug",
-        description="调试浏览器状态，检查浏览器是否正常运行",
-        params={
-            "type": "object",
-            "properties": {}
-        }
+        description="查看浏览器后端状态（用哪个后端、profile 模式、超时、空闲多久等）。排障用。",
+        params={"type": "object", "properties": {}, "required": []},
     )
-    async def debug_browser(self, event) -> str:
-        """调试浏览器状态"""
-        import platform
-        info = [
-            "🔍 浏览器调试信息:",
-            "",
-            f"操作系统: {platform.system()} {platform.release()}",
-            f"无头模式: {self.headless}",
-            f"浏览器已启动: {self._browser is not None or self._context is not None}",
-            f"浏览器来源: {self._browser_desc or '未启动'}",
-            f"真实浏览器模式: {'开启' if self.use_real_browser_profile else '关闭'}",
-            f"页面已创建: {self._page is not None}",
-        ]
-        
-        if self._page:
-            try:
-                url = self._page.url
-                title = await self._page.title()
-                info.extend([
-                    f"当前URL: {url}",
-                    f"当前标题: {title}",
-                ])
-            except:
-                info.append("当前页面状态: 无法获取")
-        
-        if not self.headless:
-            info.extend([
-                "",
-                "💡 可视模式排查:",
-                "- 配置状态: headless=false（应该显示窗口）",
-                "- 如果看不到窗口，请尝试:",
-                "  1. 按 Alt+Tab 切换窗口，看是否有 Chrome/Chromium 窗口",
-                "  2. 检查任务栏是否有浏览器图标",
-                "  3. 尝试重启插件（配置更改后必须重载）",
-                "  4. 在远程桌面环境下，可能需要保持远程会话活跃",
-                "",
-                "🔧 快速测试:",
-                "调用 browser_test_visible 工具打开测试页面",
-            ])
-        else:
-            info.extend([
-                "",
-                "ℹ️ 当前为无头模式（后台运行）",
-                "如需显示浏览器窗口，请:",
-                "1. 在插件配置中将 headless 改为 false",
-                "2. 点击保存",
-                "3. 重载插件或重启 KiraAI",
-            ])
-        
-        return "\n".join(info)
-    
+    async def tool_debug(self, event, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        parts = ["🔍 浏览器插件状态", "",
+                 f"后端策略: {self.backend_strategy}",
+                 f"路由: {self.router.describe() if self.router else '未初始化'}",
+                 f"op_timeout 跟随框架: {self.op_timeout_follows_framework}"]
+        if self._headless is not None:
+            r = await self._headless.debug_state()
+            d = r.data or {}
+            parts += ["", "无头后端:"]
+            for k in ("backend", "available", "headless", "profile_mode",
+                      "profile_dir", "wait_until", "op_timeout", "action_timeout",
+                      "idle_close_seconds", "idle_for", "pages_open",
+                      "launch_args_count"):
+                parts.append(f"  {k}: {d.get(k)}")
+        return "\n".join(parts)
+
     @register.tool(
-        name="browser_check_vlm",
-        description="检查VLM模型配置状态，显示当前使用的图片分析模型",
-        params={
-            "type": "object",
-            "properties": {}
-        }
+        name="browser_test_visible",
+        description="打开一个测试页，确认「可视模式」下窗口是否真的显示出来了。",
+        params={"type": "object", "properties": {}, "required": []},
     )
-    async def check_vlm(self, event) -> str:
-        """检查VLM配置"""
-        from core.provider import LLMModelClient
-        
-        info = ["🔍 VLM模型配置检查:", ""]
-        
-        # 检查配置的VLM
-        if self.vlm_model:
-            info.append(f"✅ 插件配置的VLM: {self.vlm_model}")
-        else:
-            info.append("⚠️ 未在插件中配置专用VLM模型，将使用系统默认")
-        
-        # 检查描述配置
-        # 获取实际使用的提示词（模板或自定义）
-        actual_prompt = self.vlm_describe_prompt if self.vlm_describe_prompt else VLM_TOOL_OPTIMIZED_PROMPT
-        prompt_preview = actual_prompt[:100] + "..." if len(actual_prompt) > 100 else actual_prompt
-        info.extend([
-            "",
-            "📝 VLM 描述配置:",
-            f"  自定义提示词: {'是' if self.vlm_describe_prompt else '否（使用默认模板）'}",
-            f"  超时时间: {self.vlm_timeout} 秒",
-            f"  提示词预览: {prompt_preview}",
-        ])
-        
-        # 检查当前使用的VLM
-        try:
-            vlm_client = await self._get_vlm_client()
-        except Exception as e:
-            vlm_client = None
-            info.append(f"❌ 获取VLM客户端异常: {e}")
-        if vlm_client and vlm_client.model:
-            model_id = vlm_client.model.model_id
-            provider_id = vlm_client.model.provider_id
-            model_uuid = f"{provider_id}:{model_id}"
-            info.append(f"✅ 当前实际使用的VLM: {model_uuid}")
-            
-            if self._is_vision_model(vlm_client):
-                info.append("✅ 该模型支持视觉分析")
-            else:
-                info.append("❌ 该模型不支持视觉分析，截图后将无法自动描述")
-        else:
-            info.append("❌ 未找到可用的VLM模型")
-        
-        # 列出所有可用的LLM模型
-        info.extend(["", "📋 系统中已配置的LLM模型:"])
-        try:
-            vision_models = []
-            other_models = []
-            
-            # 遍历所有 provider 获取模型
-            all_providers = self.ctx.provider_mgr.get_all_providers()
-            for provider_id, provider in all_providers.items():
-                model_infos = self.ctx.provider_mgr.get_model_infos(provider_id)
-                for model_info in model_infos:
-                    if model_info.model_type.value == "llm":
-                        model_uuid = f"{provider_id}:{model_info.model_id}"
-                        # 简单判断是否为视觉模型（与 _is_vision_model 保持一致的宽松策略）
-                        model_id_lower = model_info.model_id.lower()
-                        non_vision_markers = ['embedding', 'rerank', 'tts', 'stt', 'davinci', 'babbage', 'whisper']
-                        if not any(marker in model_id_lower for marker in non_vision_markers):
-                            vision_models.append(f"  👁️ {model_uuid}")
-                        else:
-                            other_models.append(f"  {model_uuid}")
-            
-            if vision_models:
-                info.extend(["  推荐的视觉模型:"] + vision_models)
-            if other_models:
-                info.extend(["  其他模型:"] + other_models[:5])
-            
-            if not vision_models and not other_models:
-                info.append("  ⚠️ 未找到任何LLM模型")
-        except Exception as e:
-            info.append(f"  获取模型列表失败: {e}")
-        
-        # 检查系统默认VLM配置
-        info.extend(["", "🔧 系统默认VLM检查:"])
-        try:
-            default_vlm = self.ctx.provider_mgr.get_default_vlm()
-            if default_vlm:
-                if default_vlm.model:
-                    info.append(f"  系统默认VLM: {default_vlm.model.provider_id}:{default_vlm.model.model_id}")
-                    info.append(f"  类型: {type(default_vlm).__name__}")
-                    info.append(f"  是否支持视觉: {self._is_vision_model(default_vlm)}")
-                else:
-                    info.append("  ⚠️ 系统默认VLM没有模型信息")
-            else:
-                info.append("  ⚠️ 未配置系统默认VLM模型")
-                info.append("  请前往: 设置 → 默认模型 → 默认多模态模型")
-        except Exception as e:
-            info.append(f"  获取系统默认VLM失败: {e}")
-        
-        # 提示如何配置
-        info.extend([
-            "",
-            "💡 配置说明:",
-            "1. 在插件配置中选择 vlm_model（下拉框会显示所有已配置的模型）",
-            "2. 建议选择带有 👁️ 标记的视觉模型",
-            "3. 或在系统设置-默认模型中设置VLM模型",
-        ])
-        
-        return "\n".join(info)
-    
+    async def tool_test_visible(self, event, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        html = ("<!doctype html><meta charset='utf-8'><title>可视模式测试</title>"
+                "<body style='font-family:sans-serif;text-align:center;padding:60px'>"
+                "<h1>🎉 如果你能看到这个窗口，说明可视模式正常</h1>"
+                "<p>当前时间：<span id=t></span></p>"
+                "<script>document.getElementById('t').textContent=new Date().toLocaleString()</script>")
+        import tempfile as _tf
+        p = os.path.join(_tf.gettempdir(), "kira_visible_test.html")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(html)
+        r = await self._call("navigate", for_write=True, url=f"file://{p}")
+        if self._headless is not None and self._headless.headless:
+            return r + ("\n\n⚠️ 当前是无头模式，窗口不可见。"
+                        "把配置里的「无头模式」关掉并重载插件就能看到窗口。")
+        return r + "\n\n👀 去屏幕上找一下这个测试页面；看不到就用 browser_debug 看状态。"
+
     @register.tool(
-        name="browser_set_vlm_mode",
-        description="【已弃用】VLM现在固定使用工具优化模式",
-        params={
-            "type": "object",
-            "properties": {}
-        }
+        name="browser_extension_help",
+        description=("如何安装配套浏览器扩展，从而让 AI 直接操作你正在使用的浏览器。"
+                     "用户问「怎么让你看我的浏览器」「扩展怎么装」时调用。"),
+        params={"type": "object", "properties": {}, "required": []},
     )
-    async def set_vlm_mode(self, event) -> str:
-        """已弃用：临时切换VLM描述模式"""
-        return "⚠️ 该功能已弃用。VLM 现在固定使用工具优化模式进行分析。\n如需自定义提示词，请在插件配置中设置 vlm_describe_prompt。"
-    
-    @register.tool(
-        name="browser_send_file",
-        description="发送指定文件给用户",
-        params={
-            "type": "object",
-            "properties": {
-                "filepath": {"type": "string", "description": "文件完整路径"},
-                "as_image": {"type": "boolean", "description": "是否作为图片发送（图片文件时建议设为true）", "default": False}
-            },
-            "required": ["filepath"]
-        }
-    )
-    async def send_file(self, event, filepath: str, as_image: bool = False) -> str:
-        """发送文件给用户（受路径白名单限制，防止本地敏感文件被外传）"""
-        try:
-            if not os.path.exists(filepath):
-                return f"❌ 文件不存在: {filepath}"
-            resolved = os.path.realpath(filepath)
-            if not self._is_path_allowed(resolved):
-                return f"❌ 出于安全考虑，仅允许发送以下目录中的文件: {', '.join(self.upload_allowed_dirs)}（或在配置中开启 upload_allow_any_path）"
-            
-            file_size = os.path.getsize(filepath)
-            filename = os.path.basename(filepath)
-            
-            if as_image:
-                image_obj = Image(image=filepath)
-                sent = await self._send_image_to_session(str(event.session), image_obj)
-                if not sent:
-                    return f"❌ 图片发送失败: {filename}"
-            else:
-                file_obj = File(file=filepath, name=filename, size=str(file_size))
-                sent = await self._send_file_to_session(str(event.session), file_obj)
-                if not sent:
-                    return f"❌ 文件发送失败: {filename}"
-            return f"✅ 文件已发送: {filename}"
-        except Exception as e:
-            return f"❌ 发送文件失败: {str(e)}"
-    
-    # ============ 键盘和鼠标模拟工具 ============
-    
-    @register.tool(
-        name="browser_keyboard_type",
-        description="模拟键盘输入文本到当前聚焦的元素",
-        params={
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "要输入的文本"},
-                "delay": {"type": "integer", "description": "每个字符之间的延迟（毫秒），默认为0", "default": 0}
-            },
-            "required": ["text"]
-        }
-    )
-    async def keyboard_type(self, event, text: str, delay: int = 0) -> str:
-        """模拟键盘输入文本"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.keyboard.type(text, delay=delay)
-            return f"✅ 已输入文本: {text[:50]}{'...' if len(text) > 50 else ''}"
-        except Exception as e:
-            return f"❌ 输入失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_keyboard_press",
-        description="模拟按下键盘按键，支持组合键（如 Ctrl+A、Enter、Tab 等）",
-        params={
-            "type": "object",
-            "properties": {
-                "key": {"type": "string", "description": "按键名称，如 'Enter'、'Tab'、'Control+a'、'Shift+Tab' 等"}
-            },
-            "required": ["key"]
-        }
-    )
-    async def keyboard_press(self, event, key: str) -> str:
-        """模拟按键"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.keyboard.press(key)
-            return f"✅ 已按下按键: {key}"
-        except Exception as e:
-            return f"❌ 按键失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_keyboard_down_up",
-        description="模拟按住和释放键盘按键（用于组合键操作）",
-        params={
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["down", "up"], "description": "按下(down)或释放(up)按键"},
-                "key": {"type": "string", "description": "按键名称，如 'Control'、'Shift'、'Alt'、'a' 等"}
-            },
-            "required": ["action", "key"]
-        }
-    )
-    async def keyboard_down_up(self, event, action: str, key: str) -> str:
-        """模拟按键按下/释放"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            if action == "down":
-                await self._page.keyboard.down(key)
-                return f"✅ 已按住按键: {key}"
-            else:
-                await self._page.keyboard.up(key)
-                return f"✅ 已释放按键: {key}"
-        except Exception as e:
-            return f"❌ 操作失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_mouse_move",
-        description="模拟鼠标移动到指定坐标位置",
-        params={
-            "type": "object",
-            "properties": {
-                "x": {"type": "integer", "description": "X坐标（像素）"},
-                "y": {"type": "integer", "description": "Y坐标（像素）"},
-                "steps": {"type": "integer", "description": "移动步数，越大越平滑，默认为1", "default": 1}
-            },
-            "required": ["x", "y"]
-        }
-    )
-    async def mouse_move(self, event, x: int, y: int, steps: int = 1) -> str:
-        """模拟鼠标移动"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.mouse.move(x, y, steps=steps)
-            return f"✅ 鼠标已移动到: ({x}, {y})"
-        except Exception as e:
-            return f"❌ 移动失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_mouse_click",
-        description="在指定坐标模拟鼠标点击，如果未指定坐标则在当前位置点击",
-        params={
-            "type": "object",
-            "properties": {
-                "x": {"type": "integer", "description": "X坐标（像素），不指定则在当前位置点击", "default": None},
-                "y": {"type": "integer", "description": "Y坐标（像素），不指定则在当前位置点击", "default": None},
-                "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "鼠标按钮，默认为left", "default": "left"},
-                "click_count": {"type": "integer", "description": "点击次数，默认为1", "default": 1}
-            }
-        }
-    )
-    async def mouse_click(self, event, x: int = None, y: int = None, button: str = "left", click_count: int = 1) -> str:
-        """模拟鼠标点击"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            if x is not None and y is not None:
-                # 先移动鼠标到指定位置，再点击
-                await self._page.mouse.move(x, y)
-                await self._page.mouse.down(button=button)
-                await self._page.mouse.up(button=button)
-                if click_count > 1:
-                    for _ in range(click_count - 1):
-                        await self._page.mouse.down(button=button)
-                        await self._page.mouse.up(button=button)
-                return f"✅ 已在 ({x}, {y}) 进行{button}键点击 {click_count} 次"
-            else:
-                await self._page.mouse.down(button=button)
-                await self._page.mouse.up(button=button)
-                return f"✅ 已在当前位置进行{button}键点击"
-        except Exception as e:
-            return f"❌ 点击失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_mouse_down_up",
-        description="模拟鼠标按下或释放（用于拖拽操作）。注意：使用'button'参数指定鼠标按钮，不要用'key'",
-        params={
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["down", "up"], "description": "按下(down)或释放(up)鼠标"},
-                "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "鼠标按钮(left/right/middle)，默认为left"}
-            },
-            "required": ["action"]
-        }
-    )
-    async def mouse_down_up(self, event, action: str, button: str = "left") -> str:
-        """模拟鼠标按下/释放"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            if action == "down":
-                await self._page.mouse.down(button=button)
-                return f"✅ 已按下{button}键"
-            else:
-                await self._page.mouse.up(button=button)
-                return f"✅ 已释放{button}键"
-        except Exception as e:
-            return f"❌ 操作失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_mouse_wheel",
-        description="模拟鼠标滚轮滚动",
-        params={
-            "type": "object",
-            "properties": {
-                "delta_x": {"type": "integer", "description": "水平滚动距离（像素），默认为0", "default": 0},
-                "delta_y": {"type": "integer", "description": "垂直滚动距离（像素），正数向下滚动，负数向上滚动", "default": 0}
-            }
-        }
-    )
-    async def mouse_wheel(self, event, delta_x: int = 0, delta_y: int = 0) -> str:
-        """模拟鼠标滚轮"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.mouse.wheel(delta_x, delta_y)
-            direction = "下" if delta_y > 0 else "上" if delta_y < 0 else ""
-            return f"✅ 已滚动{direction} {abs(delta_y)} 像素"
-        except Exception as e:
-            return f"❌ 滚动失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_mouse_drag",
-        description="模拟鼠标拖拽：从起始位置按住，移动到目标位置，然后释放",
-        params={
-            "type": "object",
-            "properties": {
-                "start_x": {"type": "integer", "description": "起始X坐标"},
-                "start_y": {"type": "integer", "description": "起始Y坐标"},
-                "end_x": {"type": "integer", "description": "目标X坐标"},
-                "end_y": {"type": "integer", "description": "目标Y坐标"},
-                "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "鼠标按钮，默认为left", "default": "left"},
-                "steps": {"type": "integer", "description": "移动步数，越大越平滑，默认为10", "default": 10}
-            },
-            "required": ["start_x", "start_y", "end_x", "end_y"]
-        }
-    )
-    async def mouse_drag(self, event, start_x: int, start_y: int, end_x: int, end_y: int, button: str = "left", steps: int = 10) -> str:
-        """模拟鼠标拖拽"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            # 移动到起始位置
-            await self._page.mouse.move(start_x, start_y)
-            # 按下鼠标
-            await self._page.mouse.down(button=button)
-            # 移动到目标位置
-            await self._page.mouse.move(end_x, end_y, steps=steps)
-            # 释放鼠标
-            await self._page.mouse.up(button=button)
-            return f"✅ 已从 ({start_x}, {start_y}) 拖拽到 ({end_x}, {end_y})"
-        except Exception as e:
-            # 确保释放鼠标
-            try:
-                await self._page.mouse.up(button=button)
-            except:
-                pass
-            return f"❌ 拖拽失败: {str(e)}"
-    
-    @register.tool(
-        name="browser_hover",
-        description="将鼠标悬停在指定元素上（触发 hover 效果）",
-        params={
-            "type": "object",
-            "properties": {
-                "selector": {"type": "string", "description": "CSS选择器，指定要悬停的元素"}
-            },
-            "required": ["selector"]
-        }
-    )
-    async def hover(self, event, selector: str) -> str:
-        """悬停在元素上"""
-        _browser_err = await self._require_browser()
-        if _browser_err:
-            return _browser_err
-        try:
-            await self._page.hover(selector)
-            return f"✅ 已悬停在元素: {selector}"
-        except Exception as e:
-            return f"❌ 悬停失败: {str(e)}"
+    async def tool_extension_help(self, event, **_):
+        plugin_dir = Path(__file__).resolve().parent
+        parts = [setup_guide.compatibility_report(), ""]
+        notice = setup_guide.first_run_notice(plugin_dir, self.bridge.connected)
+        parts.append(notice if notice
+                     else "✅ 扩展已连接，AI 现在可以直接操作你正在用的浏览器。")
+        d = setup_guide.extension_dir(plugin_dir)
+        parts += ["", f"📁 扩展文件夹（可直接复制这个路径）：\n     {d}"]
+        if self._token:
+            parts.append(f"\n🔑 接入令牌（粘到扩展里）：\n     {self._token}")
+        return "\n".join(parts)
 
 
+    @register.api("GET", "/extension", auth=True)
+    async def api_extension(self):
+        """面板用：扩展位置、安装步骤、令牌、是否已连接。"""
+        plugin_dir = Path(__file__).resolve().parent
+        d = setup_guide.extension_dir(plugin_dir)
+        browsers = setup_guide.known_chromium_browsers()
+        primary = browsers[0]["name"] if browsers else "chrome"
+        return {
+            "packaged": setup_guide.extension_exists(plugin_dir),
+            "path": str(d),
+            "connected": self.bridge.connected,
+            "browsers_found": browsers,
+            "steps": setup_guide.steps_for(primary, str(d)),
+            "extensions_url": setup_guide.EXTENSIONS_URL.get(primary, "chrome://extensions"),
+            "token": self._token,
+            "compatibility": setup_guide.compatibility_report(),
+        }
+
+    @register.api("GET", "/status", auth=True)
+    async def api_status(self):
+        return {
+            "enabled": self.enabled,
+            "connected": self.bridge.connected,
+            "bridge": self.bridge.info,
+            "router": {
+                "strategy": self.backend_strategy,
+                "active": self.router.active.display if (self.router and self.router.active) else None,
+                "describe": self.router.describe() if self.router else "",
+            },
+            "policy": {
+                "read_only": self.read_only,
+                "require_confirm": self.require_confirm,
+                "allowed_domains": self.allowed_domains,
+                "blocked_domains": self.blocked_domains,
+                "max_content_chars": self.max_content_chars,
+            },
+            "last_state": {k: v for k, v in self._last_state.items() if k != "_ts"},
+            "confirm_log": list(reversed(self._confirm_log[-20:])),
+        }
+
+    @register.api("POST", "/token", auth=True)
+    async def api_issue_token(self, force: bool = True):
+        if not self.panel_auth_required:
+            logger.warning("「配置面板需要登录」已关闭：令牌端点仍保持登录校验")
+        try:
+            before = self._token
+            self._token = ensure_token(force=bool(force))
+            if force:
+                logger.info("面板请求重新生成令牌：旧令牌已全部作废")
+        except Exception as e:
+            logger.error(f"签发扩展令牌失败: {e}")
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "token": self._token, "expires": token_expiry(),
+                "never_expires": token_expiry() is None,
+                "changed": self._token != before,
+                "ws_path": "/ws/plugin/browser/bridge"}
+
+    @register.page(
+        "/panel",
+        auth=True,
+        menu=PageMenu(label={"zh": "浏览器", "en": "Browser"}, icon="Monitor", order=60),
+    )
+    def page_panel(self):
+        return PluginPage.from_folder("./web")
+
+
+def _b(v) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes", "on")
+    return bool(v)

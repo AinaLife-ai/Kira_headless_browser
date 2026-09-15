@@ -1,3 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 插件运行时数据
+data/plugins/headless_browser/
+screenshots/
+downloads/
+browser_profile/
+inherited_profile/
+
 # Cookie 目录包含用户会话凭证，禁止提交到版本库
-# 已在 manifest.json 的 exclude 字段中声明打包排除
 data/files/cookie/
+
+# 编辑器
+.DS_Store
+.idea/
+.vscode/

@@ -1,1 +1,3 @@
-from .main import HeadlessBrowserPlugin
+from .main import BrowserPlugin
+
+__all__ = ["BrowserPlugin"]
