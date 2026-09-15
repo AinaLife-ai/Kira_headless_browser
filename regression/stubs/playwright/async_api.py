@@ -244,6 +244,8 @@ class FakeContext:
         self._browser = browser
         self._closed = False
         self._handlers = {}
+        #: 保住 _fire() 派发出去的异步回调，避免被 GC（见 _fire）
+        self._bg_tasks = set()
         STATS["contexts_created"] += 1
 
     @property
@@ -259,7 +261,12 @@ class FakeContext:
         for fn in self._handlers.get(event, []):
             r = fn(*args)
             if asyncio.iscoroutine(r):
-                asyncio.ensure_future(r)
+                # ⚠️ 必须**留住 task 的强引用**：ensure_future 的返回值一旦
+                #    无人引用，事件循环只持弱引用 → task 可能在异步处理器
+                #    跑完前就被 GC 掉，让弹窗清理/生命周期检查变得不稳定。
+                t = asyncio.ensure_future(r)
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
 
     async def new_page(self):
         p = FakePage(self)

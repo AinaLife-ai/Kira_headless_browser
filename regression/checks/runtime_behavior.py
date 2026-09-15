@@ -130,7 +130,12 @@ def run(r) -> None:
     async def r3():
         reset()
         p = _mk(hbmod, tmp, idle_close_seconds=1)
-        await p.start()
+        # ⚠️ start() 失败时返回错误字符串、p.available 会是 False ——
+        #    若忽略它，下面的 "closed = not p.available" 会把**启动失败**
+        #    误报成"空闲清理成功"（假绿）。
+        err = await p.start()
+        if err or not p.available:
+            return False, f"浏览器未能启动（{err or 'available=False'}）"
         p.idle_close_seconds = 1
         p._last_used = 0
         try:

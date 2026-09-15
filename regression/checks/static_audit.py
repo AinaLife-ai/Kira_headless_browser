@@ -363,6 +363,81 @@ def run(r) -> None:
          web.count("textContent") >= 6 and "_renderDomains" in web,
          "事件记录与域名列表都要走 DOM 节点")
 
+    # ⚠️ 面板脚本里"用了但从没声明"的局部变量。
+    #    真实事故：上一轮删掉 `const ad = ...`（改走 _renderDomains）时
+    #    漏了后面 `!ad.length` 仍在用它 → 可写模式下每次 refresh() 都抛
+    #    ReferenceError，而且**只读模式因短路求值不触发**，非常难发现。
+    #    这里做一个轻量"未声明标识符"扫描，专抓这类漏改。
+    _js = re.search(r'<script>([\s\S]*)</script>', web)
+    _code = _js.group(1) if _js else ""
+    _code = re.sub(r'/\*[\s\S]*?\*/', '', _code)
+    _code = re.sub(r'(?m)//[^\n]*$', '', _code)
+    _code = re.sub(r'`(?:[^`\\]|\\.)*`', '``', _code)
+    _code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', _code)
+    _code = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", _code)
+    _declared = set()
+    for m in re.finditer(
+            r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)', _code):
+        _declared.add(m.group(1))
+    for m in re.finditer(r'\bfunction\s+([A-Za-z_$][\w$]*)', _code):
+        _declared.add(m.group(1))
+    # 函数参数也当已声明
+    for m in re.finditer(r'\bfunction\s*[\w$]*\s*\(([^)]*)\)', _code):
+        for arg in m.group(1).split(","):
+            arg = arg.strip()
+            if arg:
+                _declared.add(arg.split("=")[0].strip())
+    # catch 参数（`catch (e)`）与箭头函数参数（`(a, b) =>`）也算已声明，
+    # 否则会疯狂误报 `e` / `el` 之类。
+    for m in re.finditer(r'\bcatch\s*\(\s*([A-Za-z_$][\w$]*)', _code):
+        _declared.add(m.group(1))
+    for m in re.finditer(r'\(([^)]*)\)\s*=>', _code):
+        for arg in m.group(1).split(","):
+            arg = arg.strip().split("=")[0].strip()
+            if arg and arg.isidentifier():
+                _declared.add(arg)
+    for m in re.finditer(r'(?<![\w.$])([A-Za-z_$][\w$]*)\s*=>', _code):
+        _declared.add(m.group(1))
+
+    _builtins = {
+        "document", "window", "chrome", "console", "Math", "JSON", "Date",
+        "Array", "Object", "String", "Number", "Boolean", "Promise", "Error",
+        "fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+        "encodeURIComponent", "decodeURIComponent", "parseInt", "parseFloat",
+        "isNaN", "undefined", "null", "true", "false", "this", "new", "typeof",
+        "typeof", "return", "if", "else", "for", "while", "do", "function",
+        "const", "let", "var", "async", "await", "try", "catch", "finally",
+        "class", "throw", "switch", "case", "break", "continue", "delete",
+        "in", "of", "instanceof", "void", "yield", "static", "get", "set",
+        "navigator", "location", "alert", "confirm", "prompt", "Event",
+        "CustomEvent", "Map", "Set", "Symbol", "RegExp", "Infinity", "NaN",
+        "arguments", "globalThis", "requestAnimationFrame", "btoa", "atob",
+    }
+    # 只看"后面跟 . 或 [ 或 .length"的标识符 —— 这些几乎必然是变量引用，
+    # 而不是对象字面量的键或属性名。
+    _used = {}
+    for m in re.finditer(
+            r'(?<![\w.$])([a-z_$][\w$]*)(?=\s*(?:\.|\[))', _code):
+        nm = m.group(1)
+        if nm in _declared or nm in _builtins:
+            continue
+        _used.setdefault(nm, _code[:m.start()].count("\n") + 1)
+    # 再把"只作为裸标识符出现在条件/实参里"的也带上（如 `!ad.length` 的 ad
+    # 其实已被上面捕获；这里补 `if (ad)` 这类）
+    for m in re.finditer(
+            r'(?<![\w.$])([a-z_$][\w$]*)(?=\s*[)\]}])', _code):
+        nm = m.group(1)
+        if nm in _declared or nm in _builtins or nm in _used:
+            continue
+        # 排除函数参数尾部、以及 `)` 前的关键字
+        if nm in ("return", "typeof", "await", "new", "in", "of", "if",
+                  "for", "while", "catch", "switch"):
+            continue
+        _used.setdefault(nm, _code[:m.start()].count("\n") + 1)
+    r.ok("C16e 面板脚本没有未声明的标识符（防漏改变量名）",
+         not _used,
+         f"疑似未声明={ {k: v for k, v in sorted(_used.items())} or '无' }")
+
     r.ok("C17 截图前校验标签是否在前台",
          "tab.active" in bg and "不能截" not in bg)
 
@@ -460,8 +535,16 @@ def run(r) -> None:
     ]
     miss_f = [f for f in required if not exists(f)]
     r.ok("E1 必需文件一个不少", not miss_f, f"缺={miss_f or '无'}")
-    r.ok("E2 图标是有效 PNG",
-         (PLUGIN_DIR / "icon.png").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n")
+    # ⚠️ 不能直接 read_bytes()：icon.png 不存在会抛 FileNotFoundError，
+    #    整个 run 在 E2 处中止 → E3/E4 永远不跑，run_all 只记一条笼统失败。
+    #    E1 已把 icon.png 列为必需文件，所以"缺失"是必须被报出来的状态。
+    _icon = PLUGIN_DIR / "icon.png"
+    try:
+        _icon_head = _icon.read_bytes()[:8]
+    except OSError as _e:
+        r.ok("E2 图标是有效 PNG", False, f"无法读取 icon.png：{_e}")
+    else:
+        r.ok("E2 图标是有效 PNG", _icon_head == b"\x89PNG\r\n\x1a\n")
 
     kira_manifests = []
     for f in PLUGIN_DIR.rglob("manifest.json"):

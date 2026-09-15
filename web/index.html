@@ -217,9 +217,17 @@ async function refresh() {
     //    一律用 DOM 节点渲染（见下方 _renderDomains），不再拼 HTML 字符串。
     $("domains").innerHTML = "";
     _renderDomains($("domains"), p.allowed_domains, p.blocked_domains);
+    // （白名单条数在下面 warn 判定里用 allowedCount）
 
     let warn = "";
-    if (!p.read_only && !ad.length) {
+    // ⚠️ 必须是**局部变量**：上一轮我把 `const ad = p.allowed_domains || [];`
+    //    删掉、改走 _renderDomains 时漏了这里仍要判"白名单是否为空"，
+    //    于是可写模式下每次 refresh() 都抛 ReferenceError（只读模式因短路
+    //    不会触发，所以很容易漏看）→ 后面的安全提示/确认记录/WS 路径
+    //    全部停止更新。
+    const allowedCount = Array.isArray(p.allowed_domains)
+      ? p.allowed_domains.length : 0;
+    if (!p.read_only && !allowedCount) {
       warn = "⚠️ 当前为可写模式且白名单为空 —— AI 可以操作任意网站。建议至少配置白名单，或开启「写操作需用户确认」。";
     } else if (!p.read_only && !p.require_confirm) {
       warn = "⚠️ 可写模式下未开启二次确认 —— AI 的点击和输入会立即生效。";

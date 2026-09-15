@@ -191,6 +191,38 @@ def run(r) -> None:
                 naked.append(f"行 {i + 1}: {ln.strip()[:50]}")
     r.ok("F1 没有未兜异常的 async 事件回调", not naked,
          f"未处理={naked or '无'}")
+    # ── G1 的**自检夹具** ────────────────────────────────────────────
+    #  CodeRabbit 指出的盲区：模板串整体删除会漏掉 `${...}` 里的标识符。
+    #  这里内联一份与 G1 相同的扫描逻辑，喂一段"只在插值里出现裸标识符"
+    #  的样本，要求它**必须报错**。夹具失效时本项会立刻变红。
+    def _scan(src_text):
+        code = _re2.sub(r'/\*[\s\S]*?\*/', '', src_text)
+        code = _re2.sub(r'(?m)//[^\n]*$', '', code)
+
+        def _keep(m):
+            inner = _re2.findall(r'\$\{([^{}]*)\}', m.group(0))
+            return " " + " ".join(inner) + " "
+
+        code = _re2.sub(r'`(?:[^`\\]|\\.)*`', _keep, code)
+        code = _re2.sub(r'"(?:[^"\\\n]|\\.)*"', '""', code)
+        code = _re2.sub(r"'(?:[^'\\\n]|\\.)*'", "''", code)
+        found = []
+        for m in _re2.finditer(
+                r'(?<![\w.$])\b(socket|reconnectAttempt|reconnectTimer|'
+                r'intentionalClose|userDisconnected|lastError)\b', code):
+            if not code[m.end():m.end() + 3].lstrip().startswith(":"):
+                found.append(m.group(1))
+        return sorted(set(found))
+
+    _fixture = 'const s = `readyState=${socket.readyState}`;'
+    r.ok("G1 自检夹具：插值里的裸标识符必须被抓到",
+         _scan(_fixture) == ["socket"],
+         f"夹具扫描结果={_scan(_fixture)}（期望 ['socket']）")
+    _clean = 'const s = `readyState=${state.socket.readyState}`;'
+    r.ok("G1 自检夹具：正常写法不得误报",
+         _scan(_clean) == [],
+         f"夹具扫描结果={_scan(_clean)}（期望 []）")
+
     r.ok("F2 生命周期回调走了 safeRun 包装",
          "safeRun" in bg_bg and "bootstrap" in bg_bg)
 
@@ -210,7 +242,14 @@ def run(r) -> None:
     # ⚠️ 还要剥掉**字符串字面量**（含反引号模板串）。
     #    注释剥完仍会把 `\`...socket 开着...\`` 这种提示文本里的词
     #    当成标识符引用 —— 那是运行时才存在的字符串，不是变量。
-    bg_code = _re2.sub(r'`(?:[^`\\]|\\.)*`', '``', bg_code)      # 模板串
+    # ⚠️ 模板串不能**整体**删掉：`${socket.readyState}` 里的标识符是
+    #    真实求值的，删了就会漏判（G1 假绿，运行时却 ReferenceError）。
+    #    做法：先把 `${...}` 里的内容**抽出来保留**，再删掉其余模板文本。
+    def _keep_interp(m):
+        inner = _re2.findall(r'\$\{([^{}]*)\}', m.group(0))
+        return " " + " ".join(inner) + " "
+
+    bg_code = _re2.sub(r'`(?:[^`\\]|\\.)*`', _keep_interp, bg_code)  # 模板串
     bg_code = _re2.sub(r'"(?:[^"\\\n]|\\.)*"', '""', bg_code)     # 双引号
     bg_code = _re2.sub(r"'(?:[^'\\\n]|\\.)*'", "''", bg_code)     # 单引号
     naked = []

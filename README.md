@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.11
+# 浏览器插件 (Browser Plugin) 2.1.12
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -183,7 +183,7 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 | `op_timeout_ratio` | number | `0.8` | 仅在上项打开时生效 |
 | `action_timeout` | integer | `20` | 点击/输入等交互的超时（秒） |
 | `idle_close_seconds` | integer | `300` | 空闲这么久后自动关闭无头浏览器，释放 CPU 和内存。`0`=不关 |
-| `screenshot_dir` | string | 插件数据目录/data/temp | 截图保存路径 |
+| `screenshot_dir` | string | 空（即用 `data/temp`） | 截图保存路径；留空时落到 `data/temp` |
 | `download_dir` | string | 插件数据目录/downloads | 下载保存路径 |
 | `screenshot_max_count` | integer | `50` | 截图最多保留张数（元素截图也计入清理） |
 | `screenshot_auto_clean` | switch | `true` | 自动清理旧截图 |
@@ -470,6 +470,49 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.12（2026-09-15）
+
+**按 CodeRabbit 第十轮审查修复 7 项**：
+
+- 🔴 **面板每 3 秒抛一次 ReferenceError**（**我上一轮改出来的回归**）：
+  上一轮我把 `const ad = p.allowed_domains || [];` 删掉、改走 `_renderDomains`，
+  但漏了下面 `if (!p.read_only && !ad.length)` 仍在用 `ad` →
+  可写模式下**初次加载和每 3 秒的轮询都会在这一行抛错**，
+  `catch` 只显示"读取失败"，后面的安全提示、确认记录、WebSocket 路径
+  **全部停止更新**。
+  ⚠️ 只读模式因短路求值（`!p.read_only` 先为 false）**不会**触发，
+  所以这个 bug 在只读配置下完全看不出来 —— 极难发现。
+  → 改用局部 `allowedCount`。
+- **G1 会漏掉模板串插值里的裸标识符**：上一轮我为了修误报，把整个模板串
+  替换成 ` `` `，于是 `` `${socket.readyState}` `` 里的 `socket` 也被删了 ——
+  G1 报 PASS，运行时却 ReferenceError。
+  → 改成**先保留 `${...}` 内容、再删其余模板文本**；
+  并按建议加了**自检夹具**（只在插值里放未定义标识符，要求 G1 必须报错）。
+- **`no_api` 的报错文案误导**：Chrome 138+ 关掉「允许用户脚本」开关会让
+  `chrome.userScripts` **变成 undefined**，与"浏览器版本太低"表现完全一样，
+  但原文案只提版本。→ 补上开关排查步骤（并说明这种情况看起来就像不支持）。
+- **README 的 `screenshot_dir` 默认值**：写成了"插件数据目录/data/temp"
+  把两个位置拼在一起，用户会去插件数据目录里找截图。
+  → 改为"空（即用 `data/temp`）"。
+
+**回归套件 4 项**：
+- **R3 忽略 `start()` 的失败**：启动失败时 `p.available` 是 false，
+  于是 `closed = not p.available` 把**启动失败误报成"空闲清理成功"**（假绿）。
+  → 先判 `start()` 返回值。
+- **E2 读 `icon.png` 未容错**：文件缺失时 `read_bytes()` 抛 `FileNotFoundError`，
+  整个 run 在 E2 中止 → **E3/E4 永不执行**，只记一条笼统失败。
+  → 包 try/except，让缺失只让 E2 FAIL。
+- **stub 里 `ensure_future` 的 task 无强引用**：事件循环只持弱引用，
+  task 可能在异步处理器跑完前被 GC → 弹窗清理/生命周期检查不稳定。
+  → 用集合留住 task（完成即丢弃）。
+- **G1 未覆盖模板插值**（见上，含自检夹具）。
+
+**新增守卫 `C16e`（面板脚本未声明标识符扫描）**：
+本轮那个 `ad` bug 之所以能溜过整个套件，是因为没有任何检查会扫
+`index.html` 里的变量引用。新增的扫描会找出"用了但从没声明"的标识符，
+并正确处理 `catch (e)` / 箭头函数参数，避免误报。
+**反向验证：把 `allowedCount` 改回未声明的 `ad` → C16e 立即 FAIL。**
 
 ### v2.1.11（2026-09-15）
 

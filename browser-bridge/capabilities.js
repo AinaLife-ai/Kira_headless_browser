@@ -59,8 +59,14 @@ async function execJs(params) {
   if (!chk.ok) {
     if (chk.reason === "no_api") {
       throw new Error(
-        "当前浏览器不支持 chrome.userScripts（需要 Chrome/Edge 120+）。" +
-        "可以改用无头后端执行 JavaScript。"
+        "chrome.userScripts 不可用。可能的原因：\n" +
+        "  1）浏览器版本低于 Chrome/Edge 120；\n" +
+        "  2）Chrome 138+ 下**没有打开**扩展详情页里的「允许用户脚本 / " +
+        "Allow User Scripts」开关 —— 关掉它会让 chrome.userScripts " +
+        "直接变成 undefined，\n" +
+        "     这种情况看起来就像是「浏览器不支持」。\n" +
+        "请先在 chrome://extensions → Kira Browser Bridge → 详情 里检查该开关；\n" +
+        "若确认已打开仍不行，可改用无头后端执行 JavaScript。"
       );
     }
     throw new Error(
