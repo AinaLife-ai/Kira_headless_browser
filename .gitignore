@@ -21,3 +21,11 @@ data/plugins/
 Thumbs.db
 .idea/
 .vscode/
+
+# 回归测试产物
+regression/js/node_modules/
+regression/__pycache__/
+regression/checks/__pycache__/
+regression/stubs/**/__pycache__/
+regression/_ext_client.mjs
+regression/js/_click_runner.mjs

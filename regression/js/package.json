@@ -1,0 +1,7 @@
+{
+  "name": "kira-browser-plugin-regression",
+  "private": true,
+  "type": "module",
+  "description": "回归测试用的 JS 依赖（jsdom 用于跑 content.js 的真实 DOM 行为）",
+  "devDependencies": { "jsdom": "^24.0.0" }
+}

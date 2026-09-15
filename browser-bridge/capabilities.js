@@ -88,14 +88,14 @@ async function execJs(params) {
 // ─── 2. 上传文件（内容由插件分块送来）──────────────────────────────────
 
 async function upload(params) {
-  const { selector, name, mime, chunks } = params;
+  const { selector, name, mime, chunks, limit } = params;
   if (!selector) throw new Error("缺少 selector");
   if (!name) throw new Error("缺少文件名");
 
   const tab = await resolveTab(params.tab_id);
   assertInjectable(tab);
 
-  // chunks 是 base64 数组；在扩展侧拼回二进制
+  // chunks 是 base64 数组（由插件侧分块送来）
   const parts = (chunks || []).map((b64) => {
     const bin = atob(b64);
     const buf = new Uint8Array(bin.length);
@@ -103,8 +103,22 @@ async function upload(params) {
     return buf;
   });
 
-  const blob = new Blob(parts, { type: mime || "application/octet-stream" });
-  const fileBase64 = await blobToBase64(blob);
+  // ⚠️ 不要用 Blob + FileReader 绕一圈：MV3 的 background 是 Service Worker，
+  //    而 FileReader 是 DOM API，在 ServiceWorkerGlobalScope 里**不存在** ——
+  //    调用会直接抛 ReferenceError，让整个上传功能失效。
+  //    手上已经是 Uint8Array，直接拼成 base64 即可。
+  let total = 0;
+  for (const p of parts) total += p.length;
+  if (limit > 0 && total > limit) {
+    throw new Error(`文件过大（${total} > ${limit} 字节），已拒绝上传`);
+  }
+  const bytes = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    bytes.set(p, off);
+    off += p.length;
+  }
+  const fileBase64 = bytesToBase64(bytes);
 
   // 内容脚本负责把它塞进 input.files
   const res = await callContent(tab, "upload_blob", {
@@ -114,16 +128,17 @@ async function upload(params) {
     base64: fileBase64,
   }, 60000);
 
-  return { ok: true, url: tab.url, name, size: blob.size, matched: res.matched };
+  return { ok: true, url: tab.url, name, size: total, matched: res.matched };
 }
 
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result).split(",", 2)[1] || "");
-    r.onerror = () => reject(new Error("读取文件内容失败"));
-    r.readAsDataURL(blob);
-  });
+/** Uint8Array → base64（不用 FileReader，Service Worker 里没有它） */
+function bytesToBase64(uint8) {
+  let bin = "";
+  const STEP = 0x8000;
+  for (let i = 0; i < uint8.length; i += STEP) {
+    bin += String.fromCharCode.apply(null, uint8.subarray(i, i + STEP));
+  }
+  return btoa(bin);
 }
 
 // ─── 3. 下载（用用户会话抓取，分块回传）────────────────────────────────

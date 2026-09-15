@@ -1,0 +1,262 @@
+"""扩展桥：真实 WebSocket 端到端（真的服务器 + 真的 JS 客户端）。
+
+这里**不模拟传输层** —— 起一个真的 WebSocket 服务跑插件真实的 ``bridge.py``，
+对面用 Node 的原生 ``WebSocket`` 按扩展协议实现一个客户端。
+所以握手、命令往返、并发、分块、取消恢复、断线重连都是真实验证的。
+
+需要 ``websockets``（pip）。没装就跳过这一组。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import json
+import stat as _stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from ..harness import HERE, PLUGIN_DIR, install_stubs, section
+
+TITLE = "扩展桥端到端（真实 WebSocket）"
+
+CLIENT_JS = r"""
+const PORT = Number(process.argv[2]);
+const url = `ws://127.0.0.1:${PORT}/?token=test`;
+let ws;
+
+function connect() {
+  return new Promise((resolve) => {
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: "hello", protocol: 1, extension_version: "test",
+        browser: "Chrome",
+      }));
+      resolve();
+    };
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "ping") {
+        ws.send(JSON.stringify({type: "pong", ts: Date.now()})); return;
+      }
+      if (msg.type === "welcome") return;
+      if (msg.type === "cmd") {
+        if (msg.name === "download") {
+          // 分块回传（模拟扩展下载）
+          const CHUNK = Buffer.alloc(256 * 1024, 65).toString("base64");
+          for (let i = 0; i < 4; i++) {
+            ws.send(JSON.stringify({type: "chunk", id: msg.id, data: CHUNK}));
+          }
+          ws.send(JSON.stringify({type: "result", id: msg.id, ok: true,
+            data: {ok: true, url: msg.params.url, mime: "application/octet-stream"}}));
+          return;
+        }
+        const data =
+          msg.name === "list_tabs"
+            ? {tabs: [
+                {id: 1, title: "GitHub", url: "https://github.com/x/y", active: true},
+                {id: 2, title: "docs", url: "https://docs.example/a", active: false},
+              ], tab_count: 2}
+          : msg.name === "get_page"
+            ? {url: "https://github.com/x/y", title: "GitHub",
+               content: "x".repeat(12000)}
+            : {ok: true};
+        ws.send(JSON.stringify({type: "result", id: msg.id, ok: true, data}));
+      }
+    };
+    ws.onclose = () => {};
+  });
+}
+
+(async () => { await connect(); })();
+"""
+
+
+def _have(name: str) -> bool:
+    try:
+        importlib.import_module(name)
+        return True
+    except ImportError:
+        return False
+
+
+def run(r) -> None:
+    if not _have("websockets"):
+        r.warn("未安装 websockets，跳过端到端检查",
+               "pip install websockets")
+        return
+
+    install_stubs()
+    import types
+    pkg = "kirabridge_e2e"
+    if pkg not in sys.modules:
+        m = types.ModuleType(pkg)
+        m.__path__ = [str(PLUGIN_DIR)]
+        sys.modules[pkg] = m
+
+    def load(name, path):
+        spec = importlib.util.spec_from_file_location(f"{pkg}.{name}", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[f"{pkg}.{name}"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    import core.logging_manager  # noqa: F401  (stub)
+    P = load("protocol", PLUGIN_DIR / "protocol.py")
+    B = load("bridge", PLUGIN_DIR / "bridge.py")
+
+    client_path = HERE / "_ext_client.mjs"
+    client_path.write_text(CLIENT_JS, encoding="utf-8")
+
+    results = {}
+
+    async def main():
+        import websockets
+
+        bridge = B.BrowserBridge(command_timeout=15.0)
+        port = 8793
+
+        class StarletteLike:
+            """把 websockets 的连接适配成 Starlette 接口（bridge.py 是按后者写的）。"""
+
+            def __init__(self, ws):
+                self._ws = ws
+                self.query_params = {"token": "test"}
+
+            async def accept(self):
+                return None
+
+            async def receive_text(self):
+                return await self._ws.recv()
+
+            async def send_text(self, s):
+                return await self._ws.send(s)
+
+            async def close(self, code=1000, reason=""):
+                try:
+                    await self._ws.close(code, reason)
+                except Exception:
+                    pass
+
+        async def handler(ws):
+            await bridge.handle_connection(StarletteLike(ws))
+
+        server = await websockets.serve(handler, "127.0.0.1", port)
+        proc = subprocess.Popen(["node", str(client_path), str(port)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        t0 = time.time()
+        for _ in range(120):
+            if bridge.connected and getattr(bridge, "_hello", None):
+                break
+            await asyncio.sleep(0.05)
+        results["handshake_ms"] = round((time.time() - t0) * 1000)
+        results["connected"] = bridge.connected
+
+        # 命令往返
+        lat = []
+        for _ in range(10):
+            s = time.perf_counter()
+            await bridge.send_command(P.CMD_LIST_TABS)
+            lat.append((time.perf_counter() - s) * 1000)
+        lat.sort()
+        results["cmd_p50"] = round(lat[len(lat) // 2], 1)
+
+        # 并发扇出
+        t = time.perf_counter()
+        got = await asyncio.gather(*[bridge.send_command(P.CMD_LIST_TABS)
+                                     for _ in range(10)])
+        results["fan10_ms"] = round((time.perf_counter() - t) * 1000, 1)
+        results["fan_ok"] = all(x and x.get("tab_count") == 2 for x in got)
+
+        # 大内容
+        pg = await bridge.send_command(P.CMD_GET_PAGE, {"detail": "text"})
+        results["big_chars"] = len((pg or {}).get("content") or "")
+
+        # 取消泄漏（历史 bug）
+        for _ in range(30):
+            t_ = asyncio.ensure_future(
+                bridge.send_command(P.CMD_WAIT_FOR, {"selector": "#x"},
+                                    timeout=0.001))
+            try:
+                await t_
+            except Exception:
+                pass
+        results["pending_leak"] = len(bridge._pending)
+
+        # 下载分块 → 流式落盘
+        import tempfile
+        out = Path(tempfile.mkdtemp()) / "dl.bin"
+        cid = "testdl"
+        bridge.open_download_sink(cid, str(out), limit=10 * 1024 * 1024)
+        try:
+            await bridge.send_command(P.CMD_DOWNLOAD,
+                                      {"url": "https://example.com/f"},
+                                      timeout=15, cmd_id=cid)
+        except Exception as e:
+            results["dl_err"] = str(e)
+        results["dl_size"] = out.stat().st_size if out.exists() else 0
+        results["dl_sink_cleared"] = cid not in bridge._sinks
+
+        # 断线感知 + 重连
+        proc.terminate()
+        proc.wait(timeout=5)
+        await asyncio.sleep(0.4)
+        results["offline_detected"] = not bridge.connected
+
+        proc2 = subprocess.Popen(["node", str(client_path), str(port)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(120):
+            if bridge.connected:
+                break
+            await asyncio.sleep(0.05)
+        results["reconnected"] = bridge.connected
+        if bridge.connected:
+            rr = await bridge.send_command(P.CMD_LIST_TABS)
+            results["reconnect_ok"] = rr and rr.get("tab_count") == 2
+
+        proc2.terminate()
+        try:
+            proc2.wait(timeout=5)
+        except Exception:
+            proc2.kill()
+        server.close()
+        await server.wait_closed()
+
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        r.ok("E0 端到端脚本可运行", False, f"{type(e).__name__}: {e}")
+        return
+    finally:
+        # 清掉临时客户端脚本，避免污染文件清点
+        try:
+            client_path.unlink()
+        except OSError:
+            pass
+
+    r.ok("E1 真实握手完成", results.get("connected"),
+         f"耗时 {results.get('handshake_ms')}ms")
+    r.ok("E2 命令往返正常", results.get("cmd_p50", 9999) < 500,
+         f"P50={results.get('cmd_p50')}ms")
+    r.ok("E3 10 条并发命令 id 配对正确", results.get("fan_ok"),
+         f"总耗时 {results.get('fan10_ms')}ms")
+    r.ok("E4 12KB 正文完整传输", results.get("big_chars") == 12000,
+         f"收到 {results.get('big_chars')} 字符")
+    r.ok("E5 30 次超时后 _pending 无残留", results.get("pending_leak") == 0,
+         f"残留 {results.get('pending_leak')} 个")
+    r.ok("E6 下载分块流式落盘（不攒内存）",
+         results.get("dl_size") == 4 * 256 * 1024
+         and results.get("dl_sink_cleared"),
+         f"落盘 {results.get('dl_size')} 字节；sink 已清理="
+         f"{results.get('dl_sink_cleared')}")
+    r.ok("E7 扩展断开后立刻感知", results.get("offline_detected"))
+    r.ok("E8 扩展重连后立即可用",
+         results.get("reconnected") and results.get("reconnect_ok"))
+
+    for k in ("handshake_ms", "cmd_p50", "fan10_ms", "big_chars"):
+        if k in results:
+            r.metric(k, results[k])
