@@ -298,10 +298,29 @@ def _matches(host: str, pat: str) -> bool:
                 return True
         return False
 
-    # 4) "bank*" / "github.*"：字面量必须从某个标签起始处对齐
+    # 4) "bank*" / "github.*"：字面量必须从某个标签起始处对齐。
+    #
+    #    ⚠️ 剩余部分**不能**直接用 fnmatch —— fnmatch 的 `*` 会吃掉点号，
+    #       于是 `github.*` 会匹配 `github.com.evil.test`（把 `*` 当成
+    #       "com.evil.test"）。这和之前 `*.example*` 的问题是同一个。
+    #       所以：
+    #         - tail 里含点 → 要求**标签数一致**再逐标签比（不跨域名）
+    #         - tail 只是通配（`*`）→ 允许一个标签，但不允许跨到别的域名
     for i in range(len(labels)):
         rest = ".".join(labels[i:])
-        if rest.startswith(literal) and _glob_match(rest[len(literal):], tail):
+        if not rest.startswith(literal):
+            continue
+        remainder = rest[len(literal):]
+        if not tail:
+            if remainder == "":
+                return True
+            continue
+        # 去掉前导点后按标签逐段比
+        rem_labels = [x for x in remainder.split(".") if x]
+        tail_labels = [x for x in tail.split(".") if x]
+        if len(rem_labels) != len(tail_labels):
+            continue
+        if all(fnmatch.fnmatch(a, b) for a, b in zip(rem_labels, tail_labels)):
             return True
 
     return False

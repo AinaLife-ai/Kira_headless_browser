@@ -140,7 +140,8 @@ def steps_for(browser: str, ext_path: str) -> List[str]:
 
 
 def first_run_notice(plugin_dir: Path, connected: bool,
-                     browsers: Optional[List[Dict[str, str]]] = None) -> Optional[str]:
+                     browsers: Optional[List[Dict[str, str]]] = None,
+                     profile_mode: str = "inherit") -> Optional[str]:
     """扩展没连上时，返回一段给用户看的引导；不需要时返回 None。
 
     这段文字有两个去处：工具返回值（模型会转述给用户）和插件面板。
@@ -168,8 +169,16 @@ def first_run_notice(plugin_dir: Path, connected: bool,
         lines.append(f"  {i}. {s}")
 
     lines.append("")
-    lines.append("💡 不想装扩展也完全可以：AI 会自动用插件自带的无头浏览器干活，"
-                 "只是那样用的是干净的浏览器环境，没有你的登录态。")
+    # ⚠️ 措辞要跟着 profile 模式走：
+    #    inherit 会**复制**真实浏览器数据（含 cookie/登录态），
+    #    说成"干净的浏览器环境、没有登录态"是错的。
+    if (profile_mode or "inherit").lower() == "inherit":
+        lines.append("💡 不想装扩展也完全可以：AI 会用插件自带的无头浏览器，"
+                     "并且会**复制你的浏览器数据**（登录态/Cookie 都在），"
+                     "只是它不是「你眼前那个浏览器」，看不到你当前打开的标签页。")
+    else:
+        lines.append("💡 不想装扩展也完全可以：AI 会自动用插件自带的无头浏览器干活，"
+                     "只是那样用的是干净的浏览器环境，没有你的登录态。")
     lines.append("   装了扩展的好处：用的是**你眼前这个浏览器**，登录态、"
                  "已打开的标签页都能直接用，而且不会和你的浏览器抢锁。")
     return "\n".join(lines)

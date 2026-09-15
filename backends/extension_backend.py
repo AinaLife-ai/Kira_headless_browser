@@ -157,7 +157,12 @@ class ExtensionBackend(Backend):
                 if info.ok and isinstance(info.data, dict):
                     d["title"] = info.data.get("title", "")
             except Exception:
-                d.setdefault("title", "")
+                pass
+            # ⚠️ 兜底必须放在 try 之外 ——
+            #    `_send` 会把失败**转成 OpResult** 而不是抛异常，
+            #    所以 except 分支根本不会走，title 就漏了，
+            #    两后端的返回契约随之被破坏。
+            d.setdefault("title", "")
         return OpResult(data=d, backend=self.name)
 
     async def click(self, selector=None, text=None, index=None, **kw) -> OpResult:
@@ -267,7 +272,10 @@ class ExtensionBackend(Backend):
         import uuid as _uuid
 
         cmd_id = _uuid.uuid4().hex
-        self._bridge.open_download_sink(cmd_id, path, limit=self.max_download_bytes)
+        try:
+            self._bridge.open_download_sink(cmd_id, path, limit=self.max_download_bytes)
+        except Exception as e:
+            return OpResult.fail(f"无法创建下载文件 {path}: {e}", self.name)
         r = await self._send(self._P.CMD_DOWNLOAD,
                              {"url": url, "max_bytes": self.max_download_bytes},
                              timeout=self.download_timeout,

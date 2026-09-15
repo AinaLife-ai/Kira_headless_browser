@@ -268,6 +268,9 @@ def run(r) -> None:
     P = sys.modules["kirabrowser_contract.protocol"]
 
     rf = _render_fields()
+    if not rf:
+        r.ok("解析 _render 的字段", False, "没能从 main.py 里提取到任何渲染分支")
+        return
     tmp = tempfile.mkdtemp()
 
     async def go():

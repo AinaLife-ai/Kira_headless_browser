@@ -138,8 +138,12 @@ def run(r) -> None:
     # 文件名以 _ 开头，已被 .gitignore 覆盖，不会误提交。
     runner = JS_DIR / "_click_runner.mjs"
     runner.write_text(RUNNER, encoding="utf-8")
+    import os as _os
     env = {
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        # ⚠️ 不要写死 PATH —— node 可能装在别的目录（nvm / homebrew / apk）。
+        #    继承当前环境，找不到再补几个常见位置。
+        "PATH": _os.environ.get("PATH", "") +
+                ":/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
         "CONTENT_JS": str(PLUGIN_DIR / "browser-bridge" / "content.js"),
         "NODE_PATH": str(JS_DIR / "node_modules"),
     }

@@ -133,7 +133,7 @@ async function debugInfo(params) {
   return {
     backend: "extension",
     browser: detectBrowser(),
-    connected: !!(socket && socket.readyState === WebSocket.OPEN),
+    connected: !!(state.socket && state.socket.readyState === WebSocket.OPEN),
     user_scripts: chk.ok ? "可用" : `不可用(${chk.reason})`,
     has_downloads_api: !!chrome.downloads,
     has_cookies_api: !!chrome.cookies,

@@ -63,6 +63,9 @@ NEED_ACTIONS = {
 
 def run(r) -> None:
     main = src("main.py")
+    if not main:
+        r.ok("读取 main.py", False, "文件为空或不存在")
+        return
     hb = src("backends/headless_backend.py")
     eb = src("backends/extension_backend.py")
     now = tool_names(main)

@@ -420,13 +420,16 @@
       const { delta_x, delta_y } = payload;
       const el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2)
                  || document.body;
-      el.dispatchEvent(new WheelEvent("wheel", {
+      // dispatchEvent 返回 false 说明监听器调了 preventDefault ——
+      // 页面自己处理了这次滚轮，我们**不能再滚一次**，否则会滚双倍距离。
+      const consumed = !el.dispatchEvent(new WheelEvent("wheel", {
         bubbles: true, cancelable: true,
         deltaX: Number(delta_x) || 0, deltaY: Number(delta_y) || 0,
       }));
-      // 页面对 wheel 不响应时，退化成滚动窗口
-      if (Number(delta_y)) window.scrollBy(0, Number(delta_y));
-      return { ok: true };
+      if (!consumed && Number(delta_y)) {
+        window.scrollBy(0, Number(delta_y));
+      }
+      return { ok: true, consumed };
     },
 
     mouse_drag(payload) {

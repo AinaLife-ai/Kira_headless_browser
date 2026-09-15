@@ -109,6 +109,14 @@ class BrowserPlugin(BasePlugin):
         self.inject_page_state = _b(cfg.get("inject_page_state", True))
         self.panel_auth_required = _b(cfg.get("panel_auth_required", True))
         self.max_content_chars = max(500, int(cfg.get("max_content_chars", 8000) or 8000))
+        # 上传/发送文件的**路径白名单**。
+        # 默认放行任意路径（方便），但可以收紧到指定目录 ——
+        # 否则模型可以借"上传"把本机任意文件外传。
+        self.upload_allow_any_path = _b(cfg.get("upload_allow_any_path", True))
+        _dirs = cfg.get("upload_allowed_dirs") or ["data/files", "data/temp"]
+        if isinstance(_dirs, str):
+            _dirs = _dirs.splitlines()
+        self.upload_allowed_dirs = [str(d).strip() for d in _dirs if str(d).strip()]
 
         try:
             ct = float(cfg.get("command_timeout"))
@@ -228,7 +236,8 @@ class BrowserPlugin(BasePlugin):
         # 等模型第一次用到浏览器工具时顺手带给用户。
         plugin_dir = Path(__file__).resolve().parent
         self._setup_notice = setup_guide.first_run_notice(
-            plugin_dir, connected=self.bridge.connected)
+            plugin_dir, connected=self.bridge.connected,
+            profile_mode=self._headless_cfg.get("headless_profile_mode", "inherit"))
         if self._setup_notice:
             logger.info(
                 "扩展尚未连接。已准备好安装引导；扩展包位置：%s",
@@ -406,6 +415,23 @@ class BrowserPlugin(BasePlugin):
             size = 0
         fname = name or os.path.basename(path)
         return await self._send_chain(event, [File(file=path, name=fname, size=str(size))])
+
+    def _path_allowed(self, resolved: str) -> bool:
+        """上传/发送文件前的路径校验。
+
+        默认 ``upload_allow_any_path=True`` 直接放行；关掉后只允许
+        ``upload_allowed_dirs`` 里的目录（用 realpath 归一，防 `../` 穿越）。
+        """
+        if self.upload_allow_any_path:
+            return True
+        for d in self.upload_allowed_dirs:
+            root = os.path.realpath(d)
+            try:
+                if os.path.commonpath((root, resolved)) == root:
+                    return True
+            except ValueError:
+                continue
+        return False
 
     def _attach_setup_notice(self, text: str) -> str:
         """首次成功调用时，把「装扩展」的引导捎带一次。
@@ -851,10 +877,20 @@ class BrowserPlugin(BasePlugin):
             return await self._call("scroll", for_write=w, direction=d,
                                     amount=kw.get("amount"))
         if a == "upload":
-            if not kw.get("selector") or not kw.get("file_path"):
+            fp = kw.get("file_path")
+            if not kw.get("selector") or not fp:
                 return "action=upload 需要 selector 和 file_path"
+            # ⚠️ 路径白名单必须在**读文件之前**判 ——
+            #    否则模型可以借"上传"把本机任意文件送到远端页面。
+            resolved = os.path.realpath(str(fp))
+            if not os.path.isfile(resolved):
+                return f"❌ 文件不存在或不是常规文件: {fp}"
+            if not self._path_allowed(resolved):
+                return (f"❌ 出于安全考虑，只允许上传以下目录中的文件："
+                        f"{', '.join(self.upload_allowed_dirs)}"
+                        f"（或把配置 upload_allow_any_path 打开）")
             return await self._call("upload_file", for_write=w,
-                                    selector=kw["selector"], file_path=kw["file_path"])
+                                    selector=kw["selector"], file_path=resolved)
         if a == "go_back":
             return await self._call("go_back", for_write=w)
         if a == "refresh":
@@ -1075,7 +1111,9 @@ class BrowserPlugin(BasePlugin):
     async def tool_extension_help(self, event, **_):
         plugin_dir = Path(__file__).resolve().parent
         parts = [setup_guide.compatibility_report(), ""]
-        notice = setup_guide.first_run_notice(plugin_dir, self.bridge.connected)
+        notice = setup_guide.first_run_notice(
+            plugin_dir, self.bridge.connected,
+            profile_mode=self._headless_cfg.get("headless_profile_mode", "inherit"))
         parts.append(notice if notice
                      else "✅ 扩展已连接，AI 现在可以直接操作你正在用的浏览器。")
         d = setup_guide.extension_dir(plugin_dir)

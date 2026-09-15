@@ -392,5 +392,31 @@
         "hint": "通过扩展上传文件时的大小上限。内容要经 WebSocket 传输，别设太大。默认 200MB。"
       }
     }
+  },
+  "upload_allow_any_path": {
+    "name": "Allow Any Upload Path",
+    "type": "switch",
+    "default": true,
+    "hint": "ON (default): any readable file can be uploaded. OFF: only files under upload_allowed_dirs.",
+    "locales": {
+      "zh": {
+        "name": "允许上传任意路径",
+        "hint": "【默认开】允许上传任意可读文件。关闭后只允许 upload_allowed_dirs 里的目录 —— 可防止模型把本机敏感文件外传。"
+      }
+    }
+  },
+  "upload_allowed_dirs": {
+    "name": "Upload Allowed Dirs",
+    "type": "array",
+    "default": [
+      "data/files",
+      "data/temp"
+    ],
+    "locales": {
+      "zh": {
+        "name": "上传目录白名单",
+        "hint": "仅当「允许上传任意路径」关闭时生效。用 realpath 归一，可防 ../ 穿越。"
+      }
+    }
   }
 }

@@ -137,6 +137,41 @@ def run(r) -> None:
     r.ok("A13 JS 模块的 import 符号都在目标模块导出",
          not bad, f"缺={bad or '无'}")
 
+    # A13b **用了但没 import** 的符号
+    #      A13 只验了"import 的符号在目标模块里存在"这一个方向，
+    #      反过来（代码里用了 shared.js 的函数却没 import）完全没查 ——
+    #      而这正是 capabilities.js 出事的地方：运行时 ReferenceError，
+    #      执行JS / 上传 / Cookie 全部不可用。
+    SHARED_SYMBOLS = set()
+    for f_ in ("shared.js", "protocol.js"):
+        if not exists(f"browser-bridge/{f_}"):
+            continue
+        body = ext_file(f_)
+        SHARED_SYMBOLS |= set(re.findall(r'export\s+const\s+(\w+)', body))
+        SHARED_SYMBOLS |= set(re.findall(r'export\s+(?:async\s+)?function\s+(\w+)', body))
+        for m_ in re.finditer(r'export\s*\{([^}]*)\}', body, re.S):
+            SHARED_SYMBOLS |= {x.strip() for x in
+                               m_.group(1).replace("\n", " ").split(",") if x.strip()}
+    unresolved = []
+    for f_ in js_files:
+        if not exists(f"browser-bridge/{f_}") or f_ in ("shared.js", "protocol.js"):
+            continue
+        body = ext_file(f_)
+        code = "\n".join(ln for ln in body.splitlines()
+                         if not ln.strip().startswith(("//", "*", "/*")))
+        have = set()
+        for m_ in re.finditer(r'import\s*\{([^}]*)\}\s*from', code, re.S):
+            have |= {x.strip().split(" as ")[-1].strip()
+                     for x in m_.group(1).replace("\n", " ").split(",") if x.strip()}
+        for sym in sorted(SHARED_SYMBOLS):
+            if sym in have:
+                continue
+            # 只在"真的当标识符用了"时报（避开对象键与字符串）
+            if re.search(rf'(?<![\w.$]){re.escape(sym)}\s*\(', code):
+                unresolved.append(f"{f_} 用了 {sym}() 但没 import")
+    r.ok("A13b 从 shared/protocol 用到的符号都 import 了",
+         not unresolved, f"未 import={unresolved or '无'}")
+
     # A14 硬编码的插件 id 必须与 manifest 一致
     #     （面板 API 路径 / WS 路径 / 扩展路径都依赖它，
     #      对不上就是 404 或连不上，而且"看起来都写对了"）
@@ -184,9 +219,10 @@ def run(r) -> None:
         r.ok("B2 README 配置表里的项都存在",
              not bad_cfg, f"表里 {len(table_keys)} 项；不存在的={bad_cfg or '无'}")
 
+        # 只列**确实已从 schema 移除**的旧配置。
+        # （upload_allow_any_path 在 v2.1.5 恢复了，不再算"已删除"）
         removed = ["use_real_browser_profile", "use_persistent_profile",
-                   "auto_send_screenshot", "vlm_model", "upload_allow_any_path",
-                   "notify_setup_via_chat"]
+                   "auto_send_screenshot", "vlm_model", "notify_setup_via_chat"]
         stale = [x for x in removed if x in readme]
         r.ok("B3 README 不含已删除的配置项", not stale, f"残留={stale or '无'}")
         r.ok("B4 README 版本号与 manifest 一致",
@@ -203,8 +239,9 @@ def run(r) -> None:
     r.ok("C2 有头模式含窗口可见性参数",
          all(k in hb for k in ("--start-maximized", "--window-size",
                                "--window-position")))
+    # 用 .get 而不是直接下标 —— schema 少一个键时不该让整组检查中断
     r.ok("C3 默认等待是 domcontentloaded",
-         sch["default_wait_until"]["default"] == "domcontentloaded"
+         (sch.get("default_wait_until") or {}).get("default") == "domcontentloaded"
          and '"domcontentloaded"' in hb)
     r.ok("C4 元素截图纳入清理",
          "element_*.png" in hb and "screenshot_*.png" in hb)
@@ -212,7 +249,8 @@ def run(r) -> None:
     r.ok("C6 页面自愈存在",
          all(k in hb for k in ("_page_alive", "_ensure_page", "_recover")))
     r.ok("C7 空闲回收存在",
-         "_idle_watchdog" in hb and sch["idle_close_seconds"]["default"] == 300)
+         "_idle_watchdog" in hb
+         and (sch.get("idle_close_seconds") or {}).get("default") == 300)
     r.ok("C8 下载流式落盘（不占内存）",
          "iter_chunked" in hb and "await r.read()" not in hb
          and "await response.read()" not in hb)

@@ -1,3 +1,8 @@
+import { MSG } from "./protocol.js";
+import {
+  resolveTab, assertInjectable, callContent, sendRaw, sendChunk,
+} from "./shared.js";
+
 /**
  * 扩展桥补齐的三项能力（在 background.js 里实现）：
  *
@@ -70,13 +75,24 @@ async function execJs(params) {
   //    那样只能接受**单条表达式**，多语句（`const a=1; return a;`）会语法错误。
   //    正确做法：整段当**函数体**执行，用户既可以直接写表达式
   //    （自动补 return），也可以写多语句 + 显式 return。
+  // ⚠️ **只在 SyntaxError 时**才退回函数体模式。
+  //    如果对任何异常都退回，一条"能解析但运行到一半抛错"的表达式
+  //    （例如 `items.forEach(i => post(i))`）会被**执行两遍** ——
+  //    副作用重复，这比报错危险得多。
   const wrapped = [
     "(function(){",
+    "  const __src = " + JSON.stringify(script) + ";",
+    "  let expr;",
     "  try {",
-    "    const __src = " + JSON.stringify(script) + ";",
-    "    // 先用「当表达式」试一次；不行再当函数体跑（多语句场景）",
-    "    try { return eval(" + JSON.stringify("(" + script + ")") + "); }",
-    "    catch (e) { /* 落到函数体模式 */ }",
+    "    // 用 new Function 只做**语法检查**，不执行",
+    "    new Function('return (' + __src + ')');",
+    "    expr = true;",
+    "  } catch (e) {",
+    "    if (e instanceof SyntaxError) { expr = false; }",
+    "    else { return { __error: String(e && e.message || e) }; }",
+    "  }",
+    "  try {",
+    "    if (expr) { return eval('(' + __src + ')'); }",
     "    return (new Function(__src))();",
     "  } catch (e) { return { __error: String(e && e.message || e) }; }",
     "})()",

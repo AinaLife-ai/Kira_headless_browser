@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.4
+# 浏览器插件 (Browser Plugin) 2.1.5
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -125,10 +125,24 @@ Chromium 没有给本地程序留"静默安装扩展"的正规接口：
 | `persistent` | 插件自己的 profile（与真实浏览器无关） |
 | `temp` | 临时目录，用完即弃 |
 
-**关于 `inherit`**：登录态、Cookie、书签全都在。为什么复制出来的 Cookie 还能用？
-Chrome 80+ 的 Cookie 用 AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/
-OSCrypt（Linux）包裹，这三者都是**用户级、与路径无关**的——同一台机器同一个用户，
-副本照样能解密。
+**关于 `inherit`**：登录态、Cookie、书签一般都能用。Chrome 80+ 的 Cookie 用
+AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Linux）包裹 ——
+这些保护是**用户级（多数情况下）与路径无关**的，同一台机器同一用户下副本通常能解密。
+
+> ⚠️ **但 Windows 上有个例外**：Chrome 127 起引入了
+> **App-Bound Encryption（应用绑定加密）**，密钥与**应用身份**绑定，
+> 不再只是绑定到"用户+机器"。用另一个 Chromium 应用（比如 Playwright 拉起的
+> 那个）去打开复制出来的 profile 时，**部分 Cookie 可能解密失败**。
+>
+> 遇到这种情况不必折腾 —— 用 `browser_cookie` 即可把登录态转过去：
+>
+> ```
+> browser_cookie(action="export")     # 从你自己的浏览器里导出
+> browser_cookie(action="import", …)  # 直接写进无头后端（按域写入，不依赖解密）
+> ```
+>
+> 这也是为什么 `inherit` 复制失败时会**自动回退**到插件自己的 profile，
+> 而不是直接报错——你仍可以用 cookie 导入把登录态补上。
 
 复制时会跳过 `Cache` / `GPUCache` / `Service Worker` 等大目录（否则要复制好几个 GB），
 并删掉副本里的 `SingletonLock` 等锁文件（否则 Playwright 会以为"profile 正在运行"）。
@@ -177,6 +191,8 @@ OSCrypt（Linux）包裹，这三者都是**用户级、与路径无关**的—�
 | `download_max_count` | integer | `100` | 下载目录最多保留文件数 |
 | `download_max_bytes` | integer | `2147483648` | 单个下载大小上限（2GB）。下载是**流式落盘**，无论多大都不占内存 |
 | `upload_max_bytes` | integer | `209715200` | 上传大小上限（200MB）。内容要经 WebSocket 传输，别设太大 |
+| `upload_allow_any_path` | switch | `true` | 是否允许上传任意路径的文件。**关掉后只允许 `upload_allowed_dirs` 里的目录** —— 可防止模型把本机敏感文件外传 |
+| `upload_allowed_dirs` | list | `["data/files","data/temp"]` | 上传目录白名单（仅在上项关闭时生效）。用 realpath 归一，可防 `../` 穿越 |
 
 ---
 
@@ -453,6 +469,48 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.5（2026-09-15）
+
+**按 CodeRabbit 第三轮审查修复 13 项**（含又一批 ReferenceError 级问题）：
+
+- 🔴 **`capabilities.js` 没有任何 import** —— 它调用的 `resolveTab` /
+  `assertInjectable` / `callContent` / `sendRaw` / `sendChunk` / `MSG` 全都没导入，
+  ES 模块严格模式下直接 `ReferenceError`：**执行JS、上传、Cookie 导出全不可用**，
+  非空下载也会在 `sendChunk` 崩掉。（我上一轮"已修"其实没落到位。）
+  → 补上 import，并新增检查 **A13b：用了但没 import 的符号**
+  （上一轮加的 A13 只验了反方向，漏掉了这条）。
+- 🔴 **上传路径白名单在合并时丢了** —— `upload_allow_any_path` /
+  `upload_allowed_dirs` 两个配置项连同校验逻辑一起消失，
+  模型可借"上传"把**本机任意文件**外传（CWE-200）。→ 已恢复，
+  且校验放在**读文件之前**（用 realpath 归一，防 `../` 穿越）。
+- **`github.*` 会匹配 `github.com.evil.test`** —— `fnmatch` 的 `*` 跨点号，
+  等于把白名单授给了攻击者域（CWE-284）。→ 改为按标签边界逐段匹配。
+- **弹窗回收会关掉自己正在创建的页面** —— Playwright 的 `context.new_page()`
+  在 **await 返回之前**就派发 `page` 事件，那一刻 `_page` 还指着旧页，
+  回收逻辑会把新建的这张关掉。→ 加"创建中"守卫。
+- **`open_download_sink` 打不开文件时只记日志就 return** —— 后续 chunk 全被丢，
+  `_finish_sink` 返回 None，调用方**报告下载成功但磁盘上没文件**。→ 改为抛出。
+- **`userDisconnected` 没持久化** —— MV3 的 Service Worker 被回收再唤醒后标记丢失，
+  用户点「断开」约 30 秒后连接自己回来，弹窗那句"自动重连已暂停"成了假话。
+  → 存进 `chrome.storage.local`。
+- **`exec_js` 的表达式/函数体回退会在任何异常时触发** ——
+  一条"能解析但运行到一半抛错"的脚本（如 `items.forEach(i => post(i))`）
+  会被**执行两遍**，副作用重复。→ 只在 `SyntaxError` 时回退。
+- **`scroll`/`mouse_wheel` 会滚双倍距离** —— `dispatchEvent` 返回 false 说明
+  页面已 `preventDefault` 自己处理了，代码却照样再滚一次窗口。
+- **`click_count` 不产生双击** —— 循环 down/up 会让页面收到"两次独立单击"，
+  `dblclick` 永不触发。→ 改用 `mouse.click(click_count=n)`。
+- **`navigate` 取标题失败时漏 `title` 字段** —— `_send` 把失败转成 `OpResult`
+  而非抛异常，`except` 分支根本不走，兜底 `setdefault` 被跳过，破坏两后端契约。
+- 文档修正：popup 的「默认只读」已过时（实际默认可读写）；
+  `first_run_notice` 把 `inherit` 模式说成"没有登录态"是错的；
+  README 补充 **Windows App-Bound Encryption**（Chrome 127+）会让部分 Cookie
+  无法跨应用解密，并建议此时改用 `browser_cookie` 导出/导入。
+
+另有 5 项是**回归测试套件自身**：`PATH` 写死导致找不到 node、子进程引用
+可能被 GC 提前回收、`defined` 没算类体赋值、schema 直接下标会让整组中断、
+以及上一轮那个"顶层模块全被跳过"的 A1（等于大部分文件没验）。
 
 ### v2.1.4（2026-09-15）
 

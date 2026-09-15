@@ -88,8 +88,8 @@ export async function connect({ manual = false } = {}) {
   // 手动连接是用户明确表达「我要连」，允许覆盖上一次的手动断开；
   // 自动重连/保活则必须尊重它，否则「断开」形同虚设。
   if (manual) {
-    state.userDisconnected = false;
-  } else if (state.userDisconnected) {
+    await setUserDisconnected(false);
+  } else if (await isUserDisconnected()) {
     return { ok: false, error: "用户已手动断开" };
   }
 
@@ -164,7 +164,7 @@ export async function connect({ manual = false } = {}) {
 
 export async function disconnect() {
   state.intentionalClose = true;
-  state.userDisconnected = true;
+  await setUserDisconnected(true);
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
 
@@ -176,6 +176,23 @@ export async function disconnect() {
   chrome.action.setBadgeText({ text: "" });
   await setStatus({ connected: false, error: "" });
   return { ok: true };
+}
+
+/** 用户是否手动断过 —— 读持久化值（Service Worker 会被回收，内存不可靠） */
+async function isUserDisconnected() {
+  try {
+    const s = await chrome.storage.local.get(STORE.USER_DISCONNECTED);
+    return s[STORE.USER_DISCONNECTED] === true;
+  } catch (_) {
+    return state.userDisconnected;
+  }
+}
+
+async function setUserDisconnected(v) {
+  state.userDisconnected = !!v;
+  try {
+    await chrome.storage.local.set({ [STORE.USER_DISCONNECTED]: !!v });
+  } catch (_) {}
 }
 
 function scheduleReconnect() {
@@ -199,7 +216,12 @@ function scheduleReconnect() {
 async function ensureAlive() {
   const cfg = await getConfig();
   if (!cfg.autoConnect || !cfg.token) return;
-  if (state.userDisconnected) return;
+  // ⚠️ 必须从 storage 读，不能只看内存里的 state ——
+  //    MV3 的 Service Worker 空闲会被回收，保活闹钟（30s）再把它唤醒。
+  //    唤醒后内存里的 userDisconnected 又变回 false，
+  //    于是「断开」大约半分钟后连接自己回来了，弹窗那句
+  //    「自动重连已暂停」就成了假话。
+  if (await isUserDisconnected()) return;
 
   if (!state.socket || state.socket.readyState === WebSocket.CLOSED || state.socket.readyState === WebSocket.CLOSING) {
     console.log("[KiraBridge] 保活检测：连接已断，尝试重连");

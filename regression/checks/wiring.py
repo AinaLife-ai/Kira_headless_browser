@@ -165,27 +165,18 @@ def run(r) -> None:
     # background.js 里还留着 `socket.onopen = ...` 这种裸引用 ——
     # 严格模式下直接 ReferenceError，**扩展永远连不上**。
     import re as _re
-    declared = set(_re.findall(r'\b(?:let|const|var|function|class)\s+(\w+)', bg_bg))
-    imported = set()
-    for m in _re.finditer(r'import\s*\{([^}]*)\}\s*from', bg_bg, _re.S):
-        imported |= {x.strip().split(" as ")[-1].strip()
-                     for x in m.group(1).replace("\n", " ").split(",") if x.strip()}
-    KNOWN_GLOBALS = {
-        "chrome", "WebSocket", "console", "setTimeout", "clearTimeout",
-        "setInterval", "clearInterval", "Promise", "JSON", "Object", "Array",
-        "Math", "Date", "Number", "String", "Boolean", "Error", "Map", "Set",
-        "URL", "fetch", "atob", "btoa", "Blob", "Uint8Array", "File", "FileReader",
-        "DataTransfer", "navigator", "state",
-    }
+    # 只看真正的代码行 —— 注释里提到这些名字是**正常的**（说明为什么这么写）
+    bg_code = "\n".join(
+        ln for ln in bg_bg.splitlines()
+        if not ln.strip().startswith(("//", "*", "/*")))
     naked = []
     for m in _re.finditer(r'(?<![\w.$])\b(socket|reconnectAttempt|reconnectTimer|'
-                          r'intentionalClose|userDisconnected|lastError)\b', bg_bg):
+                          r'intentionalClose|userDisconnected|lastError)\b', bg_code):
         # 排除"对象字面量的键"（`socket: "OPEN"`）—— 那不是引用
-        after = bg_bg[m.end():m.end() + 3].lstrip()
+        after = bg_code[m.end():m.end() + 3].lstrip()
         if after.startswith(":"):
             continue
         naked.append(m.group(1))
     naked = sorted(set(naked))
-    _ = (declared, imported, KNOWN_GLOBALS)
     r.ok("G1 没有裸的状态标识符（都走 state.xxx）", not naked,
          f"裸引用={naked or '无'} —— ES 模块严格模式下会 ReferenceError")

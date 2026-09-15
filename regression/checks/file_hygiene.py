@@ -56,8 +56,12 @@ def run(r) -> None:
     # ── A. Python 引用关系 ──────────────────────────────────────────
     section("A. Python 文件引用关系")
     all_py = "\n".join((PLUGIN_DIR / f).read_text(encoding="utf-8") for f in py)
+    # ⚠️ 顶层的 main.py/__init__.py 是入口，本来就不会被 import ——
+    #    但其它顶层模块必须检查（之前一条 `f.parent == Path(".")` 把
+    #    **所有顶层模块**都跳过了，等于大部分文件根本没验）。
+    ENTRY_FILES = {"main.py", "__init__.py"}
     for f in py:
-        if f.name in ("main.py", "__init__.py") or f.parent == Path("."):
+        if f.name in ENTRY_FILES:
             continue
         name = f.stem
         used = (f"from .{name} import" in all_py

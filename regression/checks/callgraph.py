@@ -59,6 +59,16 @@ def run(r) -> None:
         for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
             defined = {m.name for m in cls.body
                        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            # ⚠️ 类体里的 **赋值** 也是"存在的东西"：
+            #    类属性（`FOO = {...}`）和赋值出来的方法别名都算，
+            #    否则会误报"未定义"。
+            for st in cls.body:
+                if isinstance(st, ast.Assign):
+                    for t in st.targets:
+                        if isinstance(t, ast.Name):
+                            defined.add(t.id)
+                elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                    defined.add(st.target.id)
             # 类里赋值的属性（self.x = ... 在 __init__ 里）也算"存在"
             for n in ast.walk(cls):
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \

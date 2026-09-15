@@ -111,4 +111,7 @@ export const STORE = {
   PORT: "kb_port",
   AUTO_CONNECT: "kb_auto_connect",
   LAST_STATUS: "kb_last_status",
+  /** 用户是否手动点过「断开」—— 必须持久化：
+   *  MV3 的 Service Worker 会被回收，内存标记撑不过一次回收。 */
+  USER_DISCONNECTED: "kb_user_disconnected",
 };

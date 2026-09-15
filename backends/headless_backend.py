@@ -424,8 +424,7 @@ class HeadlessBackend(Backend):
                 )
 
             await self._hook_popups()
-            self._page = await self._context.new_page()
-            self._own_page = self._page
+            self._adopt_page(await self._new_page())
             self._page.set_default_timeout(self.timeout * 1000)
             logger.info(f"无头后端已启动: {self._desc}")
             self._touch()
@@ -439,8 +438,39 @@ class HeadlessBackend(Backend):
         except Exception as e:
             logger.debug(f"注册新页面监听失败: {e}")
 
+    async def _new_page(self):
+        """插件自己开新页面的**唯一入口**。
+
+        new_page() 会先派发 page 事件再返回，所以必须先登记到 _creating_pages，
+        否则 _on_new_page 会把它当成"用户/广告开出来的页面"直接关掉。
+        """
+        # 先占位：用一个哨兵对象登记，事件回调只要看到"有创建在进行"就跳过
+        self._creating = getattr(self, "_creating", 0) + 1
+        try:
+            page = await self._context.new_page()
+            return page
+        finally:
+            self._creating -= 1
+
+    def _adopt_page(self, page):
+        """把新页面正式认领为"我们的页面"。
+
+        ``_creating_pages`` 只在"已创建但可能还没被事件回调看到"的窗口期有用，
+        认领之后 _page/_own_page 已经指过去了。
+        这里只保留最近一张，避免集合长期增长。
+        """
+        self._page = page
+        self._own_page = page
+        self._creating_pages = {page}
+        return page
+
     async def _on_new_page(self, page):
         try:
+            # 正在创建中的页面不回收（见 _new_page 的说明）
+            if getattr(self, "_creating", 0) > 0:
+                return
+            if page in getattr(self, "_creating_pages", ()):  # 已认领
+                return
             if page is self._page or page is self._own_page:
                 return
             logger.info("回收非插件页面（弹窗/新标签）")
@@ -472,6 +502,8 @@ class HeadlessBackend(Backend):
                     logger.debug(f"关闭{label}失败: {e}")
                 setattr(self, attr, None)
         self._own_page = None
+        self._creating_pages = set()
+        self._creating = 0
         if self._playwright:
             try:
                 await self._playwright.stop()
@@ -541,7 +573,7 @@ class HeadlessBackend(Backend):
                 self._page = reuse
                 logger.info("原页面已失效，复用浏览器里剩余的可用标签页")
             else:
-                self._page = await self._context.new_page()
+                self._adopt_page(await self._new_page())
                 logger.info("原页面已失效，已新建页面")
             self._own_page = self._page
             try:
@@ -708,9 +740,7 @@ class HeadlessBackend(Backend):
         try:
             if new_tab:
                 self._own_page = None
-                page = await self._context.new_page()
-                self._page = page
-                self._own_page = page
+                page = self._adopt_page(await self._new_page())
             # 默认 domcontentloaded：networkidle 已被官方标注不推荐，
             # 现代页面可能永远不空闲，白等 + 让页面持续跑
             await self._op(self._page.goto(url, wait_until=self.wait_until,
@@ -962,9 +992,19 @@ class HeadlessBackend(Backend):
         try:
             if x is not None and y is not None:
                 await self._op(self._page.mouse.move(int(x), int(y)), "移动鼠标")
-            for _ in range(max(1, int(click_count or 1))):
-                await self._op(self._page.mouse.down(button=button), "按下鼠标")
-                await self._op(self._page.mouse.up(button=button), "释放鼠标")
+            # ⚠️ 不能循环 down/up —— 那样每次的 clickCount 都是 1，
+            #    页面收到的是"两次独立单击"而不是一次双击，
+            #    `dblclick` 事件永远不触发（双击选词、双击打开都会失效）。
+            #    mouse.click 支持 click_count，会正确设置 detail/clickCount。
+            n = max(1, int(click_count or 1))
+            if x is not None and y is not None:
+                await self._op(self._page.mouse.click(int(x), int(y),
+                                                      button=button, click_count=n),
+                               "坐标点击")
+            else:
+                for _ in range(n):
+                    await self._op(self._page.mouse.down(button=button), "按下鼠标")
+                    await self._op(self._page.mouse.up(button=button), "释放鼠标")
             await asyncio.sleep(0.2)
             return OpResult(data={"ok": True, "navigated": False,
                                   "url": self._page.url}, backend=self.name)

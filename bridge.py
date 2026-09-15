@@ -447,12 +447,14 @@ class BrowserBridge:
     # ─── 下载分块接收器 ──────────────────────────────────────────────
 
     def open_download_sink(self, cmd_id: str, path: str, limit: int = 0) -> None:
-        """为某个下载命令开一个落盘接收器（调用方在 send_command 之前调）。"""
-        try:
-            h = open(path, "wb")
-        except Exception as e:
-            logger.warning(f"无法打开下载目标 {path}: {e}")
-            return
+        """为某个下载命令开一个落盘接收器（调用方在 send_command 之前调）。
+
+        ⚠️ 打不开**必须抛出去**，不能只记日志就 return ——
+        那样 sink 没注册，后续所有 chunk 会被丢掉，`_finish_sink` 返回 None，
+        `send_command` 就把扩展的原始 payload（ok:true, bytes:N）原样返回，
+        调用方会**报告下载成功但磁盘上根本没有文件**。
+        """
+        h = open(path, "wb")     # 失败就让调用方看到
         self._sinks[cmd_id] = {"path": path, "handle": h, "total": 0, "limit": limit}
 
     def _finish_sink(self, cmd_id: str):

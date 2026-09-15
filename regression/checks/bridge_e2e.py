@@ -118,6 +118,7 @@ def run(r) -> None:
     client_path.write_text(CLIENT_JS, encoding="utf-8")
 
     results = {}
+    _procs = []          # 持有子进程引用，避免被 GC 提前回收
 
     async def main():
         import websockets
@@ -151,8 +152,10 @@ def run(r) -> None:
             await bridge.handle_connection(StarletteLike(ws))
 
         server = await websockets.serve(handler, "127.0.0.1", port)
+        # 持有引用直到结束：Popen 被 GC 回收会提前杀掉子进程
         proc = subprocess.Popen(["node", str(client_path), str(port)],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _procs.append(proc)
 
         t0 = time.time()
         for _ in range(120):
@@ -215,6 +218,7 @@ def run(r) -> None:
 
         proc2 = subprocess.Popen(["node", str(client_path), str(port)],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _procs.append(proc2)
         for _ in range(120):
             if bridge.connected:
                 break
