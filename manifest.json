@@ -1,7 +1,7 @@
 {
   "display_name": "Browser",
   "plugin_id": "headless_browser",
-  "version": "2.1.12",
+  "version": "2.1.13",
   "icon": "icon.png",
   "author": "nyx+znq19+萧洋",
   "description": "One browser plugin, two fully-symmetric backends, 12 action-based tools. Drives YOUR browser through the extension (real login state, zero conflict) or a plugin-owned headless Chromium. Both backends support read/click/type/JS/upload/download/cookies/keyboard/mouse. CPU/memory guarded, idle auto-close, page self-healing.",

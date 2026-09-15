@@ -114,7 +114,11 @@ def run(r) -> None:
     async def r2():
         reset()
         p = _mk(hbmod, tmp)
-        await p.start()
+        # ⚠️ 先判启动是否成功再解引用 p._page —— 启动失败时 _page 是 None，
+        #    这里会抛 AttributeError，把"启动失败"伪装成一条无关的崩溃。
+        err = await p.start()
+        if err or not p.available or p._page is None:
+            return False, f"浏览器未能启动（{err or 'available/_page 不可用'}）"
         for _ in range(5):
             p._page._open_popup("https://ad.example/")
             await asyncio.sleep(0)
@@ -169,13 +173,37 @@ def run(r) -> None:
     left = os.listdir(p.screenshot_dir)
     n_elem = len([f for f in left if f.startswith("element_")])
     n_shot = len([f for f in left if f.startswith("screenshot_")])
-    # 三条一起断，缺一不可：
-    #   * 总数 == 上限 3
-    #   * element_ 有剩（防"元素截图被全删"）
-    #   * 留下的正是较新的那批（证明按时间清理，不是按文件名）
-    r.ok("R4 元素截图参与清理（到上限 + 未全删 + 按时间保新）",
-         len(left) == 3 and n_elem >= 1 and n_shot == 3 - n_elem,
-         f"总计 {len(left)}（期望 3）；element_* {n_elem}；screenshot_* {n_shot}")
+    # 本次构造：element_ 最新 → 留下的应当**正好是 3 张 element_**。
+    r.ok("R4 元素截图参与清理（到上限 + 全留最新的 element_）",
+         len(left) == 3 and n_elem == 3 and n_shot == 0,
+         f"总计 {len(left)}（期望 3）；element_* {n_elem}（期望 3）；"
+         f"screenshot_* {n_shot}（期望 0）")
+
+    # ⚠️ 反过来再跑一次：screenshot_ 最新 → 应留下 3 张 screenshot_。
+    #    只测一个方向的话，"永远优先保留 element_"的 bug 也能通过；
+    #    两个方向都测才能证明是**按时间**清理。
+    reset()
+    p = _mk(hbmod, tmp, screenshot_max_count=3)
+    os.makedirs(p.screenshot_dir, exist_ok=True)
+    _t2 = time.time()
+    for i in range(5):
+        fp = os.path.join(p.screenshot_dir, f"element_{i}.png")
+        with open(fp, "wb") as f:
+            f.write(b"x")
+        os.utime(fp, (_t2 - 100, _t2 - 100))       # 元素截图调旧
+    for i in range(5):
+        fp = os.path.join(p.screenshot_dir, f"screenshot_{i}.png")
+        with open(fp, "wb") as f:
+            f.write(b"x")
+        os.utime(fp, (_t2, _t2))                   # 普通截图最新
+    p._clean_screenshots()
+    left2 = os.listdir(p.screenshot_dir)
+    n_elem2 = len([f for f in left2 if f.startswith("element_")])
+    n_shot2 = len([f for f in left2 if f.startswith("screenshot_")])
+    r.ok("R4b 反向：screenshot_ 最新时留下 3 张 screenshot_（证明按时间而非按类型）",
+         len(left2) == 3 and n_shot2 == 3 and n_elem2 == 0,
+         f"总计 {len(left2)}（期望 3）；element_* {n_elem2}（期望 0）；"
+         f"screenshot_* {n_shot2}（期望 3）")
 
     # ── R5 下载目录清理 ─────────────────────────────────────────────
     p = _mk(hbmod, tmp, download_max_count=5)

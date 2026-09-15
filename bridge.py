@@ -345,6 +345,14 @@ class BrowserBridge:
             except Exception as e:
                 logger.warning(f"写入下载分块失败: {e}")
                 self._abort_sink(cid, e)
+                # ⚠️ 必须**同样把这个 future resolve 掉**（上面"超上限"分支就是
+                #    这么做的）。只 abort sink 的话 future 一直挂着 →
+                #    send_command 会干等到 download_timeout（默认 600 秒），
+                #    磁盘写满 / base64 非法这种情况要卡 10 分钟才报错。
+                fut = self._pending.pop(cid, None)
+                if fut and not fut.done():
+                    fut.set_result(P.BridgeResult(
+                        cmd_id=cid, ok=False, error=f"写入下载分块失败: {e}"))
 
         elif mtype == P.MSG_PONG:
             pass

@@ -275,7 +275,11 @@ def run(r) -> None:
     if not rf:
         r.ok("解析 _render 的字段", False, "没能从 main.py 里提取到任何渲染分支")
         return
-    tmp = tempfile.mkdtemp()
+    # ⚠️ 用 TemporaryDirectory：mkdtemp 留下的 profile/screenshot/download/
+    #    upload 夹具目录从不清理（失败路径也留），会一路堆积。
+    _td = tempfile.TemporaryDirectory(prefix="kira_contract_")
+    tmp = _td.name
+    _ = _td   # 持有引用，别被 GC 提前回收
 
     async def go():
         return await _collect_hb(hbmod, tmp), await _collect_eb(ebmod, P)
@@ -288,8 +292,9 @@ def run(r) -> None:
     for m in sorted(rf):
         if not rf[m]:
             continue
-        if m not in hb_keys and m not in eb_keys:
-            continue
+        # ⚠️ 不要"两边都没有就跳过" —— 那等于放过"渲染层要读的字段
+        #    两个后端都不返回"这种最严重的情况。`.get(m, set())` 已经把
+        #    "缺失"表达成空集合了，继续走正常校验即可。
         checked += 1
         miss_h = sorted(rf[m] - hb_keys.get(m, set()))
         miss_e = sorted(rf[m] - eb_keys.get(m, set()))

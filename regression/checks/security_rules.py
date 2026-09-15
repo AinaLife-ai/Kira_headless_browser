@@ -8,6 +8,35 @@ from __future__ import annotations
 
 import re
 
+
+#: buildWsUrl 行为探针（B2.7）：__URI__ 会被换成 protocol.js 的 file:// URI
+_PROBE_JS = r'''
+import { buildWsUrl } from "__URI__";
+const cases = [
+  ["::1",             "ws://[::1]:5267"],
+  ["0:0:0:0:0:0:0:1", "ws://[0:0:0:0:0:0:0:1]:5267"],
+  ["::ffff:127.0.0.1","ws://[::ffff:127.0.0.1]:5267"],
+  ["[::1]",           "ws://[::1]:5267"],
+  ["127.0.0.1",       "ws://127.0.0.1:5267"],
+  ["localhost:5267",  "ws://localhost:5267"],
+  ["example.com",     "wss://example.com:5267"],
+];
+let bad = [];
+for (const [h, want] of cases) {
+  let got;
+  try { got = buildWsUrl(h, 5267, "T"); } catch (e) { got = "THREW:" + e.message; }
+  if (!got.startsWith(want)) bad.push(h + " -> " + got + " (expected " + want + ")");
+}
+if (bad.length) { console.log(bad.join(" ; ")); process.exit(1); }
+console.log("OK");
+'''
+
+import os as _os
+import shutil as _sh
+import subprocess as _sp
+import tempfile as _tf
+from pathlib import Path
+
 from ..harness import PLUGIN_DIR, load_module, section, src
 
 TITLE = "安全规则（域名 / 本机地址）"
@@ -110,13 +139,53 @@ def run(r) -> None:
     cmds = src("browser-bridge/commands.js")
     fn = cmds.find("async function listFiles(")
     seg = cmds[fn:fn + 1600] if fn > 0 else ""
-    # 取出 map((d) => ({ ... })) 里的返回字段
+    # 取出 map((d) => ({ ... })) 里的返回字段。
+    # ⚠️ 必须同时识别**简写属性** `{ name, path }` ——
+    #    只匹配 `path:` 的话，简写形式的 path 会漏掉 →
+    #    "结果里暴露了本地绝对路径"就检测不出来了。
     keys = set()
-    for mm in re.finditer(r'size\s*:|mtime\s*:|name\s*:|path\s*:', seg):
-        keys.add(mm.group(0).strip().rstrip(":"))
+    for mm in re.finditer(r'([a-z_]+)\s*:', seg):        # 显式 `path: x`
+        keys.add(mm.group(1))
+    for mm in re.finditer(r'\{\s*([^{}]*?)\s*\}', seg):   # 对象字面量内部
+        for part in mm.group(1).split(","):
+            part = part.strip()
+            if not part or ":" in part:
+                continue
+            if re.fullmatch(r'[A-Za-z_$][\w$]*', part):
+                keys.add(part)                            # 简写 `{ name, path }`
     r.ok("B2.6 下载列表不返回绝对路径（键里没有 path）",
          "path" not in keys and "name" in keys,
          f"listFiles 返回的字段={sorted(keys)}")
+
+    # ── buildWsUrl 的 IPv6 / 端口解析（真实跑 JS）────────
+    #  ⚠️ 必须**真的执行** protocol.js：
+    #  第七轮我曾把"修好了"写进提交信息和 README，
+    #  但 protocol.js **根本没进那次提交**，一行都没改。
+    #  当时没有任何检查发现得了 —— 因为全是文本匹配。
+    if _sh.which("node"):
+        _probe = _PROBE_JS.replace("__URI__",
+                                   (PLUGIN_DIR / "browser-bridge" / "protocol.js").as_uri())
+        _tf2 = Path(_tf.gettempdir()) / (
+            f"_kira_ws_{_os.getpid()}_{next(_tf._get_candidate_names())}.mjs")
+        try:
+            _tf2.write_text(_probe, encoding="utf-8")
+            _rr = _sp.run(["node", str(_tf2)], capture_output=True,
+                          text=True, timeout=30)
+            _out = (_rr.stdout or "").strip()
+            r.ok("B2.7 buildWsUrl \u6b63\u786e\u89e3\u6790\u88f8 IPv6\uff08\u771f\u8dd1 JS\uff09",
+                 _rr.returncode == 0 and _out.endswith("OK"),
+                 _out[:160] or (_rr.stderr or "")[:160])
+        except Exception as e:
+            r.ok("B2.7 buildWsUrl \u6b63\u786e\u89e3\u6790\u88f8 IPv6\uff08\u771f\u8dd1 JS\uff09",
+                 False, str(e)[:120])
+        finally:
+            try:
+                _tf2.unlink()
+            except Exception:
+                pass
+    else:
+        r.warn("没有 node，跳过 buildWsUrl 行为检查",
+               "安装 Node.js 后可启用")
 
     section("C. check_url 整体行为")
     # 黑名单优先

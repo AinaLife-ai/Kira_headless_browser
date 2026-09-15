@@ -27,8 +27,15 @@ class ExtensionBackend(Backend):
     name = "extension"
     is_user_browser = True
 
-    #: 上传大小上限（默认 200MB）—— 内容要经 WebSocket 传，别太大
-    MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+    #: 上传大小上限（默认 **32MB**）。
+    #  ⚠️ 整个文件的内容是**一次性**放进 `chunks` 列表、随**一条** WebSocket
+    #     消息发出去的。base64 会放大 1.33 倍，`json.dumps` 再复制一份 ——
+    #     按 200MB 算，光 base64 就 267MB，序列化后峰值 >500MB，
+    #     而且单帧 267MB 本身也会被协议端拒绝。
+    #     扩展侧要拼一个完整 File 才不改这个"整包发"的流程，
+    #     所以上限必须落在"单条消息能扛住"的范围里。
+    #     真需要传大文件，应改成**分多条 chunk 消息**、由扩展侧边收边拼。
+    MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
     def __init__(self, bridge, protocol, max_upload_bytes=None,
                  max_download_bytes=None, download_timeout=None,

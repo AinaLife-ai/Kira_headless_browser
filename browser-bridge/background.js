@@ -124,6 +124,14 @@ export async function connect({ manual = false } = {}) {
 
     const openTimeout = setTimeout(() => {
       state.lastError = "连接超时：确认 KiraAI 正在运行，且插件已启用";
+      // ⚠️ 超时后必须**真的把这个 socket 收掉**：
+      //    只 settle 的话它会一直停在 CONNECTING，state.socket 仍指向它 →
+      //    之后每次 ensureAlive/connect 都看到"已有连接"而直接返回，
+      //    用户点多少次重连都没用（既连不上也没人重试）。
+      try { mine.close(); } catch (_) {}
+      if (state.socket === mine) state.socket = null;   // 只清自己的引用
+      setStatus({ connected: false, error: state.lastError });
+      scheduleReconnect();
       settle({ ok: false, error: state.lastError });
     }, 8000);
 

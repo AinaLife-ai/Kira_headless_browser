@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -194,7 +195,11 @@ def run(r) -> None:
             p_ = PLUGIN_DIR / "browser-bridge" / f_
             if not p_.is_file():
                 continue
-            tmp = Path(_tf.gettempdir()) / f"_kira_chk_{f_.replace('.', '_')}.mjs"
+            # ⚠️ 名字里必须带**每次唯一的**成分：写死的话两个并发跑的
+            #    回归进程会互相覆盖、甚至在 finally 里删掉对方的文件。
+            _uniq = f"{os.getpid()}_{next(_tf._get_candidate_names())}"
+            tmp = (Path(_tf.gettempdir())
+                   / f"_kira_chk_{_uniq}_{f_.replace('.', '_')}.mjs")
             try:
                 tmp.write_text(p_.read_text(encoding="utf-8"), encoding="utf-8")
                 r_ = _sp.run(["node", "--check", str(tmp)],

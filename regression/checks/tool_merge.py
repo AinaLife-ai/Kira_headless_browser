@@ -137,8 +137,9 @@ def run(r) -> None:
          f"{len(LEGACY)} 个旧工具 → {len(now)} 个新工具名")
 
     # 交互动作齐全
-    m = re.search(r'"action": \{"type": "string", "enum": \[([^\]]+)\]', main)
-    actions = set(re.findall(r'"([a-z_]+)"', m.group(1))) if m else set()
+    # ⚠️ 用 _tool_enum() 而不是全仓正则：后者会命中**别的工具**里的 enum，
+    #    于是 browser_interact 自己少了个动作也照样通过。
+    actions = _tool_enum(main, "browser_interact")
     r.ok("C2 browser_interact 的 action 覆盖全部交互动作",
          NEED_ACTIONS <= actions,
          f"{len(actions)} 个动作；缺={sorted(NEED_ACTIONS - actions) or '无'}")

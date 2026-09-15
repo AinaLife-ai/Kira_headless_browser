@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.12
+# 浏览器插件 (Browser Plugin) 2.1.13
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -470,6 +470,61 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.13（2026-09-15）
+
+**按 CodeRabbit 第十一轮审查修复 12 项**（含 1 个"我声称修了但根本没改"的）：
+
+- 🔴 **第七轮我声称修好的 `buildWsUrl` 其实一行都没改**：
+  第七轮的提交信息和 README 都写着「`buildWsUrl` 把裸 IPv6 的冒号当端口
+  剥掉 —— 已修」，但 **`protocol.js` 根本没进那次提交**。
+  实测 ``::1`` 仍被剥成 ``::`` → 判不出回环 → 生成 `wss://::5267/...`
+  这个非法 URL，**扩展连本机都连不上**。
+  之后第八、九、十轮都没发现 —— 因为**没有任何检查会去回验"声称"**。
+  → 这次真的改了（端口只从带方括号的 IPv6 或单冒号主机里剥；
+  裸 IPv6 序列化时补方括号），并**新增行为探针 B2.7**（用 node 真跑
+  `protocol.js`，行为不对就红）和**声称核对 H1**。
+  B2.7/H1 都做了反向验证：还原成未修改版本 → 立即 FAIL。
+- **连接超时后 socket 没收掉**：只 settle 不 close，socket 一直停在
+  `CONNECTING`、`state.socket` 仍指向它 → 之后每次 `ensureAlive`/`connect`
+  都以为"已有连接"而直接返回，**用户点多少次重连都没用**。
+  → 超时即 close、只清自己的引用、并安排重连。
+- **上传尺寸估算高估**：base64 长度按 `len*3/4` 硬算，没扣末尾的 `=`。
+  `YQ==` 只有 1 字节却算成 3 → **真实大小刚好等于上限的文件被误判超限**。
+  → 先减 padding 再换算，现在与真实字节数完全一致。
+- **上传上限 200MB 单条消息扛不住**：内容一次性放进 `chunks` 随**一条**
+  WebSocket 消息发出，base64 放大 1.33 倍、`json.dumps` 再复制一份 →
+  峰值 >500MB，单帧 267MB 本身也会被协议端拒。
+  → 默认降到 **32MB**（峰值约 85MB）。
+- **`bridge.py` 分块写入失败不 resolve future**："超上限"分支会 resolve，
+  写入失败分支只 abort sink → future 一直挂着，`send_command` 要干等到
+  `download_timeout`（默认 **600 秒**）才报错。→ 补上 resolve。
+
+**回归套件 6 项**：
+- **`INHERITED_OK` 白名单混入通用方法名**（`get`/`append`/`format`/
+  `create_task` 等）→ 等于给 A1 开洞：`self.get(...)` / `self.format(...)`
+  写错永远不会被报出来。→ 只保留框架真正提供的名字。
+  反向验证：加一个 `self.format("x")` → A1 立即 FAIL。
+- **`bridge_e2e` 用共享的 `_ext_client.mjs`** → 并发跑会互相覆盖、
+  甚至在 finally 里删掉对方的脚本。→ 改用唯一名字的临时文件。
+- **`contract.py` 用 `mkdtemp` 不清理**，且**"两边后端都没有该字段就跳过"**
+  → 那会放过"渲染层要读的字段两个后端都不返回"这种最严重的情况。
+  → 用 `TemporaryDirectory`；去掉跳过。**去掉后立刻暴露真问题**：
+  渲染层有个 `get_text` 分支，但没有任何后端方法/工具动作会产生它 ——
+  是死代码，已删。
+- **`runtime_behavior` 的 R2 未判启动失败就解引用 `p._page`**（启动失败时
+  会抛 AttributeError，把"启动失败"伪装成无关崩溃）；**R4 只测一个方向**
+  → 补 `R4b` 反向（screenshot_ 最新时应留下 screenshot_），
+  否则"永远优先保留 element_"的 bug 也能通过。
+- **`security_rules` 的 B2.6 不认简写属性** `{ name, path }` → 只匹配
+  `path:` 的话，简写形式的路径泄露检测不出来。→ 同时识别简写。
+  反向验证：改成 `{ name, path }` → B2.6 立即 FAIL。
+- **`static_audit` 的 A13c 临时文件名写死** → 并发跑会互相覆盖/删文件；
+  **`tool_merge` 的 C2 用全仓正则取 action** → 会命中别的工具的 enum。
+  → A13c 名字唯一化；C2 改用 `_tool_enum()`。
+
+**文档**：`setup_guide` 补上可选的「允许用户脚本 / Allow User Scripts」
+步骤（Chrome 138+ 关着时该功能会提示"不可用"，看起来像浏览器太旧）。
 
 ### v2.1.12（2026-09-15）
 

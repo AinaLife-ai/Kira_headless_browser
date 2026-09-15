@@ -509,8 +509,6 @@ class BrowserPlugin(BasePlugin):
             return f"⏱️ 等待超时，元素未出现 {tag}"
         if method == "execute_js":
             return f"✅ JavaScript 执行结果:\n{d.get('result')} {tag}"
-        if method == "get_text":
-            return f"📄 页面文本内容:\n{d.get('content', '')}\n{tag}"
         # ── 以下这些如果落到默认分支，模型就看不到结果了 ──
         # 尤其 cookie_get：导出的是**数据**，必须回传内容，
         # 否则 browser_cookie(action="export") 等于白跑一趟。

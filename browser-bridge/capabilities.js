@@ -152,7 +152,12 @@ async function upload(params) {
   const b64s = chunks || [];
   let approx = 0;
   for (const b64 of b64s) {
-    approx += Math.floor((b64.length * 3) / 4);   // base64 每 4 字符≈3 字节
+    // ⚠️ 要先把末尾的 `=` padding 扣掉再换算。
+    //    base64 每 4 字符编码 3 字节，但结尾可能只有 2/3 字符有效：
+    //    `YQ==`(4 字符) 其实只有 1 字节。按 4→3 硬算会**高估**，
+    //    导致"真实大小刚好等于上限"的文件被误判为超限。
+    const pad = (b64.match(/=+$/) || [""])[0].length;
+    approx += Math.floor(((b64.length - pad) * 3) / 4);
   }
   if (limit > 0 && approx > limit) {
     throw new Error(`文件过大（约 ${approx} > 上限 ${limit} 字节），已拒绝上传`);

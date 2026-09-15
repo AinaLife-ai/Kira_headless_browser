@@ -21,15 +21,16 @@ from ..harness import PLUGIN_DIR, section
 TITLE = "调用图完整性（未定义方法 / 死代码）"
 
 #: 这些来自框架基类或运行时注入，不算"未定义"
+# ⚠️ 这份白名单只能放**真正由框架基类/运行期注入提供**的名字。
+#    之前混进了 `get` / `append` / `format` / `create_task` 这类**通用方法名** ——
+#    那等于给 A1 开了一个大洞：`self.get(...)` / `self.append(...)` 写错也
+#    永远不会被报出来（因为"看起来像继承来的"）。
+#    判据：这个名字在 BasePlugin 上有定义，或由框架在运行期塞进实例。
 INHERITED_OK = {
-    # BasePlugin
+    # BasePlugin 的属性（框架注入）
     "ctx", "plugin_cfg",
-    # 常见的内置属性
-    "append", "get", "keys", "items", "values", "update", "pop",
-    "add", "remove", "discard", "clear", "copy", "format", "split",
-    "strip", "lower", "upper", "join", "replace", "startswith",
-    "endswith", "getattr", "setattr", "extend", "insert", "sort",
-    "reverse", "sleep", "create_task", "ensure_future", "run",
+    # 框架运行期注入的辅助（BasePlugin 提供）
+    "logger", "get_logger",
 }
 
 #: 允许"定义了但没被调用"的：框架回调（框架按名字调用）

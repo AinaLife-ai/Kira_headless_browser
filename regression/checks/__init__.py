@@ -17,6 +17,7 @@ from . import (
     static_audit,
     tool_merge,
     wiring,
+    claims,
 )
 
 #: (模块, 是否默认启用)
@@ -31,6 +32,7 @@ ALL_CHECKS = [
     runtime_behavior,    # 生命周期 / 路由 / 内存（假 Playwright）
     bridge_e2e,          # 真实 WebSocket 端到端
     content_dom,         # 扩展点击行为（真实 DOM）
+    claims,              # 声称 ↔ 实际（防止"写了但没改"）
 ]
 
 __all__ = ["ALL_CHECKS"]

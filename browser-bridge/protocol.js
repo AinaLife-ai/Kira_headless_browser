@@ -86,8 +86,45 @@ export const WS_PATH = "/ws/plugin/headless_browser/bridge";
 /** 本机地址判定（ws:// 只允许用在回环） */
 function isLoopbackHost(h) {
   const x = String(h || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
-  return x === "localhost" || x === "127.0.0.1" || x === "::1"
-      || x === "0.0.0.0" || x.endsWith(".localhost") || x === "127.0.0.1.";
+  if (x === "localhost" || x === "127.0.0.1" || x === "::1"
+      || x === "0.0.0.0" || x.endsWith(".localhost") || x === "127.0.0.1.") {
+    return true;
+  }
+  // ⚠️ 与 security.py 的 is_local_host 对齐：IPv6 的各种等值写法
+  //    也算回环 —— 否则 `::ffff:127.0.0.1` / `0:0:0:0:0:0:0:1`
+  //    会被判成"远程主机"而强制要求 wss，连本机反而连不上。
+  const bare = x.replace(/\.$/, "");
+  if (bare.includes(":")) {
+    // 全部展开成 8 组再比较，避免 `0:0:0:0:0:0:0:1` 这类写法漏判
+    const parts = _expandV6(bare);
+    if (parts && parts.slice(0, 7).every((p) => p === "0")
+        && (parts[7] === "1" || parts[7] === "0")) {
+      return true;
+    }
+  }
+  // v4-mapped：::ffff:a.b.c.d
+  const vm = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(bare);
+  if (vm) return vm[1] === "127.0.0.1";
+  return false;
+}
+
+/** 把 IPv6 展开成 8 个十六进制组（失败返回 null）。处理 `::` 缩写。 */
+function _expandV6(h) {
+  if ((h.match(/::/g) || []).length > 1) return null;
+  let head = [], tail = [];
+  if (h.includes("::")) {
+    const [a, b] = h.split("::");
+    head = a ? a.split(":") : [];
+    tail = b ? b.split(":") : [];
+  } else {
+    head = h.split(":");
+  }
+  const need = 8 - head.length - tail.length;
+  if (need < 0) return null;
+  const all = [...head, ...Array(need).fill("0"), ...tail];
+  if (all.length !== 8) return null;
+  const norm = all.map((g) => (g === "" ? "0" : g.replace(/^0+(?=.)/, "").toLowerCase()));
+  return norm.every((g) => /^[0-9a-f]{1,4}$/.test(g)) ? norm : null;
 }
 
 /**
@@ -113,7 +150,14 @@ export function buildWsUrl(host, port, token) {
     scheme = m[1].toLowerCase();
     h = raw.slice(m[0].length);
   }
-  h = h.replace(/\/.*$/, "").replace(/:\d+$/, "");   // 去掉可能的路径/端口
+  h = h.replace(/\/.*$/, "");                        // 去掉可能的路径
+  // ⚠️ 端口只能从**带方括号的 IPv6** 或**单冒号的 host:port** 里剥。
+  //    裸 IPv6 里到处都是冒号 —— `::1` 被 `/:\d+$/` 剥掉尾巴就成了 `::`，
+  //    于是 isLoopbackHost 判不出回环、拼出的 URL 也是非法的
+  //    （`wss://::5267/...`）。
+  if (/^\[.*\]:\d+$/.test(h) || (!h.startsWith("[") && h.split(":").length === 2)) {
+    h = h.replace(/:\d+$/, "");
+  }
 
   const loopback = isLoopbackHost(h);
   // 默认：本机用 ws（不出网卡），其它主机用 wss（令牌在 query 里，必须加密）
@@ -125,7 +169,9 @@ export function buildWsUrl(host, port, token) {
       + `请去掉地址里的 ws://（默认会用 wss://）。`
     );
   }
-  return `${scheme}://${h}:${p}${WS_PATH}?token=${encodeURIComponent(token)}`;
+  // 裸 IPv6 在 URL 里必须加方括号，否则 `::1:5267` 无法解析。
+  const wireHost = (h.includes(":") && !h.startsWith("[")) ? `[${h}]` : h;
+  return `${scheme}://${wireHost}:${p}${WS_PATH}?token=${encodeURIComponent(token)}`;
 }
 
 export { isLoopbackHost };

@@ -161,6 +161,14 @@ def steps_for(browser: str, ext_path: str) -> List[str]:
         "（令牌在 KiraAI 的插件面板里：「浏览器」→ 复制接入令牌）")
     if b == "edge":
         common.append("（Edge 与 Chrome 用同一套扩展机制，这个扩展在 Edge 上可以直接用）")
+    # ⚠️ 可选的一步，但**必须提**：Chrome 138+ 起，"执行任意 JavaScript"
+    #    需要在扩展详情页单独打开「允许用户脚本 / Allow User Scripts」。
+    #    关着的时候 chrome.userScripts 直接是 undefined，报错看起来
+    #    就像"浏览器太旧不支持"，用户会白折腾很久。
+    common.append(
+        "（可选，仅当需要让 AI 执行 JavaScript 时）在扩展详情页打开"
+        "「允许用户脚本 / Allow User Scripts」；"
+        "Chrome 138+ 默认关闭，关着时该功能会提示「不可用」。")
     return common
 
 

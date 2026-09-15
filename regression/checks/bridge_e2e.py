@@ -114,8 +114,15 @@ def run(r) -> None:
         r.warn("没有 node，跳过端到端检查", "安装 Node.js 后可启用")
         return
 
-    client_path = HERE / "_ext_client.mjs"
-    client_path.write_text(CLIENT_JS, encoding="utf-8")
+    # ⚠️ 用**每次唯一**的临时文件名：写死在 HERE 下的话，
+    #    两个回归进程同时跑会互相覆盖、甚至在 finally 里删掉对方的脚本。
+    import tempfile as _tf
+    _cfd = _tf.NamedTemporaryFile(
+        mode="w", suffix=".mjs", prefix="kira_ext_client_",
+        dir=str(HERE), delete=False, encoding="utf-8")
+    _cfd.write(CLIENT_JS)
+    _cfd.close()
+    client_path = Path(_cfd.name)
 
     results = {}
     _procs = []          # 持有子进程引用，避免被 GC 提前回收
