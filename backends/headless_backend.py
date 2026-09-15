@@ -191,6 +191,12 @@ class HeadlessBackend(Backend):
             opts["user_agent"] = self.user_agent
         return opts
 
+    async def _profile_dir_async(self) -> Optional[str]:
+        """异步版：复制 profile 时不会阻塞事件循环。"""
+        if self.profile_mode == "inherit":
+            return await self._inherited_profile_dir()
+        return self._profile_dir()
+
     def _profile_dir(self) -> Optional[str]:
         """返回要用的 profile 目录。
 
@@ -206,15 +212,40 @@ class HeadlessBackend(Backend):
         if self.profile_mode == "temp":
             return None                      # None → 交给 Playwright 用临时目录
         if self.profile_mode == "inherit":
-            inherited = self._inherited_profile_dir()
+            # 注意：这里是同步入口，只用于 debug_state() 之类**只读展示**；
+            # 真正启动走 _profile_dir_async()，避免在事件循环里做重活。
+            inherited = None if getattr(self, "_no_block_copy", False) else \
+                self._peek_inherited()
             if inherited:
                 return inherited
             logger.warning("inherit 模式未能复制真实 profile，回退到插件自带 profile")
         if self.custom_user_data_dir:
+            # ⚠️ 拦住"把 custom_user_data_dir 指向真实浏览器"这种用法 ——
+            #    那正是我们要避免的抢锁场景（Playwright 会持有
+            #    ProcessSingleton，用户就打不开自己的浏览器了）。
+            if self._looks_like_real_profile(self.custom_user_data_dir):
+                logger.error(
+                    "custom_user_data_dir 指向了真实浏览器的 User Data 目录，"
+                    "已拒绝使用（会抢锁、导致用户的浏览器打不开）。"
+                    "请改用 headless_profile_mode=inherit（复制副本），或填插件自己的目录。"
+                )
+                return None
             return self.custom_user_data_dir
         d = Path(self._data_dir) / "browser_profile"
         os.makedirs(d, exist_ok=True)
         return str(d)
+
+    @staticmethod
+    def _looks_like_real_profile(path: str) -> bool:
+        """粗判某个目录是不是真实浏览器的 User Data 目录。"""
+        p = str(path).replace("\\", "/").rstrip("/").lower()
+        markers = ("google/chrome/user data", "microsoft/edge/user data",
+                   "chromium/user data", "brave-browser/user data",
+                   "/library/application support/google/chrome",
+                   "/library/application support/microsoft edge",
+                   ".config/google-chrome", ".config/microsoft-edge",
+                   ".config/chromium")
+        return any(m in p for m in markers)
 
     def _real_user_data_dir(self, channel: Optional[str] = None) -> Optional[str]:
         """定位用户真实浏览器的 User Data 目录（只用于**复制**，绝不直接启动）。"""
@@ -251,7 +282,12 @@ class HeadlessBackend(Backend):
                 return str(p)
         return None
 
-    def _inherited_profile_dir(self) -> Optional[str]:
+    def _peek_inherited(self) -> Optional[str]:
+        """只看副本在不在（不做复制）—— 给 debug_state 这类只读展示用。"""
+        dst = Path(self._data_dir) / "inherited_profile"
+        return str(dst) if dst.is_dir() else None
+
+    async def _inherited_profile_dir(self) -> Optional[str]:
         """把真实 profile 复制一份出来给插件用。
 
         为什么要复制而不是直接用：直接用会持有原目录的 ProcessSingleton 锁，
@@ -272,10 +308,22 @@ class HeadlessBackend(Backend):
         stamp = dst / ".source_mtime"
 
         # 源目录 mtime 没变就复用上次的副本，避免每次启动都全量复制
-        try:
-            src_mtime = os.path.getmtime(src)
-        except OSError:
-            src_mtime = 0
+        # ⚠️ 不能用**目录** mtime 当版本号：目录 mtime 只在顶层增删条目时变，
+        #    `Default/Cookies` 被改写（也就是登录态更新）时它**不变** ——
+        #    结果就是一直复用旧副本，用户新登录的账号读不到。
+        #    改成看真正承载登录态的那几个文件的 mtime 之和。
+        src_mtime = 0.0
+        for rel in ("Default/Cookies", "Default/Login Data", "Local State",
+                    "Default/Preferences", "Default/Network/Cookies"):
+            try:
+                src_mtime = max(src_mtime, os.path.getmtime(Path(src) / rel))
+            except OSError:
+                continue
+        if src_mtime == 0.0:
+            try:
+                src_mtime = os.path.getmtime(src)
+            except OSError:
+                src_mtime = 0.0
         if dst.is_dir() and stamp.is_file():
             try:
                 if float(stamp.read_text().strip()) >= src_mtime:
@@ -296,8 +344,12 @@ class HeadlessBackend(Backend):
         )
         try:
             if dst.exists():
-                shutil.rmtree(dst, ignore_errors=True)
-            shutil.copytree(src, dst, ignore=IGNORE, dirs_exist_ok=True)
+                # 删除也可能很慢（几万个文件），放到线程里
+                await asyncio.to_thread(shutil.rmtree, dst, True)
+            # ⚠️ copytree 是**同步阻塞**的，User Data 可能有几个 GB ——
+            #    直接在事件循环里跑会把整个 KiraAI 卡住（所有会话都停摆）。
+            await asyncio.to_thread(shutil.copytree, src, dst,
+                                    ignore=IGNORE, dirs_exist_ok=True)
             # 副本必须删掉锁文件，否则 Playwright 会以为"正在运行"
             for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket",
                          "lockfile"):
@@ -332,7 +384,7 @@ class HeadlessBackend(Backend):
             os.makedirs(self.download_dir, exist_ok=True)
 
             errors = []
-            profile = self._profile_dir()
+            profile = await self._profile_dir_async()
             for ch in self._channels():
                 launch_ch = {"channel": ch} if ch else {}
                 try:
@@ -352,6 +404,16 @@ class HeadlessBackend(Backend):
                     msg = str(e).splitlines()[0] if str(e) else repr(e)
                     errors.append(f"{ch or 'bundled'}: {msg}")
                     logger.warning(f"无头后端启动失败 [{ch or 'bundled'}]: {msg}")
+                    # ⚠️ 必须先关掉半成品再清引用。
+                    #    launch() 成功但 new_context() 失败时，
+                    #    浏览器的**进程已经起来了** —— 直接置 None 就是泄漏一个
+                    #    孤儿 Chromium，用户会在任务管理器里看到它一直挂着。
+                    for obj in (self._context, self._browser):
+                        if obj is not None:
+                            try:
+                                await obj.close()
+                            except Exception as ce:
+                                logger.debug(f"清理启动失败的实例时出错: {ce}")
                     self._context = self._browser = None
 
             if self._context is None:
@@ -387,7 +449,15 @@ class HeadlessBackend(Backend):
             logger.debug(f"关闭弹窗失败: {e}")
 
     async def _close(self):
-        if self._idle_task and not self._idle_task.done():
+        # ⚠️ _close() 会被 _idle_watchdog() 自己调用 —— 那时不能 cancel 自己：
+        #    自我取消会在下一个 await 点抛 CancelledError，
+        #    把"正常收尾"变成"异常退出"，日志里会多出一堆无意义的取消栈。
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if (self._idle_task and not self._idle_task.done()
+                and self._idle_task is not current):
             self._idle_task.cancel()
         self._idle_task = None
         self._popup_hooked = False
@@ -549,6 +619,15 @@ class HeadlessBackend(Backend):
         return OpResult(data={"tabs": [t.to_dict() for t in tabs],
                               "tab_count": len(tabs)}, backend=self.name)
 
+    def _check_tab_id(self, tab_id) -> Optional[str]:
+        """无头后端只有一张页面 —— 调用方传了别的 tab_id 要**明确告知**，
+        不能默默忽略（否则模型以为操作了那张标签页，实际没有）。"""
+        if tab_id in (None, "", 0):
+            return None
+        return (f"无头后端只有一张页面（tab_id 固定为 0），"
+                f"不支持指定 tab_id={tab_id}。"
+                f"如需操作多标签，请使用扩展桥后端（browser_list_tabs 查看）。")
+
     async def get_page(self, detail: str = "text", tab_id=None,
                        offset: int = 0, max_chars=None) -> OpResult:
         """读取页面内容。支持 ``offset`` / ``max_chars`` 做**分页续读** ——
@@ -557,6 +636,9 @@ class HeadlessBackend(Backend):
 
         ``has_more`` / ``next_offset`` 会一并返回，方便模型直接续读。
         """
+        msg = self._check_tab_id(tab_id)
+        if msg:
+            return OpResult.fail(msg, self.name)
         err = await self._ready()
         if err:
             return OpResult.fail(err, self.name)
@@ -596,6 +678,9 @@ class HeadlessBackend(Backend):
             return OpResult.fail(f"读取页面失败: {e}", self.name)
 
     async def extract(self, selector: str, attr=None, limit: int = 50, tab_id=None) -> OpResult:
+        msg = self._check_tab_id(tab_id)
+        if msg:
+            return OpResult.fail(msg, self.name)
         err = await self._ready()
         if err:
             return OpResult.fail(err, self.name)
@@ -611,6 +696,12 @@ class HeadlessBackend(Backend):
             return OpResult.fail(f"提取失败: {e}", self.name)
 
     async def navigate(self, url: str, new_tab: bool = False, tab_id=None) -> OpResult:
+        # new_tab=True 是"开新页"，不需要 tab_id；
+        # 否则指定别的 tab_id 在无头侧做不到，明确告知而不是默默忽略
+        if not new_tab:
+            msg = self._check_tab_id(tab_id)
+            if msg:
+                return OpResult.fail(msg, self.name)
         err = await self._ready()
         if err:
             return OpResult.fail(err, self.name)
@@ -957,7 +1048,8 @@ class HeadlessBackend(Backend):
             "available": self.available,
             "headless": self.headless,
             "profile_mode": self.profile_mode,
-            "profile_dir": self._profile_dir(),
+            "profile_dir": self._peek_inherited() or str(
+                Path(self._data_dir) / "browser_profile"),
             "wait_until": self.wait_until,
             "op_timeout": self.op_timeout,
             "action_timeout": self.action_timeout,
@@ -970,6 +1062,15 @@ class HeadlessBackend(Backend):
 
     async def cookie_get(self, url: str = "", tab_id=None) -> OpResult:
         """导出当前站点 cookie（用于打通到另一个后端）。"""
+        msg = self._check_tab_id(tab_id)
+        if msg:
+            return OpResult.fail(msg, self.name)
+        msg = self._check_tab_id(tab_id)
+        if msg:
+            return OpResult.fail(msg, self.name)
+        msg = self._check_tab_id(tab_id)
+        if msg:
+            return OpResult.fail(msg, self.name)
         err = await self._ready()
         if err:
             return OpResult.fail(err, self.name)
@@ -1044,9 +1145,37 @@ class HeadlessBackend(Backend):
             try:
                 if self._context is not None:
                     jar = aiohttp.CookieJar(unsafe=False)
-                    scoped = {c["name"]: c["value"] for c in await self._context.cookies(url)}
-                    if scoped:
-                        jar.update_cookies(scoped, response_url=_URL(url))
+                    # ⚠️ 用 {name: value} 这种 dict 会把 domain/path/secure/expires
+                    #    全部丢掉，只留"名字+值" ——
+                    #    结果是跨域重定向（比如 file CDN 在另一个域）时，
+                    #    cookie 可能被带到不该带的域，也可能该带的不带。
+                    #    改成逐个 add_cookie，保留完整语义。
+                    raw = await self._context.cookies(url)
+                    for c in raw:
+                        try:
+                            jar.update_cookies({}, response_url=_URL(url))
+                        except Exception:
+                            pass
+                    from http.cookies import SimpleCookie as _SC
+                    for c in raw:
+                        sc = _SC()
+                        sc[c["name"]] = c.get("value", "")
+                        m = sc[c["name"]]
+                        m["path"] = c.get("path", "/")
+                        if c.get("domain"):
+                            m["domain"] = c["domain"]
+                        if c.get("secure"):
+                            m["secure"] = True
+                        exp = c.get("expires")
+                        if exp:
+                            try:
+                                import time as _t
+                                m["expires"] = _t.strftime(
+                                    "%a, %d-%b-%Y %H:%M:%S GMT",
+                                    _t.gmtime(int(exp)))
+                            except Exception:
+                                pass
+                        jar.update_cookies(sc, response_url=_URL(url))
                     if self.user_agent:
                         headers["User-Agent"] = self.user_agent
             except Exception as e:

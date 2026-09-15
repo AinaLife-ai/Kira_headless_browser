@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.3
+# 浏览器插件 (Browser Plugin) 2.1.4
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -453,6 +453,43 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.4（2026-09-15）
+
+**按 CodeRabbit 第二轮审查修复 13 项**（1 个 Critical + 12 个真实问题）：
+
+- 🔴 **扩展里 `socket` 未定义 → 扩展永远连不上**：把 `socket` 挪进
+  `shared.js` 的 `state` 之后，`background.js` 里还留着 `socket.onopen = ...`
+  这类裸引用。ES 模块是严格模式，直接 `ReferenceError`，
+  而且 `connect()` 里那句是无条件执行的 —— **每次连接都失败**。
+  → 全部改为 `state.socket`，并新增检查 **G1：不允许裸的状态标识符**。
+- **替换旧连接时没取消旧心跳任务**：旧连接的 `_cleanup` 因 session 已换而直接返回，
+  旧心跳继续活着，还会往**新连接**发 ping。每次重连多留一个协程。
+  → 替换前先 cancel。
+- **下载 sink 在失败路径不关闭**：超时/异常/`ok=false` 时不收 sink，
+  文件句柄挂到进程退出、磁盘留半成品。→ 三条路径都 `_abort_sink`，`close()` 也清。
+- **上传上限在解码后才检查**：超限文件已经完整占住内存，上限形同虚设。
+  → 先按 base64 长度估算拦截，再边解码边累计兜底。
+- **`exec_js` 强制表达式语法**：`(function(){ return (${script}); })()` 只接受单条
+  表达式，多语句（`const a=1; return a;`）会语法错误。
+  → 先试表达式、失败落函数体模式，两种写法都支持。
+- **`userScripts` 探测结果被缓存（含失败态）**：用户按提示打开开关后再试仍是失败，
+  必须重载扩展。→ 只缓存成功结果。
+- **下载最后一块缓冲没查上限**：刚好卡边界的文件能绕过限制。
+- **`--disable-...` 之外**：启动失败的半成品实例没关就置 None（泄漏孤儿 Chromium 进程）；
+  `copytree` 同步阻塞事件循环（几 GB 会把整个 KiraAI 卡住）；
+  `custom_user_data_dir` 可以指向真实浏览器目录（正是要避免的抢锁场景）；
+  用**目录** mtime 当 profile 缓存版本（`Cookies` 改了目录 mtime 不变 → 一直用旧副本，
+  新登录读不到）；idle 看门狗自我取消导致"正常收尾"变异常退出。
+- **下载时 cookie 语义丢失**：用 `{name: value}` 更新 CookieJar 会丢掉
+  domain/path/secure/expires → 跨域重定向可能带错 cookie。→ 逐个 `add_cookie` 保留完整语义。
+- **无头后端的 `tab_id` 被静默忽略**：传了别的 tab_id 不报错也不生效，
+  模型以为操作了那张标签页。→ 明确告知"无头只有一张页"。
+
+另有 6 项是**回归测试套件自身**的问题（CR 也一并审了）：
+`py_compile` 会往源码树写 `.pyc`（污染文件清点）、jsdom 缺失后没 return、
+`bridge_e2e` 没先检查 node、`callgraph` 的 async 检查是死代码（永远报不出）、
+`tool_merge` 只验工具名不验 action、`harness` 文档写的是旧契约。
 
 ### v2.1.3（2026-09-15）
 

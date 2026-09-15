@@ -226,8 +226,10 @@ async def _collect_hb(mod, tmp) -> dict[str, set[str]]:
         body = (PLUGIN_DIR / "backends" / "headless_backend.py").read_text(encoding="utf-8")
         i = body.find("async def download(")
         if i > 0:
-            succ = re.findall(r'OpResult\(data=\{([^}]*)\}, backend=self\.name\)',
-                              body[i:i + 3000])
+            # ⚠️ 要允许跨行 —— 返回字典常写成多行，
+            #    单行正则匹配不到就会误报"字段缺失"。
+            succ = re.findall(r'OpResult\(\s*data=\{([^}]*)\}\s*,\s*backend=self\.name\s*\)',
+                              body[i:i + 4000], re.S)
             keys = set()
             for grp in succ:
                 keys |= set(re.findall(r'"([a-z_]+)":', grp))

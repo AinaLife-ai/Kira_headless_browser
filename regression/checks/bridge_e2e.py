@@ -108,6 +108,12 @@ def run(r) -> None:
     P = load("protocol", PLUGIN_DIR / "protocol.py")
     B = load("bridge", PLUGIN_DIR / "bridge.py")
 
+    # 需要 node 才能跑假扩展客户端；没有就跳过（不算失败）
+    import shutil as _sh
+    if not _sh.which("node"):
+        r.warn("没有 node，跳过端到端检查", "安装 Node.js 后可启用")
+        return
+
     client_path = HERE / "_ext_client.mjs"
     client_path.write_text(CLIENT_JS, encoding="utf-8")
 

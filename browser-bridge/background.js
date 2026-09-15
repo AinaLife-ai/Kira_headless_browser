@@ -81,7 +81,7 @@ export async function connect({ manual = false } = {}) {
   }
 
   // 已经是打开状态就不重复连
-  if (state.socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+  if (state.socket && (state.socket.readyState === WebSocket.OPEN || state.socket.readyState === WebSocket.CONNECTING)) {
     return { ok: true, already: true };
   }
 
@@ -117,7 +117,7 @@ export async function connect({ manual = false } = {}) {
       settle({ ok: false, error: state.lastError });
     }, 8000);
 
-    socket.onopen = () => {
+    state.socket.onopen = () => {
       clearTimeout(openTimeout);
       state.reconnectAttempt = 0;
       state.lastError = "";
@@ -137,16 +137,16 @@ export async function connect({ manual = false } = {}) {
       settle({ ok: true });
     };
 
-    socket.onmessage = (ev) => {
+    state.socket.onmessage = (ev) => {
       handleMessage(ev.data).catch((e) => console.error("[KiraBridge] 消息处理异常", e));
     };
 
-    socket.onerror = () => {
+    state.socket.onerror = () => {
       // onerror 后必然跟 onclose，这里不做重连，避免双触发
       state.lastError = "连接出错，请确认 KiraAI 正在运行";
     };
 
-    socket.onclose = (ev) => {
+    state.socket.onclose = (ev) => {
       clearTimeout(openTimeout);
       const wasOpen = ev.wasClean;
       console.log("[KiraBridge] 连接关闭", ev.code, ev.reason);
@@ -169,7 +169,7 @@ export async function disconnect() {
   state.reconnectTimer = null;
 
   if (state.socket) {
-    try { socket.close(1000, "user disconnected"); } catch (_) {}
+    try { state.socket.close(1000, "user disconnected"); } catch (_) {}
     state.socket = null;
   }
 
@@ -201,7 +201,7 @@ async function ensureAlive() {
   if (!cfg.autoConnect || !cfg.token) return;
   if (state.userDisconnected) return;
 
-  if (!state.socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+  if (!state.socket || state.socket.readyState === WebSocket.CLOSED || state.socket.readyState === WebSocket.CLOSING) {
     console.log("[KiraBridge] 保活检测：连接已断，尝试重连");
     state.reconnectAttempt = 0;
     await connect();
@@ -587,8 +587,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "status": {
         const st = (await chrome.storage.local.get(STORE.LAST_STATUS))[STORE.LAST_STATUS] || {};
         sendResponse({
-          connected: !!state.socket && socket.readyState === WebSocket.OPEN,
-          readyState: state.socket ? socket.readyState : -1,
+          connected: !!state.socket && state.socket.readyState === WebSocket.OPEN,
+          readyState: state.socket ? state.socket.readyState : -1,
           ...st,
         });
         break;

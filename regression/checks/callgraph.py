@@ -83,19 +83,23 @@ def run(r) -> None:
             continue
         tree = ast.parse(src)
         for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            # ⚠️ 不要用 `if not isinstance(m, AsyncFunctionDef): continue` 开头 ——
+            #    那样"同步函数被注册成工具"这种错**永远查不出来**（它会被跳过）。
+            #    应该先认装饰器，再判定它是不是 async。
             for m in cls.body:
-                if not isinstance(m, ast.AsyncFunctionDef):
+                if not isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
-                # 判断这个函数上方是否有 @register.tool 装饰
                 decs = [ast.unparse(d) for d in m.decorator_list]
                 if not any("register.tool" in d for d in decs):
+                    continue
+                if not isinstance(m, ast.AsyncFunctionDef):
+                    bad_sig.append(f"{f.name}::{m.name} 不是 async"
+                                   f"（框架会 await 它 → TypeError）")
                     continue
                 args = [a.arg for a in m.args.args]
                 # args[0] 必须是 self，args[1] 必须是 event
                 if len(args) < 2 or args[0] != "self" or args[1] != "event":
                     bad_sig.append(f"{f.name}::{m.name} 签名={args[:3]}")
-                if not isinstance(m, ast.AsyncFunctionDef):
-                    bad_sig.append(f"{f.name}::{m.name} 不是 async")
     r.ok("B1 所有 @register.tool 的函数签名合规（self, event, …）且是 async",
          not bad_sig, f"不合规={bad_sig or '无'}")
 

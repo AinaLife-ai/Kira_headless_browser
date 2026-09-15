@@ -130,6 +130,14 @@ class BrowserBridge:
         # 单连接模型：踢掉旧连接
         if self._ws is not None:
             logger.warning("已有扩展连接，主动断开旧连接")
+            # ⚠️ 必须先把旧心跳任务取消掉。
+            #    旧连接的接收循环会走到 _cleanup(old_session)，但那时
+            #    self._session_id 已经换成新会话，_cleanup 会直接返回 ——
+            #    旧心跳任务就永远活着，而且它用的是**共享的 self._ws**，
+            #    会往新连接上发 ping。每次重连都多留一个协程。
+            if self._heartbeat_task and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
+            self._heartbeat_task = None
             await self._close_ws(self._ws, code=4001, reason="Replaced by a new connection")
 
         self._ws = ws
@@ -267,6 +275,10 @@ class BrowserBridge:
             if not fut.done():
                 fut.set_exception(BridgeNotConnected("插件正在关闭"))
         self._pending.clear()
+
+        # 关掉所有还开着的下载 sink，删掉半成品文件
+        for cid in list(self._sinks):
+            self._abort_sink(cid, RuntimeError("插件正在关闭"))
 
         if self._ws is not None:
             await self._close_ws(self._ws, code=1001, reason="Plugin shutting down")
@@ -407,14 +419,19 @@ class BrowserBridge:
             result: P.BridgeResult = await asyncio.wait_for(fut, timeout=wait)
         except asyncio.TimeoutError:
             self._pending.pop(cmd_id, None)
+            # ⚠️ 超时/异常/失败三条路径都必须收掉 sink，否则下载文件句柄
+            #    会一直挂到进程退出，磁盘上还留着半成品。
+            self._abort_sink(cmd_id, BridgeTimeout(f"命令 {name} 超时"))
             self.commands_failed += 1
             raise BridgeTimeout(f"命令 {name} 超时（{wait}s），扩展没有响应") from None
-        except Exception:
+        except Exception as e:
             self._pending.pop(cmd_id, None)
+            self._abort_sink(cmd_id, e)
             self.commands_failed += 1
             raise
 
         if not result.ok:
+            self._abort_sink(cmd_id, BridgeError(result.error or "命令失败"))
             self.commands_failed += 1
             raise BridgeError(result.error or f"命令 {name} 执行失败")
 

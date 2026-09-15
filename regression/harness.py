@@ -5,8 +5,15 @@
 ## 怎么加一个新检查
 
 1. 在 ``regression/checks/`` 下新建 ``xxx.py``
-2. 写一个 ``CHECKS = [(名称, 函数), ...]``，函数返回 ``(ok: bool, detail: str)``
-3. 在 ``checks/__init__.py`` 的 ``ALL_CHECKS`` 里登记
+2. 模块里写两个东西::
+
+       TITLE = "我的检查"          # 显示名（也是 run_all 的筛选关键字）
+       def run(r) -> None:         # r 是 Report 实例
+           r.ok("某项成立", condition, "细节")
+           r.warn("某项跳过", "原因")     # 环境缺依赖之类，不算失败
+           r.metric("指标名", 数值)        # 可选，会汇总进报告
+
+3. 在 ``checks/__init__.py`` 的 ``ALL_CHECKS`` 里登记一行
 
 跑全部：``python3 regression/run_all.py``
 跑单个：``python3 regression/run_all.py 静态审计``（名称支持模糊匹配）

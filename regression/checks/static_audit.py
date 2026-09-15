@@ -258,18 +258,21 @@ def run(r) -> None:
             r.ok(f"D2 {name} 用到 asyncio 且已导入",
                  bool(re.search(r'^import asyncio', body, re.M)))
 
-    import py_compile
+    # ⚠️ 用 compile() 而不是 py_compile.compile() ——
+    #    后者会往**源码树**里写 __pycache__/*.pyc，污染工作目录，
+    #    还会让「文件清点」这类检查在跑完一次之后变红。
+    bad_compile = []
     targets = ["main.py", "protocol.py", "bridge.py", "security.py",
                "tokens.py", "setup_guide.py", "backends/__init__.py",
                "backends/base.py", "backends/router.py",
                "backends/headless_backend.py", "backends/extension_backend.py"]
-    bad_compile = []
     for f in targets:
         if not exists(f):
             continue
         try:
-            py_compile.compile(str(PLUGIN_DIR / f), doraise=True)
-        except Exception as e:
+            # 只做语法编译，不落盘任何产物
+            compile((PLUGIN_DIR / f).read_text(encoding="utf-8"), str(f), "exec")
+        except SyntaxError as e:
             bad_compile.append(f"{f}: {e}")
     r.ok("D3 所有 Python 文件可编译", not bad_compile,
          f"失败={bad_compile or '无'}")

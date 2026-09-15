@@ -22,10 +22,13 @@
 
 // ─── 1. 执行任意 JS ──────────────────────────────────────────────────────
 
-let userScriptsUsable = null;   // 缓存探测结果
+// ⚠️ 只缓存**成功**结果。
+//    如果连"开关没打开"也缓存，用户按提示去打开开关之后再试，
+//    仍然会拿到缓存的失败结果 —— 只能重载扩展才行，体验很糟。
+let userScriptsUsable = null;
 
 async function ensureUserScripts() {
-  if (userScriptsUsable !== null) return userScriptsUsable;
+  if (userScriptsUsable && userScriptsUsable.ok) return userScriptsUsable;
   if (!chrome.userScripts) {
     userScriptsUsable = { ok: false, reason: "no_api" };
     return userScriptsUsable;
@@ -63,20 +66,36 @@ async function execJs(params) {
     );
   }
 
-  // 用 USER_SCRIPT world 跑：它不受页面 CSP 的 eval 限制
+  // ⚠️ 不要强制包成表达式 `(${script})` ——
+  //    那样只能接受**单条表达式**，多语句（`const a=1; return a;`）会语法错误。
+  //    正确做法：整段当**函数体**执行，用户既可以直接写表达式
+  //    （自动补 return），也可以写多语句 + 显式 return。
+  const wrapped = [
+    "(function(){",
+    "  try {",
+    "    const __src = " + JSON.stringify(script) + ";",
+    "    // 先用「当表达式」试一次；不行再当函数体跑（多语句场景）",
+    "    try { return eval(" + JSON.stringify("(" + script + ")") + "); }",
+    "    catch (e) { /* 落到函数体模式 */ }",
+    "    return (new Function(__src))();",
+    "  } catch (e) { return { __error: String(e && e.message || e) }; }",
+    "})()",
+  ].join("\n");
+
+  const jsPayload = [{ code: wrapped }];
   let results;
   try {
     results = await chrome.userScripts.execute({
       target: { tabId: tab.id },
-      js: [{ code: `(function(){ return (${script}); })()` }],
+      js: jsPayload,
       world: "USER_SCRIPT",
       injectImmediately: true,
     });
   } catch (e) {
-    // 有些版本不支持 world 参数或对象形式，退回字符串形式
+    // 有些版本不支持 world 参数，退回默认 world
     results = await chrome.userScripts.execute({
       target: { tabId: tab.id },
-      js: [{ code: `(function(){ return (${script}); })()` }],
+      js: jsPayload,
     });
   }
 
@@ -95,13 +114,31 @@ async function upload(params) {
   const tab = await resolveTab(params.tab_id);
   assertInjectable(tab);
 
+  // ⚠️ 先按 base64 长度**估算**总量再解码。
+  //    base64 每 4 个字符对应 3 字节，所以解码后的体积约为 len*3/4。
+  //    如果先全部 atob 再检查，超限的文件已经完整占住内存了 ——
+  //    上限就形同虚设（攻击面/误用面都在这儿）。
+  const b64s = chunks || [];
+  let estimated = 0;
+  for (const b64 of b64s) estimated += Math.floor((b64.length * 3) / 4);
+  if (limit > 0 && estimated > limit) {
+    throw new Error(`文件过大（约 ${estimated} > 上限 ${limit} 字节），已拒绝上传`);
+  }
+
   // chunks 是 base64 数组（由插件侧分块送来）
-  const parts = (chunks || []).map((b64) => {
+  const parts = [];
+  let decoded = 0;
+  for (const b64 of b64s) {
     const bin = atob(b64);
+    // 边解码边累计，防止估算不准（比如 padding/非法字符）时超限
+    decoded += bin.length;
+    if (limit > 0 && decoded > limit) {
+      throw new Error(`文件过大（> ${limit} 字节），已中止上传`);
+    }
     const buf = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-    return buf;
-  });
+    parts.push(buf);
+  }
 
   // ⚠️ 不要用 Blob + FileReader 绕一圈：MV3 的 background 是 Service Worker，
   //    而 FileReader 是 DOM API，在 ServiceWorkerGlobalScope 里**不存在** ——
@@ -188,6 +225,11 @@ async function downloadViaSession(params, cmdId) {
   }
   if (buf.length) {
     total += buf.length;
+    // ⚠️ 最后这一块同样要在**回传前**查上限 ——
+    //    否则一个刚好卡在边界外的文件会绕过限制被完整传出。
+    if (limit > 0 && total > limit) {
+      throw new Error(`文件超过上限 ${limit} 字节，已中止`);
+    }
     sendChunk(cmdId, buf);
   }
 

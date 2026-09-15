@@ -75,8 +75,16 @@ def run(r) -> None:
             r.note(f"🔀 {old:<28} → 有意合并（能力由其它工具覆盖）")
             continue
         newtool, action = dest
+        # ⚠️ 只验"工具名存在"是不够的 —— 工具存在但 action 不存在的话，
+        #    模型照文档传 `action=xxx` 会直接被拒绝，功能等于丢了。
+        #    所以这里把 action 也逐条验一遍。
         ok = newtool in now
-        if not ok:
+        if ok and action:
+            for a in [x.strip() for x in action.split("/") if x.strip()]:
+                if f'"{a}"' not in main:
+                    ok = False
+                    missing.append(f"{old}(action={a} 不存在)")
+        if not ok and (newtool not in now):
             missing.append(old)
         r.note(f"{'✅' if ok else '❌'} {old:<28} → {newtool}"
                + (f"(action={action})" if action else ""))

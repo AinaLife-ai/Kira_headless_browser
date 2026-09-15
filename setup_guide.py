@@ -91,13 +91,20 @@ def known_chromium_browsers() -> List[Dict[str, str]]:
                     break
             except Exception:
                 continue
-    # 兜底：PATH 里找
-    if not found:
-        for exe, name in (("google-chrome", "chrome"), ("chromium", "chromium"),
-                          ("msedge", "edge"), ("brave-browser", "brave")):
-            w = shutil.which(exe)
-            if w:
-                found.append({"name": name, "path": w})
+    # ⚠️ PATH 里也找一遍，并**合并**结果（不是"没找到才兜底"）。
+    #    有些发行版只把浏览器装在 PATH 上而不在标准位置，
+    #    只走兜底路径的话会漏报"检测到你机器上有 Chrome"。
+    have = {b["name"] for b in found}
+    for exe, name in (("google-chrome", "chrome"), ("google-chrome-stable", "chrome"),
+                      ("chromium", "chromium"), ("chromium-browser", "chromium"),
+                      ("msedge", "edge"), ("microsoft-edge", "edge"),
+                      ("brave-browser", "brave")):
+        if name in have:
+            continue
+        w = shutil.which(exe)
+        if w:
+            found.append({"name": name, "path": w})
+            have.add(name)
     return found
 
 

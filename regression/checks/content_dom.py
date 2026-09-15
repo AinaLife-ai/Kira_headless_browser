@@ -132,6 +132,7 @@ def run(r) -> None:
     if probe.returncode != 0:
         r.warn("未安装 jsdom，跳过 DOM 检查",
                f"cd {JS_DIR} && npm install jsdom")
+        return
 
     # runner 必须放在 js/ 目录里，否则 Node 找不到同级的 node_modules。
     # 文件名以 _ 开头，已被 .gitignore 覆盖，不会误提交。
