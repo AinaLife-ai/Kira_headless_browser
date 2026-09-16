@@ -20,6 +20,7 @@ from . import (
     claims,
     spec_compliance,
     vlm_describe,
+    lost_features,
 )
 
 #: (模块, 是否默认启用)
@@ -37,6 +38,7 @@ ALL_CHECKS = [
     claims,              # 声称 ↔ 实际（防止"写了但没改"）
     spec_compliance,     # KiraAI 规范符合性（包结构 / manifest / 入口 / 路由）
     vlm_describe,        # 截图 → VLM 描述（bot 看图；防止该能力再次丢失）
+    lost_features,       # v2.1.0 重写时丢掉的能力（cookie 自动加载 / 下载浏览器 / VLM 自查）
 ]
 
 __all__ = ["ALL_CHECKS"]

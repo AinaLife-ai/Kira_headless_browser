@@ -207,6 +207,12 @@ class BrowserPlugin(BasePlugin):
             "custom_user_data_dir": cfg.get("custom_user_data_dir"),
             "screenshot_dir": cfg.get("screenshot_dir") or str(Path("data/temp")),
             "download_dir": cfg.get("download_dir"),
+            # cookie 自动加载（原版能力，重写时丢过一次）
+            "cookies_dir": cfg.get("cookies_dir") or str(Path("data/files/cookie")),
+            "load_cookies_on_start": cfg.get("load_cookies_on_start", True),
+            # 所有浏览器来源都失败时，自动下载内置 Chromium（README 承诺过）
+            "auto_download_browser": cfg.get("auto_download_browser", True),
+            "auto_download_timeout": cfg.get("auto_download_timeout", 600),
             "screenshot_max_count": cfg.get("screenshot_max_count", 50),
             "screenshot_auto_clean": cfg.get("screenshot_auto_clean", True),
             "download_auto_clean": cfg.get("download_auto_clean", True),
@@ -1193,6 +1199,128 @@ class BrowserPlugin(BasePlugin):
         return "action 只能是 export 或 import"
 
     # ── 8. 排障 / 帮助 ───────────────────────────────────────────────
+
+    @register.tool(
+        name="browser_check_vlm",
+        description=(
+            "诊断「截图能不能被分析」：显示当前实际用哪个模型看图、是否支持视觉、"
+            "以及系统里有哪些可选的视觉模型。\n"
+            "当 browser_screenshot 返回「未能生成图片描述」时用它自查。"
+        ),
+        params={"type": "object", "properties": {}, "required": []},
+    )
+    async def tool_check_vlm(self, event, **_):
+        """检查 VLM 配置。
+
+        ⚠️ 这个工具原版有，v2.1.0 重写时被整段丢掉。
+        它正好是恢复 VLM 描述功能之后最需要的自查入口 ——
+        没有它，用户遇到"没描述"只能翻日志。
+        """
+        if not self.enabled:
+            return "浏览器插件未启用"
+
+        info = ["🔍 截图分析（VLM）配置检查", ""]
+
+        # ── 插件侧配置 ────────────────────────────────────────────────
+        if self.vlm_model:
+            info.append(f"· 插件配置指定的模型：{self.vlm_model}")
+        else:
+            info.append("· 插件未指定模型 → **使用框架设置里的默认 VLM**（推荐）")
+        info.append(f"· 自动描述截图：{'开' if self.auto_describe_screenshot else '关'}"
+                    f"（模型每次可以自己用 describe 参数覆盖）")
+        info.append(f"· 超时：{self.vlm_timeout} 秒")
+        info.append(f"· 提示词：{'自定义' if self.vlm_describe_prompt else '内置（网页分析用）'}")
+
+        # ── 实际会用的模型 ────────────────────────────────────────────
+        info.extend(["", "📷 实际会使用的模型："])
+        try:
+            client = await vlm.get_vlm_client(self.ctx, self.vlm_model)
+        except Exception as e:
+            client = None
+            info.append(f"  ❌ 取 VLM 客户端时异常：{e}")
+
+        if client is None:
+            info.extend([
+                "  ❌ **没有可用的 VLM 模型** —— 截图能拍、能发给用户，"
+                "但 bot 看不到内容。",
+                "  常见原因：",
+                "    · 没配任何视觉模型；",
+                "    · **模型配错了组**：用于描述的模型必须是「大语言模型」组里的"
+                "（不能放「图像」组），即使它本身支持视觉。",
+            ])
+        else:
+            m = getattr(client, "model", None)
+            mid = getattr(m, "model_id", "?")
+            pid = getattr(m, "provider_id", "?")
+            info.append(f"  ✅ {pid}:{mid}")
+            type_ok = vlm.is_vision_model(client)
+            info.append(f"  视觉能力：{'✅ 看起来支持' if type_ok else '❌ 看起来不支持'}")
+            if not type_ok:
+                info.append("  （模型名像 embedding/tts 之类，描述会失败）")
+
+        # ── 系统里有哪些可选的视觉模型 ────────────────────────────────
+        info.extend(["", "📋 系统里可用的 LLM 模型："])
+        try:
+            vision, others = [], []
+            mgr = self.ctx.provider_mgr
+            providers = mgr.get_all_providers()
+            for pid, _prov in providers.items():
+                try:
+                    infos = mgr.get_model_infos(pid)
+                except Exception:
+                    continue
+                for mi in infos:
+                    try:
+                        mt = getattr(mi.model_type, "value", str(mi.model_type))
+                    except Exception:
+                        mt = ""
+                    if mt != "llm":
+                        continue
+                    uuid = f"{pid}:{mi.model_id}"
+                    lower = str(mi.model_id).lower()
+                    if any(x in lower for x in
+                           ("embedding", "rerank", "tts", "stt", "davinci",
+                            "babbage", "whisper")):
+                        others.append(f"    {uuid}")
+                    else:
+                        vision.append(f"  👁️ {uuid}")
+            if vision:
+                info.append("  可能支持视觉（选其中一个填到「VLM 模型」）：")
+                info.extend(vision[:10])
+            if others:
+                info.append("  其它（看起来不支持视觉）：")
+                info.extend(others[:10])
+            if not vision and not others:
+                info.append("  ⚠️ 没有找到任何 LLM 模型")
+        except Exception as e:
+            info.append(f"  ⚠️ 取模型列表失败：{e}")
+
+        # ── 系统默认 VLM ──────────────────────────────────────────────
+        info.extend(["", "🔧 框架默认 VLM："])
+        try:
+            dv = self.ctx.provider_mgr.get_default_vlm()
+            if dv and getattr(dv, "model", None):
+                info.append(f"  ✅ {dv.model.provider_id}:{dv.model.model_id}"
+                            f"（{type(dv).__name__}）")
+            else:
+                info.append("  ⚠️ 没有配置框架默认 VLM")
+                info.append("     可在 KiraAI 的模型设置里指定「默认 VLM」，"
+                            "或在本插件配置里选「VLM 模型」")
+        except TypeError as e:
+            info.append(f"  ❌ 框架默认 VLM 的类型不对：{e}")
+            info.append("     默认 VLM 必须是**大语言模型**组里的模型")
+        except Exception as e:
+            info.append(f"  ⚠️ 取默认 VLM 失败（可能没配）：{e}")
+
+        info.extend([
+            "",
+            "💡 怎么配：",
+            "  1) 推荐：在 KiraAI 的模型设置里指定默认 VLM，本插件留空即可；",
+            "  2) 或：在本插件配置的「VLM 模型」里选一个视觉模型；",
+            "  3) ⚠️ 无论哪种，用来描述的模型都必须放在**大语言模型**组，"
+            "不能放「图像」组。",
+        ])
+        return "\n".join(info)
 
     @register.tool(
         name="browser_debug",

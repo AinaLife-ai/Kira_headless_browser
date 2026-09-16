@@ -134,6 +134,15 @@ class HeadlessBackend(Backend):
 
         self.screenshot_dir = cfg.get("screenshot_dir") or str(Path("data/temp"))
         self.download_dir = cfg.get("download_dir") or str(Path(data_dir) / "downloads")
+        # ⚠️ cookie 自动加载目录（原版能力，重写时丢过一次）。
+        #    启动时把这里的 *.json 全部灌进浏览器 —— 用户的登录态因此
+        #    在重装/换机器/临时 profile 之后还能找回来。
+        self.cookies_dir = cfg.get("cookies_dir") or str(Path("data/files/cookie"))
+        self.load_cookies_on_start = _as_bool(cfg.get("load_cookies_on_start", True))
+        #: 允许"所有浏览器来源都失败"时自动下载内置 Chromium（README 承诺的行为）。
+        #  下载很慢，所以给一个宽松但有限的超时；可以关掉。
+        self._allow_auto_download = _as_bool(cfg.get("auto_download_browser", True))
+        self.auto_download_timeout = float(cfg.get("auto_download_timeout", 600) or 600)
         self.screenshot_max_count = int(cfg.get("screenshot_max_count", 50) or 50)
         self.screenshot_auto_clean = _as_bool(cfg.get("screenshot_auto_clean", True))
         self.download_auto_clean = _as_bool(cfg.get("download_auto_clean", True))
@@ -448,6 +457,37 @@ class HeadlessBackend(Backend):
                     self._context = self._browser = None
 
             if self._context is None:
+                # ⚠️ 第 4 级回退：**自动下载**内置 Chromium。
+                #    README 一直承诺"全部失败会自动下载内置 Chromium"，
+                #    但这个实现（原版的 `_download_chromium`）在 v2.1.0 重写时
+                #    被整段丢掉，只剩一句"请手动安装"的提示 ——
+                #    **文档说有、代码没有**，用户装完插件首次使用可能直接卡住。
+                #
+                #    触发条件：所有浏览器来源都起不来。最常见的原因是
+                #    playwright 装了但没跑过 `playwright install chromium`。
+                if self._allow_auto_download:
+                    got = await self._download_chromium(errors)
+                    if got:
+                        try:
+                            if profile:
+                                self._context = await self._playwright.chromium.launch_persistent_context(
+                                    profile, downloads_path=self.download_dir,
+                                    **self._launch_kwargs(), **self._context_options())
+                                self._browser = self._context.browser
+                                self._desc = "无头(内置Chromium·刚下载) + 插件profile"
+                            else:
+                                self._browser = await self._playwright.chromium.launch(
+                                    **self._launch_kwargs())
+                                self._context = await self._browser.new_context(
+                                    **self._context_options())
+                                self._desc = "无头(内置Chromium·刚下载) + 临时profile"
+                            logger.info("自动下载 Chromium 后启动成功")
+                        except Exception as e:
+                            msg = str(e).splitlines()[0] if str(e) else repr(e)
+                            errors.append(f"下载后仍启动失败: {msg}")
+                            logger.warning(f"自动下载 Chromium 后仍启动失败: {msg}")
+
+            if self._context is None:
                 await self._close()
                 raise RuntimeError(
                     "所有浏览器启动方式均失败：\n  - " + "\n  - ".join(errors[-5:]) +
@@ -457,8 +497,75 @@ class HeadlessBackend(Backend):
             await self._hook_popups()
             self._adopt_page(await self._new_page())
             self._page.set_default_timeout(self.timeout * 1000)
+
+            # ⚠️ 自动加载 cookie 目录。
+            #    这个能力原版有，v2.1.0 重写时被整段丢掉过 ——
+            #    用户的登录态因此每次开浏览器都要重登。
+            #    **失败不能影响浏览器本身可用**（cookies.py 内部已逐文件容错）。
+            if getattr(self, "cookies_dir", "") and getattr(self, "load_cookies_on_start", True):
+                try:
+                    from . import cookies as _ck
+                    stats = await _ck.load_into_context(self._context, self.cookies_dir)
+                    if stats["loaded"]:
+                        self._desc += f"，已加载 {stats['cookies']} 条 cookie"
+                    for err in stats["errors"][:5]:
+                        logger.warning(f"cookie 加载跳过：{err}")
+                except Exception as e:
+                    logger.warning(f"自动加载 cookie 失败（不影响浏览器使用）：{e}")
+
             logger.info(f"无头后端已启动: {self._desc}")
             self._touch()
+
+    async def _download_chromium(self, errors: list) -> bool:
+        """自动下载内置 Chromium（带验证）；成功返回 True。
+
+        移植自原版的 `_download_chromium` —— v2.1.0 重写时被整段丢掉，
+        而 README 一直在承诺这个行为。
+
+        ⚠️ 两个细节不能省：
+          * **超时**：网络差的时候 `playwright install` 可能挂很久，
+            不设超时会把插件的启动流程整个卡住；
+          * **失败要给出可照做的命令**，而不是一个裸报错。
+        """
+        import sys
+        logger.info("所有浏览器来源都不可用，开始自动下载内置 Chromium…")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "playwright", "install", "chromium",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except Exception as e:
+            errors.append(f"自动下载启动失败: {e}")
+            logger.warning(f"无法启动 Chromium 自动下载: {e}")
+            return False
+
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(),
+                                            timeout=self.auto_download_timeout)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            errors.append(f"自动下载超时（{self.auto_download_timeout} 秒）")
+            logger.warning(
+                f"Chromium 自动下载超时（{self.auto_download_timeout}s）——"
+                f" 请检查网络后重试，或手动运行："
+                f"{sys.executable} -m playwright install chromium")
+            return False
+
+        if proc.returncode != 0:
+            tail = (out or b"").decode(errors="ignore")[-300:]
+            errors.append(f"自动下载失败（退出码 {proc.returncode}）")
+            logger.warning(
+                f"Chromium 自动下载失败（退出码 {proc.returncode}）：{tail}\n"
+                f"请手动运行：{sys.executable} -m playwright install chromium")
+            return False
+
+        logger.info("内置 Chromium 下载完成")
+        return True
 
     async def _hook_popups(self):
         if self._popup_hooked or self._context is None:

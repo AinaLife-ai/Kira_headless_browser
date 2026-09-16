@@ -430,6 +430,54 @@
       }
     }
   },
+  "load_cookies_on_start": {
+    "name": "Auto-load Cookies",
+    "type": "switch",
+    "default": true,
+    "hint": "On startup, load every .json in the cookie directory into the headless browser, so saved logins survive reinstalls / profile changes / a different machine. Pair with browser_cookie(action=\"export\") to save a site's cookies here. Failures never block the browser from starting.",
+    "locales": {
+      "zh": {
+        "name": "启动时自动加载 Cookie",
+        "hint": "启动无头浏览器时，把 cookie 目录下的所有 .json 灌回去 —— 这样重装插件、换 profile、换机器之后，登录态还能找回来。配合 browser_cookie(action=\"export\") 把某个站点的 cookie 导出到这里即可。任何文件有问题都只跳过它，**不会影响浏览器启动**。"
+      }
+    }
+  },
+  "cookies_dir": {
+    "name": "Cookie Directory",
+    "type": "string",
+    "default": "data/files/cookie",
+    "hint": "Where per-site cookie JSON files live (one file per site, e.g. chatgpt.json). Loaded automatically on startup when the switch above is on.",
+    "locales": {
+      "zh": {
+        "name": "Cookie 目录",
+        "hint": "各个站点的 cookie JSON 存放目录（一个站点一个文件，如 chatgpt.json）。上面的开关打开时会在启动时自动加载。"
+      }
+    }
+  },
+  "auto_download_browser": {
+    "name": "Auto-download Browser",
+    "type": "switch",
+    "default": true,
+    "hint": "If every browser source fails to start, download Playwright's bundled Chromium and use that. This is the last fallback; the usual cause of reaching it is that playwright is installed but `playwright install chromium` was never run. Turn off to fail fast instead of downloading.",
+    "locales": {
+      "zh": {
+        "name": "自动下载浏览器",
+        "hint": "所有浏览器来源都启动失败时，自动下载 Playwright 自带的内置 Chromium 来用。这是最后一级回退 —— 通常走到这一步的原因是「装了 playwright 但没跑过 playwright install chromium」。关掉则直接报错、不下载。"
+      }
+    }
+  },
+  "auto_download_timeout": {
+    "name": "Browser Download Timeout",
+    "type": "integer",
+    "default": 600,
+    "hint": "Seconds to allow for the automatic browser download. On timeout the startup fails with a manual command to run instead of hanging forever.",
+    "locales": {
+      "zh": {
+        "name": "浏览器下载超时（秒）",
+        "hint": "自动下载浏览器的超时时间。超时会失败并给出手动安装命令，而不是无限等下去。"
+      }
+    }
+  },
   "auto_describe_screenshot": {
     "name": "Describe Screenshot (VLM)",
     "type": "switch",

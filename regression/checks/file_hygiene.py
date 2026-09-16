@@ -129,11 +129,20 @@ def run(r) -> None:
     r.ok("D1 无编译产物 / 日志 / 系统文件", not bad, f"发现={bad or '无'}")
     r.ok("D2 无 __pycache__",
          not any("__pycache__" in str(f) for f in files))
-    r.ok("D3 无运行时数据目录",
-         not any(any(k in str(f) for k in
-                     ("cookie", "browser_profile", "inherited_profile",
-                      "screenshots"))
-                 for f in files))
+    # ⚠️ 判据是"**目录**里的运行时数据"，不是"路径里含某个词" ——
+    #    后者会误伤源码文件（例如 `cookies.py` 含 "cookie"，
+    #    但它是模块不是数据目录）。
+    _RUNTIME_DIR_MARKERS = ("cookie", "browser_profile", "inherited_profile",
+                            "screenshots")
+    _runtime_hits = []
+    for f in files:
+        rel = str(f)
+        # 只看这些标记作为**路径片段**出现（后面跟着 / 或者是目录本身）
+        if any(f"/{k}/" in f"/{rel}" or f"/{k}s/" in f"/{rel}"
+               for k in _RUNTIME_DIR_MARKERS):
+            _runtime_hits.append(rel)
+    r.ok("D3 无运行时数据目录", not _runtime_hits,
+         f"发现={_runtime_hits or '无'}")
     # 回归测试自己的产物（node_modules / 临时脚本）不该被提交
     reg_files = list((PLUGIN_DIR / "regression").rglob("*")) \
         if (PLUGIN_DIR / "regression").is_dir() else []

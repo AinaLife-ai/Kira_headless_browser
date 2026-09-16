@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.27
+# 浏览器插件 (Browser Plugin) 2.1.28
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -111,11 +111,33 @@ Chromium 没有给本地程序留"静默安装扩展"的正规接口：
 
 ### 无头后端的浏览器来源（`browser_channel`）
 
-按优先级依次尝试，全部失败会自动下载内置 Chromium：
+按优先级依次尝试；**全部失败会自动下载内置 Chromium**（这一级是真实实现的，
+不是只给个提示）：
 
 1. `auto` —— 系统默认浏览器 → Chrome → Edge → Chromium → 内置
 2. `chrome` / `msedge` / `chromium` —— 指定某一个
 3. `bundled` —— 只用 Playwright 自带的 Chromium
+
+> **第 4 级是自动下载**：上面全起不来时，会自动执行
+> `playwright install chromium` 并用刚下好的那个。带超时保护
+> （`auto_download_timeout`，默认 600 秒），失败会把可照做的命令写在错误里。
+> 不想让它下载就把 `auto_download_browser` 关掉。
+
+### Cookie 自动加载（`cookies_dir` / `load_cookies_on_start`）
+
+启动无头浏览器时，会把 **cookie 目录**下的所有 `.json` 自动灌回去。
+
+**为什么需要**：重装插件、换 `headless_profile_mode`、换机器之后，
+登录态就没了 —— 有了这个功能不用每次重新登录。
+
+**怎么用**：先用 `browser_cookie(action="export")` 把某个站点的 cookie
+导出成 JSON，存到 `data/files/cookie/`（一个站点一个文件，如 `chatgpt.json`）。
+下次启动自动生效。
+
+- 两种格式都接受：裸数组 `[...]`，或 `{"cookies": [...]}`（导出就是这个格式）
+- 字段用浏览器扩展那套命名（`expirationDate` / `sameSite` / `httpOnly`），会自动转换
+- **任何文件有问题都只跳过它**，不会连累别的站点、也不会影响浏览器启动
+- 默认开启；关掉开关（`load_cookies_on_start`）即可停用
 
 ### 无头后端的 profile 模式（`headless_profile_mode`，默认 `inherit`）
 
@@ -267,6 +289,14 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 
 ### 🔧 `browser_debug` —— 后端状态
 当前用哪个后端、profile 模式、超时设置、空闲多久、开着几张页面。排障用。
+
+### 🔍 `browser_check_vlm` —— 截图分析（VLM）自查
+显示当前**实际会用哪个模型**分析截图、它是否支持视觉、系统里有哪些可选的
+视觉模型，以及框架默认 VLM 是什么。
+
+当 `browser_screenshot` 返回「未能生成图片描述」时用它排查——**最常见的原因
+是模型配错了组**（用于描述的模型必须放在「大语言模型」组，不能放「图像」组，
+即使它本身支持视觉）。
 
 ### 🖥️ `browser_test_visible` —— 确认窗口可见
 打开一个测试页，用来确认可视模式下浏览器窗口是否真的显示出来了。
@@ -471,6 +501,39 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.28（2026-09-16）
+
+**恢复 v2.1.0 重写时丢掉的另外三样能力**（逐个对照原版扫出来的）：
+
+- 🔴 **cookie 目录自动加载**（原版 `_load_cookies`）——
+  启动时把 `data/files/cookie/*.json` 全部灌进浏览器，重装/换机器/profile
+  变化之后登录态还能找回来。丢之后 `data/files/cookie/` 成了**死目录**
+  （`.gitignore` 里还留着它，但没有任何代码去读）。
+  → 恢复为独立模块 `cookies.py`：兼容两种格式（裸数组 / `{"cookies":[...]}`）、
+  自动转换 `sameSite` 与 `expirationDate`、**坏文件只跳过它不连累其它站点**、
+  目录不存在自动创建、失败**不影响浏览器启动**。新增 `cookies_dir` /
+  `load_cookies_on_start` 配置。
+- 🔴 **自动下载内置 Chromium**（原版 `_download_chromium`）——
+  启动回退的**第 4 级**：所有浏览器来源都起不来时自动
+  `playwright install chromium`。丢之后只剩一句"请手动安装"的提示，
+  **而 README 一直在承诺"全部失败会自动下载内置 Chromium"** ——
+  **文档说有、代码没有**。→ 按原版恢复（带超时保护、失败给出手动命令），
+  新增 `auto_download_browser` / `auto_download_timeout` 配置。
+- **`browser_check_vlm` 工具** —— VLM 配置的自查入口。
+  正好是刚恢复的截图描述功能最需要的排障工具（不然用户遇到"没描述"只能翻日志）。
+  → 恢复并加强：直接指出**"模型配错组"**这个最常见的坑。
+
+**新增常驻检查 `lost_features`（19 项）—— 守这三样别再丢第二次**：
+结构（模块在不在、**接线在不在**、配置项、README 与代码是否一致）+
+行为（真跑 cookie 加载：两种格式、坏文件隔离、sameSite 映射、
+`expirationDate` 转换、目录不存在、context 为 None）。
+反向验证：去掉接线 → A2 FAIL；删掉下载实现 → A5/A6 FAIL；删掉 `cookies.py`
+→ A1 + B 段全 FAIL。
+
+**顺带修一个检查误判**：`D3 无运行时数据目录` 原来是"路径里含 cookie 就报"，
+把新模块 `cookies.py` 误伤了。→ 改为只在**路径片段**（`/cookie/`）上匹配，
+实测真实数据目录仍能被抓到。
 
 ### v2.1.27（2026-09-16）
 
