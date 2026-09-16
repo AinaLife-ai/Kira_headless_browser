@@ -304,7 +304,13 @@ async function downloadViaSession(params, cmdId) {
         try { await reader.cancel(); } catch (_) {}
         throw new Error(`文件超过上限 ${limit} 字节，已中止`);
       }
-      sendChunk(cmdId, slice);
+      // ⚠️ 发失败（socket 已关）必须中止下载并抛错：
+      //    否则会一路走到 return {ok:true}，调用方以为下载成功，
+      //    而磁盘上的文件其实缺了后面所有分块。
+      if (!sendChunk(cmdId, slice)) {
+        try { await reader.cancel(); } catch (_) {}
+        throw new Error("连接已断开，下载分块无法回传，已中止");
+      }
     }
   }
   if (buf.length) {
@@ -314,7 +320,9 @@ async function downloadViaSession(params, cmdId) {
     if (limit > 0 && total > limit) {
       throw new Error(`文件超过上限 ${limit} 字节，已中止`);
     }
-    sendChunk(cmdId, buf);
+    if (!sendChunk(cmdId, buf)) {
+      throw new Error("连接已断开，下载分块无法回传，已中止");
+    }
   }
 
   return { ok: true, url, mime, bytes: total };

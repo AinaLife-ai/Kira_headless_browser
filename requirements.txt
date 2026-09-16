@@ -1,2 +1,5 @@
 playwright>=1.40.0
 aiohttp>=3.14.3
+# 域名主体（注册域）判定用：正确处理 co.za 这类多级公共后缀，
+# 否则 *.bank* 这类规则会漏掉 bank.co.za（安全相关）
+publicsuffix2>=2.9.0

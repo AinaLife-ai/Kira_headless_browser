@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.17
+# 浏览器插件 (Browser Plugin) 2.1.18
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -76,7 +76,7 @@
 
 | 浏览器 | 支持 | 说明 |
 |---|---|---|
-| Chrome | ✅ **120+** | `chrome.userScripts`（执行 JS 依赖）从 120 起提供；扩展清单已声明 `minimum_chrome_version: 120` |
+| Chrome | ✅ **135+** | `chrome.userScripts.execute`（执行任意 JS 依赖）**从 135 起默认可用**；清单已声明 `minimum_chrome_version: 135`（低于此版本走无头后端执行 JS） |
 | Edge | ✅ **120+** | 同为 Chromium 内核，扩展机制一致；打开的是 `edge://extensions` |
 | Brave / Vivaldi / Opera | ✅ | Chromium 系，`chrome.*` API 一致 |
 | Firefox | ❌ | Firefox 的 MV3 用 event page，**不接受** `background.service_worker` |
@@ -292,7 +292,7 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 
 **两个后端接口完全对称** —— 换后端不丢能力，只是"在谁的浏览器里做"不同。
 
-> 最低版本是 **Chrome/Edge 120**：扩展的 `browser_script`（执行任意 JS）依赖
+> 最低版本是 **Chrome/Edge 135**：扩展的 `browser_script`（执行任意 JS）依赖
 > `chrome.userScripts`，它从 Chrome 120 起提供。低于 120 装不上扩展，
 > 但不装扩展也能用（走无头后端）。
 
@@ -470,6 +470,50 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.18（2026-09-15）
+
+**按 CodeRabbit 第十四轮审查修复 9 项**（含 2 个安全项）：
+
+- 🔴 **多级公共后缀漏判 → 规则形同虚设**：域名主体判定靠一张**硬编码**
+  的 `MULTI_TLD` 表（com.cn / co.uk / …），那种写法永远补不全 ——
+  `co.za` / `com.ar` / `co.il` 都不在表里，于是 `bank.co.za` 的主体被算成
+  `co.za`，`*.bank*` 这类规则**匹配不上真正的银行域**。
+  → 改用维护中的 **Public Suffix List**（`publicsuffix2`，已加进
+  `requirements.txt`；拿不到时退回"最后两段"并给出警告）。
+  实测：`bank.co.za` / `bank.com.ar` / `bank.co.il` 现在都能命中。
+- 🔴 **归一化规则时把裸 IPv6 的尾组当端口削掉**：
+  `re.sub(r":\d+$")` 会把 `2001:db8::1` 削成 `2001:db8:`、`::1` 削成 `:`，
+  用户填的 IPv6 屏蔽词**永远匹配不上**。
+  → 只从 `hostname:port` 或 `[IPv6]:port` 剥端口，裸 IPv6 原样保留。
+- **`minimum_chrome_version` 定错**：清单写的是 120，但
+  `chrome.userScripts.execute` 是**从 Chrome 135 起才默认可用**的
+  （查证：Chromium extensions 组的公告）。低于 135 的用户会拿到一个
+  "不支持"的报错却不知道为什么。→ 清单与 README 都改为 **135**。
+- **`sendChunk` 丢掉发送结果**：`sendRaw` 在 socket 已关时返回 `false`，
+  而 `sendChunk` 把它丢掉了 —— 下载会一路走到 `return {ok:true}`，
+  调用方以为成功，**而磁盘上的文件缺了后面所有分块**。
+  → `sendChunk` 回传结果，下载处检查失败即中止并抛错。
+- **带端口的完整地址会连错端口**：用户粘 `http://127.0.0.1:8000` 时，
+  端口 8000 被丢弃、改用端口字段（默认 5267）——**静默连到错误的端口**。
+  → 解析出显式端口并优先使用。
+
+**回归套件 4 项**：
+- **`callgraph` 的 D1 现在只筛 `str(...)` 调用**，不再对 `logger.info(...)`
+  这类属性调用做无谓判定。
+- **`C16e` 又会漏掉模板插值里的未声明变量**：我在 G1 修过这个问题，
+  但 `static_audit.py` 里**还有一份拷贝**用的是"整个模板串删掉"的老写法 ——
+  `` `${foo}` `` 里的 `foo` 一并消失。→ 同样改为保留 `${...}` 内容，
+  并加了**自检夹具**（只在插值里引用未声明变量 → 必须被抓到）。
+- **`tool_merge` 的 C6 只在全文里找 `chrome.userScripts.execute`** →
+  限定到 `execJs` 函数体内部（别处提到不算）。
+- **`tool_merge` 的 C1 对非 action 式工具直接跳过** → `browser_wait`
+  丢了 `seconds` 参数这种能力丢失查不出来。→ 增加按**具名参数**的校验
+  （`LEGACY_PARAMS` 表），反向验证：删掉 `seconds` → 立即 FAIL。
+- **`upload_stream.mjs` 用 `URL.pathname` 拼路径** → 改为 `fileURLToPath`。
+
+**新增用例**：`B2.8`（PSL 多级后缀）、`B2.9`（裸 IPv6 不被削端口），
+两个都做了反向验证（还原成旧写法 → 立即 FAIL）。
 
 ### v2.1.17（2026-09-15）
 

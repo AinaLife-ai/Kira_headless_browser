@@ -432,11 +432,91 @@ def run(r) -> None:
     #    漏了后面 `!ad.length` 仍在用它 → 可写模式下每次 refresh() 都抛
     #    ReferenceError，而且**只读模式因短路求值不触发**，非常难发现。
     #    这里做一个轻量"未声明标识符"扫描，专抓这类漏改。
+    def _keep_interp_c16e(m):
+        inner = re.findall(r'\$\{([^{}]*)\}', m.group(0))
+        return " " + " ".join(inner) + " "
+
+    def _scan_undeclared(code_in):
+        """扫出"用了但从没声明"的标识符（同 G1 的判据）。"""
+        _c = re.sub(r'/\*[\s\S]*?\*/', '', code_in)
+        _c = re.sub(r'(?m)//[^\n]*$', '', _c)
+        _c = re.sub(r'`(?:[^`\\]|\\.)*`', _keep_interp_c16e, _c)
+        _c = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', _c)
+        _c = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", _c)
+        _decl = set()
+        for _m in re.finditer(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)', _c):
+            _decl.add(_m.group(1))
+        for _m in re.finditer(r'\bfunction\s+([A-Za-z_$][\w$]*)', _c):
+            _decl.add(_m.group(1))
+        for _m in re.finditer(r'\bfunction\s*[\w$]*\s*\(([^)]*)\)', _c):
+            for _a in _m.group(1).split(","):
+                _a = _a.strip().split("=")[0].strip()
+                if _a:
+                    _decl.add(_a)
+        for _m in re.finditer(r'\bcatch\s*\(\s*([A-Za-z_$][\w$]*)', _c):
+            _decl.add(_m.group(1))
+        for _m in re.finditer(r'\(([^)]*)\)\s*=>', _c):
+            for _a in _m.group(1).split(","):
+                _a = _a.strip().split("=")[0].strip()
+                if _a and _a.isidentifier():
+                    _decl.add(_a)
+        for _m in re.finditer(r'(?<![\w.$])([A-Za-z_$][\w$]*)\s*=>', _c):
+            _decl.add(_m.group(1))
+
+        _bi = {
+            "document", "window", "chrome", "console", "Math", "JSON", "Date",
+            "Array", "Object", "String", "Number", "Boolean", "Promise",
+            "Error", "fetch", "setTimeout", "setInterval", "clearTimeout",
+            "clearInterval", "encodeURIComponent", "decodeURIComponent",
+            "parseInt", "parseFloat", "isNaN", "undefined", "null", "true",
+            "false", "this", "new", "typeof", "return", "if", "else", "for",
+            "while", "do", "function", "const", "let", "var", "async", "await",
+            "try", "catch", "finally", "class", "throw", "switch", "case",
+            "break", "continue", "delete", "in", "of", "instanceof", "void",
+            "yield", "static", "get", "set", "navigator", "location", "alert",
+            "confirm", "prompt", "Event", "CustomEvent", "Map", "Set",
+            "Symbol", "RegExp", "Infinity", "NaN", "arguments", "globalThis",
+            "requestAnimationFrame", "btoa", "atob", "Blob", "File",
+            "Uint8Array", "DataTransfer",
+        }
+        _used = {}
+        for _m in re.finditer(
+                r'(?<![\w.$])([a-z_$][\w$]*)(?=\s*(?:\.|\[))', _c):
+            _n = _m.group(1)
+            if _n not in _decl and _n not in _bi:
+                _used.setdefault(_n, _c[:_m.start()].count("\n") + 1)
+        for _m in re.finditer(
+                r'(?<![\w.$])([a-z_$][\w$]*)(?=\s*[)\]}])', _c):
+            _n = _m.group(1)
+            if _n in _decl or _n in _bi or _n in _used:
+                continue
+            if _n in ("return", "typeof", "await", "new", "in", "of", "if",
+                      "for", "while", "catch", "switch"):
+                continue
+            _used.setdefault(_n, _c[:_m.start()].count("\n") + 1)
+        return _used
+
+    # ── C16e 的自检夹具 ──────────────────────────────────────────────
+    #  ⚠️ 专门验证"只在模板插值里引用未声明变量"这种情况能被抓到。
+    #     之前模板串被整体替换成 `` ``, 里面的 `${foo}` 一并消失，
+    #     这类 bug 就永远查不出来（而运行时照样 ReferenceError）。
+    _fx_bad = "const s = `x=${notDeclaredAnywhere.y}`;"
+    _fx_ok = "const notDeclaredAnywhere = { y: 1 };\nconst s = `x=${notDeclaredAnywhere.y}`;"
+    r.ok("C16e 自检夹具：模板插值里的未声明变量必须被抓到",
+         "notDeclaredAnywhere" in _scan_undeclared(_fx_bad),
+         f"夹具扫描={sorted(_scan_undeclared(_fx_bad))}")
+    r.ok("C16e 自检夹具：已声明的插值变量不得误报",
+         "notDeclaredAnywhere" not in _scan_undeclared(_fx_ok),
+         f"夹具扫描={sorted(_scan_undeclared(_fx_ok))}")
+
     _js = re.search(r'<script>([\s\S]*)</script>', web)
     _code = _js.group(1) if _js else ""
     _code = re.sub(r'/\*[\s\S]*?\*/', '', _code)
     _code = re.sub(r'(?m)//[^\n]*$', '', _code)
-    _code = re.sub(r'`(?:[^`\\]|\\.)*`', '``', _code)
+    # ⚠️ 模板串不能**整体**删掉：`${foo}` 里的标识符是**真实求值**的，
+    #    删了就会漏判（C16e 假绿，运行时却 ReferenceError）。
+    #    做法：先把 `${...}` 里的内容抽出来保留，再删掉其余模板文本。
+    _code = re.sub(r'`(?:[^`\\]|\\.)*`', _keep_interp_c16e, _code)
     _code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', _code)
     _code = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", _code)
     _declared = set()

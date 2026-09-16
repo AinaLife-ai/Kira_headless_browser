@@ -145,7 +145,7 @@ function _expandV6(h) {
  */
 export function buildWsUrl(host, port, token) {
   const raw = (host || DEFAULT_HOST).trim();
-  const p = String(port || DEFAULT_PORT).trim();
+  let p = String(port || DEFAULT_PORT).trim();
 
   // 解析出 scheme（用户可能填 `ws://` / `wss://` / 误填 `http://` / 裸主机名）
   // ⚠️ 必须认 http/https：面板上让用户填地址时，他们很自然会粘
@@ -161,12 +161,27 @@ export function buildWsUrl(host, port, token) {
     h = raw.slice(m[0].length);
   }
   h = h.replace(/\/.*$/, "");                        // 去掉可能的路径
-  // ⚠️ 端口只能从**带方括号的 IPv6** 或**单冒号的 host:port** 里剥。
-  //    裸 IPv6 里到处都是冒号 —— `::1` 被 `/:\d+$/` 剥掉尾巴就成了 `::`，
-  //    于是 isLoopbackHost 判不出回环、拼出的 URL 也是非法的
-  //    （`wss://::5267/...`）。
-  if (/^\[.*\]:\d+$/.test(h) || (!h.startsWith("[") && h.split(":").length === 2)) {
-    h = h.replace(/:\d+$/, "");
+  // ⚠️ 端口解析：用户可能把**带端口的完整地址**粘进来
+  //    （`http://127.0.0.1:8000`），这时要用他给的端口，
+  //    而不是拿端口字段去覆盖 —— 否则会静默连到错误的端口上。
+  //    · `[IPv6]:port` → 取方括号里的部分 + 那个端口
+  //    · `host:port`（只有一个冒号）→ 拆成主机 + 端口
+  //    · 裸 IPv6（`::1`）里本来就有冒号，**绝不能**当端口剥，
+  //      否则会变成 `::`（判不出回环、拼出 `wss://::5267/...` 这种非法 URL）
+  let embeddedPort = "";
+  if (/^\[.*\]:\d+$/.test(h)) {
+    const i = h.lastIndexOf("]:");
+    embeddedPort = h.slice(i + 2);
+    h = h.slice(0, i + 1);                 // 保留方括号
+  } else if (!h.startsWith("[") && h.split(":").length === 2
+             && /^[^:]+:\d+$/.test(h)) {
+    const i = h.lastIndexOf(":");
+    embeddedPort = h.slice(i + 1);
+    h = h.slice(0, i);
+  }
+  if (embeddedPort) {
+    // 显式端口优先于端口字段
+    p = embeddedPort;
   }
 
   const loopback = isLoopbackHost(h);

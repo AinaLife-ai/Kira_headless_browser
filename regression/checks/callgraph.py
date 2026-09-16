@@ -163,6 +163,11 @@ def run(r) -> None:
                 # ast.unparse 能稳定还原成 "str(event.session)"。
                 if not isinstance(node, ast.Call):
                     continue
+                # ⚠️ 只看**裸函数名**调用（str(...)）。`logger.info(...)`
+                #    这类属性调用不是我们要找的，先筛掉能避免
+                #    ast.unparse/结构判断在它们身上浪费或误伤。
+                if not (isinstance(node.func, ast.Name) and node.func.id == "str"):
+                    continue
                 # ⚠️ 用 **AST 结构**判断，不要用 ast.unparse() 的字符串前缀：
                 #    前缀匹配会被 `str(event.session_id)` 这类**不同**的属性
                 #    误命中（session_id 是合法用法），也会被空格/换行差别绕过。

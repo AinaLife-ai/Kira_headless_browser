@@ -203,6 +203,45 @@ def run(r) -> None:
         r.warn("没有 node，跳过 buildWsUrl 行为检查",
                "安装 Node.js 后可启用")
 
+    # ── 多级公共后缀（PSL）────────────────────────────────────────────
+    #  ⚠️ 这里过去靠一张**硬编码**的 MULTI_TLD 表（com.cn / co.uk / …）。
+    #     那种写法必然补不全：co.za / com.ar / co.il 都不在表里，
+    #     于是 `bank.co.za` 的主体被算成 `co.za`，
+    #     `*.bank*` 这种规则**匹配不上真正的银行域** —— 是安全漏洞。
+    #     改用 Public Suffix List 之后各国后缀都能正确识别。
+    _psl_cases = [
+        ("bank.co.za", True), ("www.bank.co.za", True),   # 南非
+        ("bank.com.ar", True), ("bank.co.il", True),      # 阿根廷 / 以色列
+        ("bank.com.cn", True), ("bank.co.uk", True),      # 原本就在表里的
+        ("bankofamerica.com", True),
+        ("evil.com", False), ("example.org", False),      # 不得误报
+    ]
+    _psl_bad = []
+    for _h, _want in _psl_cases:
+        _got = sec._matches(_h, "*.bank*")
+        if _got != _want:
+            _psl_bad.append(f"{_h}: {_got}（期望 {_want}）")
+    r.ok("B2.8 域名主体按 Public Suffix List 解析（co.za 等多级后缀不漏）",
+         not _psl_bad, f"不符={_psl_bad or '无'}")
+
+    # ── 端口只从 host:port / [IPv6]:port 剥 ───────────────────────────
+    #  ⚠️ 裸 IPv6 里本来就有冒号，用 `re.sub(r":\d+$")` 会把尾组当端口削掉
+    #     （`2001:db8::1` → `2001:db8:`，`::1` → `:`），规则直接失效。
+    _port_cases = [
+        ("2001:db8::1", "2001:db8::1"),        # 裸 IPv6 必须原样保留
+        ("::1", "::1"),
+        ("[2001:db8::1]:8080", "2001:db8::1"),
+        ("example.com:8080", "example.com"),
+        ("*.bank.com", "*.bank.com"),
+    ]
+    _port_bad = []
+    for _in, _want in _port_cases:
+        _got = sec._normalize_pattern(_in)
+        if _got != _want:
+            _port_bad.append(f"{_in} → {_got!r}（期望 {_want!r}）")
+    r.ok("B2.9 归一化规则时不会把裸 IPv6 的尾组当端口削掉",
+         not _port_bad, f"不符={_port_bad or '无'}")
+
     section("C. check_url 整体行为")
     # 黑名单优先
     ok, _ = sec.check_url("https://bankofamerica.com/x", blocked=["*.bank*"])

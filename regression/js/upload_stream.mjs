@@ -6,13 +6,17 @@
  */
 import { JSDOM } from "jsdom";
 import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
 import { createHash } from "crypto";
 
 // ⚠️ 必须能被 KIRA_PLUGIN_DIR 覆盖。
 //    写死路径的话，反向验证时会**悄悄测的还是原目录的文件** ——
 //    检查永远通过，等于没有检查（我第一次就这么写的，反向验证才发现）。
+// ⚠️ 用 fileURLToPath 而不是 URL.pathname：后者在 Windows 上会留下
+//    `/C:/...` 这种带前导斜杠的路径，在含空格/非 ASCII 的目录里也
+//    不会正确解码（%20 之类）。
 const PLUGIN = process.env.KIRA_PLUGIN_DIR
-  || new URL("../..", import.meta.url).pathname;
+  || fileURLToPath(new URL("../..", import.meta.url));
 const src = readFileSync(`${PLUGIN}/browser-bridge/content.js`, "utf8");
 
 const dom = new JSDOM(`<!doctype html><html><body>

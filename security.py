@@ -207,6 +207,59 @@ def parse_scheme(url: str) -> str:
         return ""
 
 
+#: 懒加载的 PSL 解析器；None=PUBLIC_SUFFIX_LIST 不可用（退回朴素做法）
+_PSL_TRIED = False
+_PSL_OK = False
+
+
+def _registrable_domain(host: str) -> str:
+    """取注册域（bank.co.za -> bank.co.za，www.bank.co.za -> bank.co.za）。
+
+    ⚠️ 不能靠硬编码的多级后缀表 —— 那张表永远补不全（co.za / com.ar /
+    co.il …），漏一个就意味着该国的域名绕过关键词规则。
+    这里用维护中的 Public Suffix List；拿不到就退回"最后两段"。
+    """
+    global _PSL_TRIED, _PSL_OK
+    h = (host or "").strip().lower().rstrip(".")
+    if not h:
+        return ""
+    # IP 字面量没有"注册域"概念，原样返回
+    try:
+        import ipaddress
+        ipaddress.ip_address(h)
+        return h
+    except ValueError:
+        pass
+    if not _PSL_TRIED:
+        _PSL_TRIED = True
+        try:
+            import publicsuffix2  # noqa: F401
+            _PSL_OK = True
+        except Exception:
+            _PSL_OK = False
+            # ⚠️ 这里**不能**依赖 core.logging_manager —— security.py 是
+            #    叶子模块，保持零内部依赖（测试里直接 import 它）。
+            #    用 warnings 让"没装 PSL 库"这件事可见但不会炸。
+            import warnings
+            warnings.warn(
+                "publicsuffix2 不可用，域名主体判定退回「最后两段」——"
+                "多级公共后缀（co.za / com.ar 等）可能漏判，"
+                "建议 pip install publicsuffix2",
+                RuntimeWarning, stacklevel=2)
+    if _PSL_OK:
+        try:
+            import publicsuffix2
+            # get_sld 返回注册域（含公共后缀）
+            # 例：get_sld("www.bank.co.za") -> "bank.co.za"
+            sld = publicsuffix2.get_sld(h)
+            if sld:
+                return sld
+        except Exception:
+            pass
+    labels = h.split(".")
+    return ".".join(labels[-2:]) if len(labels) >= 2 else h
+
+
 def _normalize_pattern(pattern: str) -> str:
     """把用户填的规则归一化成 host 形式的 glob。"""
     p = (pattern or "").strip().lower()
@@ -215,8 +268,15 @@ def _normalize_pattern(pattern: str) -> str:
     # 允许用户直接填完整 URL，这里只取 host 部分
     if "://" in p:
         p = urlparse(p).hostname or p
-    # 去掉端口
-    p = re.sub(r":\d+$", "", p)
+    # ⚠️ 端口只能从「hostname:port」或「[IPv6]:port」里剥。
+    #    裸 IPv6（2001:db8::1）里本来就有冒号，直接 re.sub(r":\d+$") 会把
+    #    尾组当成端口削掉（`2001:db8::1` → `2001:db8:`，`::1` → `:`），
+    #    规则就此失效 —— 用户填的 IPv6 屏蔽词会匹配不上任何东西。
+    if p.startswith("["):
+        m = re.match(r"^\[([^\]]+)\](?::\d+)?$", p)
+        p = m.group(1) if m else p
+    elif ":" in p and p.count(":") == 1:
+        p = p.split(":", 1)[0]          # 只有一个冒号 → 是 host:port
     # 去掉路径残留
     p = p.split("/")[0]
     return p
@@ -294,16 +354,16 @@ def _matches(host: str, pat: str) -> bool:
         #
         #    多级公共后缀（com.cn / co.uk / com.br …）单独处理，
         #    否则 bank.com.cn 的主体会被算成 com.cn，规则反而漏掉。
-        MULTI_TLD = {"com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
-                     "co.uk", "org.uk", "me.uk", "co.jp", "co.kr",
-                     "com.br", "com.tw", "com.hk", "com.sg", "co.in",
-                     "com.au", "co.nz", "com.mx", "com.tr"}
-        if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_TLD:
-            body_labels = labels[-3:]
-        elif len(labels) >= 2:
-            body_labels = labels[-2:]
-        else:
-            body_labels = labels
+        # 取**注册域**（registrable domain）再判断关键词落在哪个标签上。
+        #
+        # ⚠️ 这里过去用一张硬编码的 MULTI_TLD 表（com.cn / co.uk / …）。
+        #    那种写法必然漏：`co.za`、`com.ar`、`co.il` 等都没在表里，
+        #    于是 `bank.co.za` 的主体被算成 `co.za`，
+        #    `*.bank*` 这种规则**匹配不上**真正的银行域 —— 是个安全漏洞。
+        #    改用维护中的 Public Suffix List（publicsuffix2），
+        #    拿不到时退回"最后两段"的朴素做法（至少不比以前差）。
+        body = _registrable_domain(h)
+        body_labels = body.split(".") if body else labels[-2:]
         return any(core in label for label in body_labels)
 
     # 拆成「通配符左边的字面量」+「含通配符的剩余部分」。

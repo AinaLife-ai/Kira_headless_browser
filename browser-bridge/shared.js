@@ -43,14 +43,20 @@ export function sendEvent(name, data) {
   sendRaw({ type: MSG.EVENT, name, data: data || {} });
 }
 
-/** 下载分块回传（扩展 → 插件） */
+/** 下载分块回传（扩展 → 插件）。
+ *
+ * ⚠️ 必须把 sendRaw 的结果**回传出去**：socket 已经关了的时候
+ *    sendRaw 返回 false，而这里原来把它丢掉 —— 调用方（下载）
+ *    因此以为分块发出去了，最后还会 return {ok:true}，
+ *    等于"下载成功了但文件其实缺了一大段"。
+ */
 export function sendChunk(cmdId, uint8) {
   let bin = "";
   const step = 0x8000;
   for (let i = 0; i < uint8.length; i += step) {
     bin += String.fromCharCode.apply(null, uint8.subarray(i, i + step));
   }
-  sendRaw({ type: MSG.CHUNK, id: cmdId, data: btoa(bin) });
+  return sendRaw({ type: MSG.CHUNK, id: cmdId, data: btoa(bin) });
 }
 
 // ─── 标签页解析 ────────────────────────────────────────────────────────

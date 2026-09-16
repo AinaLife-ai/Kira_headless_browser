@@ -79,6 +79,12 @@ def _tool_enum(src: str, tool: str) -> set[str]:
     return out
 
 
+#: 非 action 式工具的关键参数（丢了就是能力丢失，单靠 enum 查不出来）
+LEGACY_PARAMS = {
+    "browser_wait": ("selector", "seconds", "timeout"),
+    "browser_wait_for": ("selector", "timeout"),
+}
+
 NEED_ACTIONS = {
     "click", "fill", "type", "hover", "scroll", "upload",
     "go_back", "refresh",
@@ -117,7 +123,7 @@ def run(r) -> None:
             # 有些目标工具本来就**不是** action 式的（browser_wait / browser_tabs
             # 等），没有 enum 是正常的，不该要求 action 存在。
             # 判据：它的参数里声明了 action/mode 吗？声明了才要求 enum。
-            _seg = main[main.find(f'name="{newtool}"'):][:1200]
+            _seg = main[main.find(f'name="{newtool}"'):][:1600]
             _has_sel = bool(re.search(r'"(action|mode)":\s*\{"type"', _seg))
             if _has_sel and not enums:
                 ok = False
@@ -127,6 +133,17 @@ def run(r) -> None:
                     if a not in enums:
                         ok = False
                         missing.append(f"{old}({newtool}.enum 里没有 {a})")
+            else:
+                # ⚠️ 目标工具**不是** action 式（如 browser_wait）时，
+                #    上面整段都会被跳过 —— 于是"browser_wait 丢了
+                #    seconds/selector 参数"这种能力丢失检测不出来。
+                #    这里按**具名参数**再校验一遍：LEGACY 里登记的必要
+                #    参数名必须仍出现在该工具的 params 里。
+                _need = LEGACY_PARAMS.get(old, ())
+                for _pn in _need:
+                    if f'"{_pn}"' not in _seg:
+                        ok = False
+                        missing.append(f"{old}({newtool} 缺参数 {_pn})")
         if not ok and (newtool not in now):
             missing.append(old)
         r.note(f"{'✅' if ok else '❌'} {old:<28} → {newtool}"
@@ -176,8 +193,14 @@ def run(r) -> None:
               "mouseDrag", "listFiles", "debugInfo")),
          "13 个补齐命令")
 
-    r.ok("C6 扩展侧实现 exec_js（走 chrome.userScripts）",
-         "async function execJs(" in cap and "chrome.userScripts.execute" in cap)
+    # ⚠️ 必须限定在 **execJs 函数体内部**：只查"cap 里出现过
+    #    chrome.userScripts.execute"是不够的 —— 别处（比如 ensureUserScripts）
+    #    也可能提到它，execJs 自己改成别的方式实现照样能通过。
+    _ej = cap.split("async function execJs(")[-1].split("async function upload(")[0] \
+        if "async function execJs(" in cap else ""
+    r.ok("C6 扩展侧实现 exec_js（execJs 函数体内走 chrome.userScripts.execute）",
+         bool(_ej) and "chrome.userScripts.execute" in _ej,
+         "必须在 execJs 自己的实现里出现")
     r.ok("C7 扩展侧实现 upload（DataTransfer）",
          "async function upload(" in cap and "DataTransfer" in src("browser-bridge/content.js"))
     # 看**意图**而不是写死的字面量：现在凭据是按协议条件携带的
