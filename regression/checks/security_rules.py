@@ -306,6 +306,54 @@ def run(r) -> None:
     r.ok("C4 file:// 被拒", not ok)
     ok, _ = sec.check_url("javascript:alert(1)")
     r.ok("C5 javascript: 被拒", not ok)
-    # 本机地址
-    ok, _ = sec.check_url("http://127.1:5267/")
-    r.ok("C6 本机地址（简写形式）被拒", not ok)
+    # ── 本机 / 内网：默认放行，可配置收紧 ──────────────────────────
+    #
+    # ⚠️ 这里过去断言"本机一律被拒"。现在**默认是允许的** ——
+    #    插件定位就是让 AI 帮用户操作浏览器，localhost:3000 这类本地开发
+    #    服务器和 KiraAI 自己的面板都是正常目标，默认拦掉会让"帮我看看
+    #    我本地的页面"直接不可用。需要收紧的人在配置里关掉 local_access。
+    #    所以这条用例改成**两个方向都验**：
+    #      · 默认（local_access=True）→ 本机与内网必须放行；
+    #      · 收紧（local_access=False）→ 本机/内网/元数据必须拒绝。
+    _local_urls = ["http://127.0.0.1:5267/overview", "http://localhost:3000/",
+                   "http://127.1:5267/", "http://[::1]:9000/",
+                   "http://192.168.1.1/", "http://10.0.0.5/"]
+    _open_bad = [u for u in _local_urls
+                 if not sec.check_url(u, local_access=True)[0]]
+    r.ok("C6 默认放行本机/内网地址（插件定位就是给 AI 操作浏览器）",
+         not _open_bad, f"被误拦={_open_bad or '无'}")
+
+    _strict_bad = [u for u in _local_urls
+                   if sec.check_url(u, local_access=False)[0]]
+    r.ok("C6b 关闭「允许访问本机/内网」后，本机/内网一律拒绝",
+         not _strict_bad, f"漏放={_strict_bad or '无'}")
+
+    # 收紧模式下云元数据端点也必须拒（SSRF 的关键目标）
+    _meta_ok, _ = sec.check_url("http://169.254.169.254/latest/meta-data/",
+                                local_access=False)
+    r.ok("C6c 收紧模式下云元数据端点被拒", not _meta_ok)
+
+    # 收紧后公网站点不受影响
+    _pub_ok, _ = sec.check_url("https://example.com/", local_access=False)
+    r.ok("C6d 收紧模式不影响公网站点", _pub_ok)
+
+    # ⚠️ 默认黑名单**不能**再包含 127.0.0.1 / localhost ——
+    #    黑名单优先级最高，留着它们会让「允许访问本机」这个开关形同虚设：
+    #    用户明明开着开关，本机地址还是被黑名单拦掉。
+    #    本机是否允许，统一由 local_access 决定。
+    import json as _json
+    _sch = _json.loads(src("schema.json"))
+    _dflt_blocked = (_sch.get("blocked_domains") or {}).get("default") or []
+    _conflict = [x for x in _dflt_blocked
+                 if x.strip().lower() in ("127.0.0.1", "localhost", "::1",
+                                          "0.0.0.0")]
+    r.ok("C6e 默认黑名单不含本机条目（否则「允许访问本机」会失效）",
+         not _conflict, f"冲突={_conflict or '无'}")
+
+    # 用**真实默认配置**跑一遍端到端：开关开着就必须真的能访问
+    _end_to_end = []
+    for _u in ("http://127.0.0.1:5267/overview", "http://localhost:3000/"):
+        if not sec.check_url(_u, blocked=_dflt_blocked, local_access=True)[0]:
+            _end_to_end.append(_u)
+    r.ok("C6f 用默认配置端到端：本机地址确实可访问",
+         not _end_to_end, f"仍被拦={_end_to_end or '无'}")

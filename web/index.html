@@ -216,7 +216,8 @@ async function refresh() {
     // ⚠️ allowed_domains / blocked_domains 同样来自配置，可能含任意字符，
     //    一律用 DOM 节点渲染（见下方 _renderDomains），不再拼 HTML 字符串。
     $("domains").innerHTML = "";
-    _renderDomains($("domains"), p.allowed_domains, p.blocked_domains);
+    _renderDomains($("domains"), p.allowed_domains, p.blocked_domains,
+      p.local_access !== false);
     // （白名单条数在下面 warn 判定里用 allowedCount）
 
     let warn = "";
@@ -299,7 +300,7 @@ let _regenTimer = null;
  * 这些值来自配置、内容不受控（可能含 `<` `&` 或引号），
  * 拼进 innerHTML 就是一个注入口（CWE-79）。
  */
-function _renderDomains(box, allowedRaw, blockedRaw) {
+function _renderDomains(box, allowedRaw, blockedRaw, localAccess) {
   const allowed = Array.isArray(allowedRaw) ? allowedRaw : [];
   const blocked = Array.isArray(blockedRaw) ? blockedRaw : [];
 
@@ -326,12 +327,16 @@ function _renderDomains(box, allowedRaw, blockedRaw) {
   r2.style.marginTop = "6px";
   box.appendChild(r2);
 
+  // ⚠️ 本机地址不再是"永久拦截"：插件定位就是让 AI 帮你操作浏览器，
+  //    本地开发服务器与 KiraAI 面板都是正常目标，默认放开。
+  //    是否拦截由配置项「允许访问本机 / 内网」决定。
   const r3 = document.createElement("div");
   r3.style.marginTop = "6px";
   const b3 = document.createElement("b");
-  b3.textContent = "永久拦截：";
+  b3.textContent = "本机 / 内网地址：";
   const c3 = document.createElement("code");
-  c3.textContent = "本机地址";
+  // localAccess 由 refresh() 传入（读的是插件配置）
+  c3.textContent = localAccess ? "允许（默认）" : "已拒绝（配置已关闭）";
   r3.appendChild(b3);
   r3.appendChild(c3);
   box.appendChild(r3);
@@ -340,8 +345,13 @@ function _renderDomains(box, allowedRaw, blockedRaw) {
   hint.className = "hint";
   hint.textContent =
     "黑名单优先级最高，读和写都会被拒绝。白名单非空时，写操作仅限白名单域名。"
-    + "指向本机的地址（localhost / 127.0.0.1 / [::1] / 0.0.0.0 / 十进制 IP "
-    + "等各种写法）无条件拒绝，避免 AI 操作到 KiraAI 自身的服务。";
+    + (localAccess
+        ? "本机 / 内网地址默认允许 —— 包括 localhost、127.0.0.1、"
+          + "[::1]、十进制 IP 等写法，以及你自己的本地开发服务器。"
+          + "如果不想让 AI 碰这些（例如担心它打开 KiraAI 面板改配置），"
+          + "把配置里的「允许访问本机 / 内网」关掉即可。"
+        : "「允许访问本机 / 内网」已关闭：本机、内网与链路本地地址"
+          + "（含云厂商元数据端点 169.254.169.254）一律拒绝。");
   box.appendChild(hint);
 }
 

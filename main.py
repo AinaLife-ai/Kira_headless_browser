@@ -105,6 +105,10 @@ class BrowserPlugin(BasePlugin):
         self.read_only = _b(cfg.get("read_only", False))
         self.allowed_domains = list(cfg.get("allowed_domains") or [])
         self.blocked_domains = list(cfg.get("blocked_domains") or [])
+        # ⚠️ 本机 / 内网默认**允许**访问：本插件就是给 AI 当浏览器用的，
+        #    localhost:3000 这类开发服务器和 KiraAI 自己的面板都是正常工作目标。
+        #    想收紧的人在配置里关掉，那时本机与内网一律拒绝。
+        self.local_access = _b(cfg.get("local_access", True))
         self.require_confirm = _b(cfg.get("require_confirm", False))
         self.inject_page_state = _b(cfg.get("inject_page_state", True))
         self.panel_auth_required = _b(cfg.get("panel_auth_required", True))
@@ -372,16 +376,20 @@ class BrowserPlugin(BasePlugin):
             return ("当前处于「只读模式」，无法执行点击/输入/跳转等写操作。"
                     "如确实需要，请在插件配置里关闭只读模式。")
         if url:
-            ok, reason = security.check_url(url, allowed=self.allowed_domains,
-                                            blocked=self.blocked_domains, for_write=True)
+            ok, reason = security.check_url(
+                url, allowed=self.allowed_domains,
+                blocked=self.blocked_domains, for_write=True,
+                local_access=self.local_access)
             return None if ok else reason
         # 没给 URL：拿当前页面地址来判
         cur = await self._current_url(backend)
         if not cur:
             return ("无法确认当前页面地址，出于安全考虑已拒绝本次写操作。"
                     "请确认扩展已连接，或先让无头后端打开一个页面。")
-        ok, reason = security.check_url(cur, allowed=self.allowed_domains,
-                                        blocked=self.blocked_domains, for_write=True)
+        ok, reason = security.check_url(
+            cur, allowed=self.allowed_domains,
+            blocked=self.blocked_domains, for_write=True,
+            local_access=self.local_access)
         return None if ok else reason
 
     async def _current_url(self, backend) -> Optional[str]:
@@ -1200,6 +1208,8 @@ class BrowserPlugin(BasePlugin):
                 "require_confirm": self.require_confirm,
                 "allowed_domains": self.allowed_domains,
                 "blocked_domains": self.blocked_domains,
+                # 面板要据此显示"本机/内网：允许 / 已拒绝"
+                "local_access": self.local_access,
                 "max_content_chars": self.max_content_chars,
             },
             "last_state": {k: v for k, v in self._last_state.items() if k != "_ts"},

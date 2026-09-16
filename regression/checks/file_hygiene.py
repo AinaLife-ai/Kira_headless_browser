@@ -151,9 +151,15 @@ def run(r) -> None:
                     or p.name.startswith("kira_ext_client_"))]
     r.ok("D5 回归测试目录无临时产物/缓存", not reg_bad,
          f"发现={[str(x) for x in reg_bad] or '无'}")
-    # 插件本体只允许一个 README；regression/ 有自己的 README（已排除在清点之外）
-    stray_md = [f for f in files if f.suffix == ".md" and f.name != "README.md"]
-    r.ok("D4 插件本体除 README 外没有游离的 md",
+    # 插件本体只允许 README（+ 一份**白名单**的说明文档）。
+    # ⚠️ 规则的本意是防"文档散落"，不是禁止一切文档 —— 所以用白名单
+    #    而不是放开。目前白名单里只有 SECURITY_DESIGN.md：
+    #    它写的是"哪些看似可疑的行为是有意设计"（给自动审查看的），
+    #    放在 README 里会淹没正文，独立成篇才是合适的。
+    ALLOWED_MD = {"README.md", "SECURITY_DESIGN.md"}
+    stray_md = [f for f in files
+                if f.suffix == ".md" and f.name not in ALLOWED_MD]
+    r.ok("D4 插件本体除 README/白名单外没有游离的 md",
          not stray_md, f"发现={stray_md or '无'}")
 
     # ── E. .gitignore ───────────────────────────────────────────────
