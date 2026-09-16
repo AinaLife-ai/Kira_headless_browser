@@ -41,6 +41,7 @@ from core.chat.message_utils import MessageChain, KiraMessageBatchEvent
 from . import protocol as P
 from . import security
 from . import setup_guide
+from . import vlm
 from .backends import BackendRouter, ExtensionBackend, HeadlessBackend
 from .bridge import BrowserBridge, BridgeError, BridgeNotConnected, BridgeTimeout
 from .tokens import ensure_token, is_current_token, token_expiry
@@ -119,6 +120,19 @@ class BrowserPlugin(BasePlugin):
         self.read_only = _b(cfg.get("read_only", False))
         self.allowed_domains = list(cfg.get("allowed_domains") or [])
         self.blocked_domains = list(cfg.get("blocked_domains") or [])
+        # —— 截图 → VLM 描述（让 bot 能"看到"页面）——
+        # ⚠️ 这个能力在原版 headless_browser 里是有的，合并时**被整体弄丢**过。
+        #    它很重要：插件能给**用户**发图，但 bot 自己看不到图 ——
+        #    工具结果是以 role:"tool" 的**文本**进模型的。
+        #    bot 想"看到"页面只能靠 VLM 把图转成描述。
+        #    两个后端都适用（VLM 调用在插件进程里，跟谁拍的图无关）。
+        self.vlm_model = str(cfg.get("vlm_model") or "").strip()
+        self.vlm_describe_prompt = str(cfg.get("vlm_describe_prompt") or "").strip()
+        self.vlm_timeout = float(cfg.get("vlm_timeout", 10) or 10)
+        #: 默认是否描述。**每次截图时模型也可以自己用 describe 参数覆盖** ——
+        # 「要不要看图」应该由模型按当前任务决定（有时它只想把图发给用户）。
+        self.auto_describe_screenshot = _b(cfg.get("auto_describe_screenshot", True))
+
         # ⚠️ 本机 / 内网默认**允许**访问：本插件就是给 AI 当浏览器用的，
         #    localhost:3000 这类开发服务器和 KiraAI 自己的面板都是正常工作目标。
         #    想收紧的人在配置里关掉，那时本机与内网一律拒绝。
@@ -799,15 +813,28 @@ class BrowserPlugin(BasePlugin):
 
     @register.tool(
         name="browser_screenshot",
-        description="截图并保存（默认直接把图片发给用户）。selector 可只截某个元素。",
+        description=(
+            "截图。默认把图片发给用户，**并且用 VLM 分析出文字描述回给你**"
+            "（这样你才能「看到」页面：工具结果是文本，图片本身不会进你的上下文）。\n"
+            "  describe=false —— 只要图、不要描述（只想让用户看图时更省）。\n"
+            "  selector  —— 只截某个元素。full_page —— 整页。\n"
+            "  send=false —— 不发给用户，只自己看（describe 默认仍为 true）。"
+        ),
         params={"type": "object", "properties": {
             "full_page": {"type": "boolean", "description": "是否整页截图，默认 false"},
             "selector": {"type": "string", "description": "只截这个元素"},
-            "send": {"type": "boolean", "description": "是否把图片发给用户，默认 true"}},
+            "send": {"type": "boolean", "description": "是否把图片发给用户，默认 true"},
+            "describe": {
+                "type": "boolean",
+                "description": "是否用 VLM 分析截图并把描述回给你，默认取插件配置"
+                               "（通常为 true）。只想让用户看图、不需要自己理解时"
+                               "设 false 更快。",
+            }},
             "required": []},
     )
     async def tool_screenshot(self, event: KiraMessageBatchEvent, full_page: bool = False,
-                              selector: str = "", send: bool = True, **_):
+                              selector: str = "", send: bool = True,
+                              describe=None, **_):
         if not self.enabled:
             return "浏览器插件未启用"
         prefix = "element" if selector else "screenshot"
@@ -818,10 +845,42 @@ class BrowserPlugin(BasePlugin):
             path = os.path.join("data/temp", f"{prefix}_{int(time.time())}.png")
         r = await self._call("screenshot", path=path, full_page=full_page,
                              selector=selector or None)
-        if send and isinstance(r, str) and r.startswith("✅") and os.path.isfile(path):
-            await self._send_image(event, path)
-            return r + "\n📤 图片已发送给用户"
-        return r
+
+        # 截图失败：直接回错，不要再去发图/描述
+        if not (isinstance(r, str) and r.startswith("✅")):
+            return r
+        if not os.path.isfile(path):
+            return r + "\n⚠️ 截图文件不在预期路径上，已跳过发送/描述"
+
+        parts = [r]
+
+        if send:
+            sent = await self._send_image(event, path)
+            parts.append("📤 图片已发送给用户" if sent else "⚠️ 图片发送失败")
+
+        # —— VLM 描述：让 bot 也能"看到" ——
+        # 模型每次可以自己决定要不要（describe 参数），默认取插件配置。
+        want = self.auto_describe_screenshot if describe is None else bool(describe)
+        if want:
+            desc = await vlm.describe_image(
+                self.ctx, path,
+                configured_model=self.vlm_model,
+                prompt=self.vlm_describe_prompt,
+                timeout=self.vlm_timeout,
+            )
+            if desc:
+                parts.append(f"🖼️ 图片描述（VLM）：\n{desc}")
+            else:
+                parts.append(
+                    "ℹ️ 未能生成图片描述。常见原因：\n"
+                    "  · 没配视觉模型 —— 在 KiraAI 的模型设置里指定默认 VLM，"
+                    "或在插件配置里选「VLM 模型」；\n"
+                    "  · **模型配错了组** —— 用于描述截图的模型必须是"
+                    "**大语言模型**组里的（不能放在「图像」组），"
+                    "即使它本身支持视觉也一样；\n"
+                    "  · 调用超时（可在插件配置里调大「VLM 超时」）。\n"
+                    "图片本身已保存/已发送，只是这次我没拿到描述。")
+        return "\n".join(parts)
 
     # ── 2. 等 ────────────────────────────────────────────────────────
 

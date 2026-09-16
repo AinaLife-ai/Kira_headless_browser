@@ -19,6 +19,7 @@ from . import (
     wiring,
     claims,
     spec_compliance,
+    vlm_describe,
 )
 
 #: (模块, 是否默认启用)
@@ -35,6 +36,7 @@ ALL_CHECKS = [
     content_dom,         # 扩展点击行为（真实 DOM）
     claims,              # 声称 ↔ 实际（防止"写了但没改"）
     spec_compliance,     # KiraAI 规范符合性（包结构 / manifest / 入口 / 路由）
+    vlm_describe,        # 截图 → VLM 描述（bot 看图；防止该能力再次丢失）
 ]
 
 __all__ = ["ALL_CHECKS"]

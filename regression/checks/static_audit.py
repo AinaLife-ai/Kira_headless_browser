@@ -298,8 +298,13 @@ def run(r) -> None:
 
         # 只列**确实已从 schema 移除**的旧配置。
         # （upload_allow_any_path 在 v2.1.5 恢复了，不再算"已删除"）
+        # ⚠️ `vlm_model` / `auto_describe_screenshot` 已从这份"已删除"名单里
+        #    拿掉：它们在 v2.1.27 **恢复了**（v2.1.0 重写双后端架构时被整段
+        #    丢掉，那是个失误 —— bot 因此看不到页面）。
+        #    `auto_send_screenshot` 仍算已删除：当前用截图工具的 `send`
+        #    参数表达同一件事，不再单列配置项。
         removed = ["use_real_browser_profile", "use_persistent_profile",
-                   "auto_send_screenshot", "vlm_model", "notify_setup_via_chat"]
+                   "auto_send_screenshot", "notify_setup_via_chat"]
         stale = [x for x in removed if x in readme]
         r.ok("B3 README 不含已删除的配置项", not stale, f"残留={stale or '无'}")
         r.ok("B4 README 版本号与 manifest 一致",

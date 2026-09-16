@@ -10,6 +10,9 @@ __pycache__/
 venv/
 
 # 插件运行时数据
+# 框架在插件目录下写的运行日志（导入插件时会自动生成）
+data/log.log
+data/*.log
 screenshots/
 downloads/
 browser_profile/

@@ -429,5 +429,54 @@
         "hint": "开启（默认）：AI 可以打开 localhost / 127.0.0.1 / 内网地址 -- 包括你自己的本地开发服务器（如 http://localhost:3000）以及 KiraAI 自身的面板。本插件的定位就是「让 AI 帮你操作浏览器」，本机页面是正常的工作目标，不是攻击面，所以默认放开。关闭：本机 / 内网 / 链路本地一律拒绝（含云厂商元数据端点 169.254.169.254）。关闭前值得知道：如果保持开启、而面板又没有认证，AI 理论上可以打开面板并修改插件配置。"
       }
     }
+  },
+  "auto_describe_screenshot": {
+    "name": "Describe Screenshot (VLM)",
+    "type": "switch",
+    "default": true,
+    "hint": "Use a VLM to turn screenshots into TEXT so the bot can actually see the page. Needed because tool results are plain text - an image never enters the model's context by itself. The bot can override this per call with the describe parameter (set it false when it only wants to show the picture to you). Works with BOTH backends.",
+    "locales": {
+      "zh": {
+        "name": "用 VLM 分析截图",
+        "hint": "开启后，截图会交给 VLM 转成文字描述回给 bot —— 这样它才能「看到」页面。为什么需要：工具结果是以文本进模型的，图片本身不会自动进入它的上下文。bot 每次也能自己决定：给 browser_screenshot 传 describe=false 就只截图不描述（只想让你看图时更省）。两个后端都适用（扩展 / 无头都行）。"
+      }
+    }
+  },
+  "vlm_model": {
+    "name": "VLM Model",
+    "type": "model_select",
+    "model_type": "llm",
+    "default": "",
+    "hint": "Which model to use for screenshot analysis. Leave EMPTY to use the default VLM configured in KiraAI's model settings - that is the normal choice unless you want this plugin to use a different one. Must be a vision-capable model.",
+    "locales": {
+      "zh": {
+        "name": "VLM 模型",
+        "hint": "用哪个模型分析截图。留空即可 —— 留空会使用 KiraAI 模型设置里的默认 VLM（这是通常该选的）。只有想让本插件单独指定一个模型时才需要在这里选。必须选支持视觉的模型。"
+      }
+    }
+  },
+  "vlm_describe_prompt": {
+    "name": "VLM Describe Prompt",
+    "type": "string",
+    "default": "",
+    "hint": "Custom prompt for screenshot analysis. Empty uses the built-in web-page-oriented prompt (which asks for page type, interactive elements, current state, key content and suggested next actions).",
+    "locales": {
+      "zh": {
+        "name": "VLM 描述提示词",
+        "hint": "自定义截图分析提示词。留空则使用内置的网页分析提示词（会要求输出：页面类型 / 可交互元素清单 / 当前状态 / 关键内容 / 建议的下一步操作），这样描述能直接用于后续操作。"
+      }
+    }
+  },
+  "vlm_timeout": {
+    "name": "VLM Timeout",
+    "type": "integer",
+    "default": 10,
+    "hint": "Seconds to wait for the VLM description. On timeout the description is skipped - the screenshot itself still succeeds and is still sent.",
+    "locales": {
+      "zh": {
+        "name": "VLM 超时（秒）",
+        "hint": "等待 VLM 描述的超时时间。超时会跳过描述 —— 截图本身仍然成功、也仍然会发给你，只是 bot 这次没拿到描述。"
+      }
+    }
   }
 }
