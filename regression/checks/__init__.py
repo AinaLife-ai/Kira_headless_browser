@@ -18,6 +18,7 @@ from . import (
     tool_merge,
     wiring,
     claims,
+    spec_compliance,
 )
 
 #: (模块, 是否默认启用)
@@ -33,6 +34,7 @@ ALL_CHECKS = [
     bridge_e2e,          # 真实 WebSocket 端到端
     content_dom,         # 扩展点击行为（真实 DOM）
     claims,              # 声称 ↔ 实际（防止"写了但没改"）
+    spec_compliance,     # KiraAI 规范符合性（包结构 / manifest / 入口 / 路由）
 ]
 
 __all__ = ["ALL_CHECKS"]

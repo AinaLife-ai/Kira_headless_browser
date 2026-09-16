@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.24
+# 浏览器插件 (Browser Plugin) 2.1.25
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -471,6 +471,39 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.25（2026-09-16）
+
+**按 KiraAI 最新规范核对交付形态**（对照上游 `KiraAI-Dev/KiraAI` **v2.34.4**）：
+
+**一、拿最新框架真跑了一遍**（不是"看着像对"）：
+
+| 核对项 | 结果 |
+|---|---|
+| 框架符号（`BasePlugin`/`PageMenu`/`PluginPage`/`on`/`register`/`LLMRequest`/消息元素/`get_data_path`） | 全部可导入 |
+| 插件入口类 | `BrowserPlugin` 导入成功，确实继承 `BasePlugin` |
+| 注册进框架的内容 | **钩子 2 / 工具 12 / WS 1 / API 3 / 页面 1** |
+| 钩子被框架真触发（`(event, request, tag_set)` 三参） | 签名匹配，无 `TypeError` |
+| `schema.json` 用框架的 `build_fields()` 解析 | 37 个字段全部解析通过 |
+
+**二、回答一个关键问题：会不会变成两个插件？——不会。**
+
+- `manifest.plugin_id` **仍是 `headless_browser`**（沿用原值），
+  框架注册后组件表里**只有一条**：`['headless_browser']`。
+- 用户是**覆盖原插件目录**，KiraAI 侧看到的还是同一个插件。
+- `browser-bridge/` 是**浏览器扩展**（装进 Chrome），跟 KiraAI 的插件系统无关，
+  不是第二个插件。
+- 唯一"变多"的地方反过来了：**工具从 33 个减到 12 个**
+  （`browser_interact` 用 `action` 合并了 click/type/hover/键盘/鼠标）。
+
+**三、新增一个常驻检查**（`regression/checks/spec_compliance.py`，21 项）：
+把上面这些**不依赖框架源码**的部分固化成回归项 —— 包结构（`__init__.py`
+旁边的 `manifest.json`，框架靠它定位 `plugin_id`）、manifest 字段与
+**identity 必须是原插件 id**、入口类继承 `BasePlugin` 并实现两个 async
+抽象方法、注册装饰器用法、**路由路径与扩展侧一致**、随包资源齐全。
+
+反向验证：改 `plugin_id` → B2/E1 立即 FAIL；删 icon → B3 FAIL；
+把扩展的 WS 路径写错 → E1 FAIL。
 
 ### v2.1.24（2026-09-16）
 
