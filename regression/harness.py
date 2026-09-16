@@ -39,7 +39,13 @@ DEFAULT_PLUGIN_DIR = HERE.parent                # 插件根目录
 PLUGIN_DIR = Path(os.environ.get("KIRA_PLUGIN_DIR") or DEFAULT_PLUGIN_DIR).resolve()
 
 STUBS_DIR = HERE / "stubs"
-JS_DIR = HERE / "js"
+# ⚠️ JS_DIR 必须跟着 PLUGIN_DIR 走，否则 KIRA_PLUGIN_DIR 指向别的副本时：
+#    检查脚本（upload_stream.mjs）从**默认目录**读，而被测的 content.js
+#    从**指定副本**读 —— 两棵树混着用，反向验证全部假绿。
+#    （HERE 永远是本套件所在目录，不受 KIRA_PLUGIN_DIR 影响。）
+JS_DIR = PLUGIN_DIR / "regression" / "js"
+if not JS_DIR.is_dir():
+    JS_DIR = HERE / "js"
 
 EXT_DIR = PLUGIN_DIR / "browser-bridge"          # 浏览器扩展（在插件体内）
 BACKENDS_DIR = PLUGIN_DIR / "backends"

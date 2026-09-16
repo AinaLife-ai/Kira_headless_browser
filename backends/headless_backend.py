@@ -330,9 +330,11 @@ class HeadlessBackend(Backend):
                 src_mtime = max(src_mtime, os.path.getmtime(Path(src) / rel))
             except OSError:
                 continue
-        # Local Storage / IndexedDB / Session Storage 下的文件（递归取最大 mtime）
-        for rel in ("Default/Local Storage", "Default/Session Storage",
-                    "Default/IndexedDB"):
+        # Local Storage / Session Storage 下的文件（递归取最大 mtime）。
+        # ⚠️ 这里**不要**包含 IndexedDB：档案复制时并不搬 IndexedDB，
+        #    把它的 mtime 算进来会导致"源侧 IndexedDB 一变就判定副本过期、
+        #    整份档案重拷一遍"，白花很多时间而副本其实没有过期。
+        for rel in ("Default/Local Storage", "Default/Session Storage"):
             root = Path(src) / rel
             if not root.is_dir():
                 continue

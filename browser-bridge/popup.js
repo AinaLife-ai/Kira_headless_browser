@@ -35,6 +35,13 @@ const STATE_LABEL = {
   3: "已断开",
 };
 
+/** 后台（service worker）不可用时的统一渲染。 */
+function _renderBackendUnavailable(e) {
+  setDot("err");
+  const msg = (e && e.message) ? e.message : String(e);
+  setStatus("无法连接扩展后台（" + msg + "）", true);
+}
+
 async function refresh() {
   // ⚠️ sendMessage 在 service worker 被回收/未唤醒时会 **reject**。
   //    不接住的话，每 3 秒一次的轮询会不断产生 unhandled rejection，
@@ -43,13 +50,11 @@ async function refresh() {
   try {
     r = await chrome.runtime.sendMessage({ action: "status" });
   } catch (e) {
-    setDot("err");
-    setStatus("无法连接扩展后台（" + (e && e.message ? e.message : e) + "）", true);
+    _renderBackendUnavailable(e);
     return;
   }
   if (!r) {
-    setDot("err");
-    setStatus("扩展后台没有响应", true);
+    _renderBackendUnavailable(new Error("扩展后台没有响应"));
     return;
   }
 
@@ -110,7 +115,14 @@ $("btnConnect").addEventListener("click", async () => {
   }
 
   setStatus("正在连接…");
-  const r = await chrome.runtime.sendMessage({ action: "connect" });
+  let r;
+  try {
+    r = await chrome.runtime.sendMessage({ action: "connect" });
+  } catch (e) {
+    // 与 refresh() 用同一套"后台不可用"渲染，避免弹窗卡在"连接中…"
+    _renderBackendUnavailable(e);
+    return;
+  }
   if (!r.ok) {
     setDot("err");
     setStatus(r.error || "连接失败", true);
@@ -120,14 +132,25 @@ $("btnConnect").addEventListener("click", async () => {
 });
 
 $("btnDisconnect").addEventListener("click", async () => {
-  await chrome.runtime.sendMessage({ action: "disconnect" });
+  try {
+    await chrome.runtime.sendMessage({ action: "disconnect" });
+  } catch (e) {
+    _renderBackendUnavailable(e);
+    return;
+  }
   setStatus("已手动断开（自动重连已暂停，重新连接请点「连接」）");
   setDot("");
 });
 
 $("btnTest").addEventListener("click", async () => {
   setStatus("正在测试…");
-  const r = await chrome.runtime.sendMessage({ action: "test_ping" });
+  let r;
+  try {
+    r = await chrome.runtime.sendMessage({ action: "test_ping" });
+  } catch (e) {
+    _renderBackendUnavailable(e);
+    return;
+  }
   if (r.ok) {
     // tab_count 只在 listTabs() 成功时才有；它失败时 background 会把错误
     // 吞掉，这里就会渲染出"可读取到 undefined 个标签页"。

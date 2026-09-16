@@ -190,6 +190,19 @@ async function run(sizeBytes, step) {
   await call("upload_chunk", { upload_id: "cap1", index: 0, data: "A".repeat(4 * 1024 * 1024) });
   const rcap = await call("upload_chunk", { upload_id: "cap1", index: 1, data: "A".repeat(4 * 1024 * 1024) });
   console.log(`  超限是否被拒（limit=0 时不该拒）: ${rcap.ok ? "✓ 未误拒" : "✗ 误拒了"}`);
+  // ⚠️ 结论必须并入 allOk：只打印不判会导致"误拒了"仍然 exit 0，
+  //    套件把它当通过（诊断信息写了但没人看）。
+  allOk = allOk && rcap.ok;
+
+  // 上限生效时必须**真的**被拒（limit 设小，第二块应被拒）
+  await call("upload_begin", {
+    upload_id: "cap2", selector: "#f", name: "d.bin", size: 999999, limit: 1000,
+  });
+  const rcap2 = await call("upload_chunk", {
+    upload_id: "cap2", index: 0, data: "A".repeat(4096),
+  });
+  console.log(`  超过上限是否被拒: ${!rcap2.ok ? "✓ 已拒绝" : "✗ 竟然通过"}`);
+  allOk = allOk && !rcap2.ok;
 
   console.log(allOk ? "全部通过" : "有失败项");
   process.exit(allOk ? 0 : 1);

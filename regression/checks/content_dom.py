@@ -184,6 +184,18 @@ def run(r) -> None:
                     ["node", str(up)], cwd=str(JS_DIR),
                     capture_output=True, text=True, env=env2, timeout=300)
                 out2 = (p2.stdout or "")
+                # ⚠️ 必须**先看退出码**：脚本异常退出却恰好打印了全部成功
+                #    标记时（比如在最后一步崩掉前已经打完了），只看输出会
+                #    误判为通过。非零退出码一律先记失败。
+                if p2.returncode != 0:
+                    r.ok("U0 分块上传 DOM 测试脚本正常退出", False,
+                         f"exit={p2.returncode}；"
+                         f"{(p2.stderr or '')[:160] or out2[-160:]}")
+                    for nm in ("U1 分块上传在真实 DOM 下逐字节一致",
+                               "U2 乱序分块被拒绝",
+                               "U3 上限为 0 时不误拒"):
+                        r.ok(nm, False, "脚本未正常退出，结果不可信")
+                    return
                 checks = [
                     ("U1 分块上传在真实 DOM 下逐字节一致",
                      "内容 ✓ 逐字节一致" in out2 and out2.count("内容 ✓") >= 3,

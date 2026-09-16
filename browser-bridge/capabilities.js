@@ -212,13 +212,27 @@ async function uploadFinish(params) {
   const key = _uploadKey(params.upload_id);
   const st = _uploadTabs.get(key);
   if (!st) throw new Error("上传会话不存在或已过期（请重新发起上传）");
-  _uploadTabs.delete(key);
 
   const tab = await resolveTab(st.tabId);
-  const res = await callContent(tab, "upload_finish", {
-    upload_id: params.upload_id,
-  }, 120000);
+  let res;
+  try {
+    res = await callContent(tab, "upload_finish", {
+      upload_id: params.upload_id,
+    }, 120000);
+  } catch (e) {
+    // ⚠️ 失败/超时时必须先把**页面侧**的会话收掉再去掉映射。
+    //    否则 _upSessions 里的分块会一直挂着（大文件就是几百 MB 的内存
+    //    泄漏），而且下一次同名上传还会撞上残留状态。
+    //    页面可能已经关了，所以这里尽力而为、不再抛。
+    try {
+      await callContent(tab, "upload_abort", { upload_id: params.upload_id }, 10000);
+    } catch (_) { /* 页面可能已关闭 */ }
+    _uploadTabs.delete(key);
+    throw e;
+  }
 
+  // 成功：页面侧在 upload_finish 内部已经删掉自己的会话
+  _uploadTabs.delete(key);
   return { ok: true, url: tab.url, name: res.name,
            path: params.path || res.name, size: res.size,
            matched: res.matched };

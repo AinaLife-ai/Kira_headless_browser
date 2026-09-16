@@ -38,8 +38,14 @@ CLAIMS = [
      "browser-bridge/capabilities.js", r"__error"),
     ("面板用 textContent 渲染不受控字段",
      "web/index.html", r"_renderDomains"),
-    ("cookie_get 在「只读但敏感」确认集里",
-     "browser-bridge/shared.js", r"CONFIRM_ONLY_COMMANDS"),
+    # ⚠️ 不能只验集合名存在 —— 集合里可以是空的。
+    #    要求**同一声明**里同时出现集合名与 "cookie_get"。
+    ("cookie_get 真的在「只读但敏感」确认集里（不能只查名字）",
+     "browser-bridge/shared.js",
+     r'CONFIRM_ONLY_COMMANDS\s*=\s*new Set\(\s*\[\s*"cookie_get"'),
+    ("插件侧的只读敏感确认集真的含 cookie_get",
+     "backends/extension_backend.py",
+     r'CONFIRM_ONLY_CMDS\s*=\s*\{\s*"cookie_get"'),
     ("上传上限由硬顶钳制",
      "backends/extension_backend.py", r"MAX_UPLOAD_BYTES = 256 \* 1024 \* 1024"),
     ("上传超时/页面超时不会被换后端重试（indeterminate）",
@@ -50,8 +56,6 @@ CLAIMS = [
      "browser-bridge/background.js", r"scheduleReconnect"),
     ("面板 refresh 捕获 sendMessage 失败",
      "browser-bridge/popup.js", r"catch"),
-    ("cookie_get 在只读敏感确认集里（扩展侧）",
-     "browser-bridge/shared.js", r"CONFIRM_ONLY_COMMANDS"),
 ]
 
 

@@ -336,6 +336,24 @@ def run(r) -> None:
     r.ok("C15 MV3 里不用 DOM API（FileReader）",
          "FileReader" not in _cap_code,
          "Service Worker 里没有 FileReader，用了就是 ReferenceError")
+    # ⚠️ popup 里**每一个** chrome.runtime.sendMessage 都必须被 try/catch 兜住。
+    #    MV3 的 service worker 被回收/未唤醒时它会 reject；不接住的话
+    #    弹窗会卡在"连接中…/测试中…"不回来，而且每 3 秒的轮询会不断产生
+    #    unhandled rejection。
+    _pop = ext_file("popup.js")
+    _lines = _pop.splitlines()
+    _unguarded = []
+    for _i, _ln in enumerate(_lines):
+        if "chrome.runtime.sendMessage" not in _ln:
+            continue
+        # 往上找 6 行内有没有 try（调用点通常紧跟 try {）
+        _win = "\n".join(_lines[max(0, _i - 6):_i + 1])
+        if "try {" not in _win and "try{" not in _win:
+            _unguarded.append(_i + 1)
+    r.ok("C16j popup 里每个 sendMessage 都被 try/catch 兜住",
+         not _unguarded,
+         f"未兜住的行={_unguarded or '无'}（SW 回收时会卡住弹窗）")
+
     # ⚠️ 单条 WebSocket 帧有**硬上限**：KiraAI 用 uvicorn，其 ws_max_size
     #    默认 16 MiB，且框架没有覆盖它。实测：整条帧超过 16 MiB 时对端回
     #    1009 并**关闭整个连接** —— 一次超大上传会把连接打断，

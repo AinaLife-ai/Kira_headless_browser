@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.16
+# 浏览器插件 (Browser Plugin) 2.1.17
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -470,6 +470,43 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.17（2026-09-15）
+
+**按 CodeRabbit 第十三轮审查修复 8 项**（含 1 个内存泄漏 + 1 个测试假绿）：
+
+- 🔴 **`uploadFinish` 失败时泄漏页面侧会话**：原来是先 `_uploadTabs.delete()`
+  再调 `upload_finish` —— 一旦失败/超时，**页面侧的 `_upSessions` 就没人清了**，
+  分块一直挂着（大文件就是几百 MB 的内存泄漏），而且下次同名上传还会
+  撞上残留状态。→ 改成失败时**先发 `upload_abort` 清理页面会话、再删映射**；
+  成功路径才直接删（页面在 `upload_finish` 内部已自清）。
+- 🔴 **测试假绿（又是同一类）**：`content_dom` 只比对脚本的 stdout 标记，
+  **不检查退出码** —— 脚本崩溃前恰好打完全部成功标记时会被误判为通过。
+  → 非零退出码一律先记 U0 失败，并把 U1–U3 一并置失败。
+  ⚠️ 修完后反向验证**仍然是绿的**，追下去发现更深一层：
+  `harness.JS_DIR` 锚在套件自身目录（`HERE/js`），**不受 `KIRA_PLUGIN_DIR` 影响**，
+  于是"检查脚本从默认目录读、被测的 content.js 从指定副本读" —— 两棵树混着用。
+  → `JS_DIR` 改为跟随 `PLUGIN_DIR`。修完反向验证才真正变红。
+- **popup 的 connect / test / disconnect 没接住 `sendMessage` 的 reject**：
+  service worker 被回收时它会 reject，弹窗会卡在"连接中…/测试中…"不回来。
+  → 三个调用点都补上，并抽出 `_renderBackendUnavailable()` 与 `refresh()`
+  共用同一套渲染。新增守卫 **C16j**（扫出任何没被 try 兜住的 `sendMessage`）。
+- **档案新鲜度误判**：`IndexedDB` 参与了"副本是否过期"的 mtime 扫描，
+  但复制档案时 `IndexedDB` **在 IGNORE 名单里、根本不搬** ——
+  于是源侧 IndexedDB 一变就判定过期、整份档案白重拷一遍。
+  → 从扫描路径里去掉。
+- **`schema.json` 的 hint 里有过时描述**：我上一轮只用 `replace` 换了尾巴，
+  留下"整个文件要放进**一条**消息…单帧必须扛得住"这种**与现状矛盾**的旧说法
+  （同时又说"单帧尺寸不再是约束"）。→ 重写为准确的流式 + 页面累积说明。
+- **`callgraph` 的 B1/C1/D1 没有各自 catch `SyntaxError`**：任一文件语法错误
+  会让异常逃出 `run()`，整组变成一条笼统失败、后面段落全不执行。
+  → 三处都按 A 段的模式单独接住并记为该段的 FAIL。
+- **`claims` 只验集合名存在**：`CONFIRM_ONLY_COMMANDS` 可以是空集合，
+  检查照样通过。→ 收紧为"同一声明里必须同时出现集合名与 `cookie_get`"，
+  两侧都加了；顺带删掉我自己重复的一条。
+- **`upload_stream.mjs` 里 `rcap` 的结论没并入 `allOk`**：只打印不判，
+  "误拒了"也照样 exit 0。→ 并入 `allOk`，并补一条"上限生效时必须真的被拒"
+  的正向用例。
 
 ### v2.1.16（2026-09-15）
 

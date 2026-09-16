@@ -92,7 +92,13 @@ def run(r) -> None:
         src = f.read_text(encoding="utf-8")
         if "@register.tool" not in src:
             continue
-        tree = ast.parse(src)
+        # ⚠️ 每个 parse 点都要自己接住 SyntaxError：让异常逃出 run()
+        #    会让**整组检查**变成一条笼统失败，后面的段落全不执行。
+        try:
+            tree = ast.parse(src)
+        except SyntaxError as e:
+            bad_sig.append(f"{f}: 语法错误 {e}")
+            continue
         for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
             # ⚠️ 不要用 `if not isinstance(m, AsyncFunctionDef): continue` 开头 ——
             #    那样"同步函数被注册成工具"这种错**永远查不出来**（它会被跳过）。
@@ -121,7 +127,11 @@ def run(r) -> None:
         src = f.read_text(encoding="utf-8")
         if "@on." not in src:
             continue
-        tree = ast.parse(src)
+        try:
+            tree = ast.parse(src)
+        except SyntaxError as e:
+            bad_hook.append(f"{f}: 语法错误 {e}")
+            continue
         for m in [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)]:
             decs = [ast.unparse(d) for d in m.decorator_list]
             if not any("@on." in d or "on." in d for d in decs):
@@ -139,7 +149,11 @@ def run(r) -> None:
     wrong = []
     for f in _iter_py():
         src = f.read_text(encoding="utf-8")
-        tree = ast.parse(src)
+        try:
+            tree = ast.parse(src)
+        except SyntaxError as e:
+            wrong.append(f"{f}: 语法错误 {e}")
+            continue
         # 找出所有"函数内使用了 str(event.session)"的位置
         for fn in [n for n in ast.walk(tree)
                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
