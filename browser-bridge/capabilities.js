@@ -169,16 +169,21 @@ async function execJs(params) {
   }
 
   const first = (results && results[0]) || {};
-  // ⚠️ 如果是**动态执行被 CSP 挡掉**，给一句能照做的话。
-  //    默认 CSP 禁止 eval / new Function，而下面的包装器正是用它们
-  //    跑用户脚本 —— 正常情况下我们在 ensureUserScriptWorld() 里
-  //    已经把这个 CSP 放开了；走到这里说明放开失败（老版本或配置被拒）。
-  if (first.error && /unsafe-eval|Content Security Policy|EvalError/i.test(
-      String(first.error))) {
+  // ⚠️ CSP 拦截的错误**可能出现在两个地方**，两处都要认：
+  //    · `first.error` —— chrome.userScripts.execute 这一层失败；
+  //    · `first.result.__error` —— **更常见**：包装器内部的
+  //      `catch (e) { return { __error: ... } }` 会把 EvalError
+  //      吞成普通返回值，于是 first.error 是空的。
+  //    只查 first.error 的话，用户拿到的是一句裸 EvalError 原文，
+  //    而不是"该怎么修"的指引 —— 这正是这条提示想解决的问题。
+  const _errText = String(first.error || "") +
+    (first.result && typeof first.result === "object"
+      ? String(first.result.__error || "") : "");
+  if (_errText && /unsafe-eval|Content Security Policy|EvalError/i.test(_errText)) {
     throw new Error(
       "执行 JS 被浏览器的内容安全策略挡下了（需要允许动态执行）。\n" +
       "  请更新扩展后重试；若仍失败，改用无头后端执行 JavaScript。\n" +
-      "  原始错误：" + first.error
+      "  原始错误：" + _errText
     );
   }
   if (first.error) throw new Error("执行出错：" + first.error);

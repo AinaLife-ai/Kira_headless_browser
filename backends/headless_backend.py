@@ -208,10 +208,42 @@ class HeadlessBackend(Backend):
         return opts
 
     async def _profile_dir_async(self) -> Optional[str]:
-        """异步版：复制 profile 时不会阻塞事件循环。"""
+        """异步版：复制 profile 时不会阻塞事件循环。
+
+        ⚠️ inherit 模式**必须**带回退 —— `_inherited_profile_dir()` 在
+        "找不到真实浏览器 / 复制失败"时返回 None。直接把它当结果返回的话，
+        本次启动就**完全没有 profile**（既不继承也不回退插件目录），
+        而用户以为自己开了 inherit 模式。同步版 `_profile_dir()` 是有
+        这个回退的（会走到 browser_profile/），两条路径行为必须一致。
+        """
         if self.profile_mode == "inherit":
-            return await self._inherited_profile_dir()
+            inherited = await self._inherited_profile_dir()
+            if inherited:
+                return inherited
+            logger.warning(
+                "inherit 模式未能复制真实 profile，回退到插件自带 profile")
+            return self._profile_dir_fallback()
         return self._profile_dir()
+
+    def _profile_dir_fallback(self) -> Optional[str]:
+        """inherit 失败后的回退：custom_user_data_dir → 插件自带 profile。
+
+        ⚠️ 与 `_profile_dir()` 的对应分支保持同一套判断（含"指向真实浏览器
+        目录就拒绝"那条），否则两条路径会出现"同步能跑、异步拒了"的差异。
+        """
+        if self.custom_user_data_dir:
+            if self._looks_like_real_profile(self.custom_user_data_dir):
+                logger.error(
+                    "custom_user_data_dir 指向了真实浏览器的 User Data 目录，"
+                    "已拒绝使用（会抢锁、导致用户的浏览器打不开）。"
+                    "请改用 headless_profile_mode=inherit（复制副本），"
+                    "或填插件自己的目录。"
+                )
+                return None
+            return self.custom_user_data_dir
+        d = Path(self._data_dir) / "browser_profile"
+        os.makedirs(d, exist_ok=True)
+        return str(d)
 
     def _profile_dir(self) -> Optional[str]:
         """返回要用的 profile 目录。

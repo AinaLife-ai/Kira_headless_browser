@@ -86,8 +86,10 @@ def _tool_enum(src: str, tool: str) -> set[str]:
 
 #: 非 action 式工具的关键参数（丢了就是能力丢失，单靠 enum 查不出来）
 LEGACY_PARAMS = {
-    "browser_wait": ("selector", "seconds", "timeout"),
-    "browser_wait_for": ("selector", "timeout"),
+    "browser_wait": ("selector", "text", "seconds", "timeout"),
+    # ⚠️ text 必须算进来：这个工具的主要用法就是"等某段文字出现"，
+    #    漏掉它的话，参数被删掉也查不出来（能力静默丢失）。
+    "browser_wait_for": ("selector", "text", "timeout"),
 }
 
 NEED_ACTIONS = {

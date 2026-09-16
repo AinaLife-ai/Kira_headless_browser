@@ -79,8 +79,12 @@ class Client:
         self.model = Model(mid)
 
     async def chat(self, req):
+        # ⚠️ 返回值要**带上自己的 model_id** —— 两个假客户端都返回同一句
+        #    固定文本的话，"到底用了哪个模型"就区分不出来：
+        #    即使代码错误地走了 fallback，断言也照样通过（假绿）。
+        #    带上标识后，才能断言"用的就是我配的那个"。
         class R:
-            text_response = "【假VLM】页面是登录表单"
+            text_response = "【假VLM:" + self.model.model_id + "】页面是登录表单"
         return R()
 
 
@@ -118,12 +122,15 @@ async def main():
     # ① 配置留空 → 用**框架默认 VLM**（这是核心诉求）
     ctx = Ctx(dvlm=Client("qwen-vl-max"))
     d = await vlm.describe_image(ctx, PNG, configured_model="")
-    out["default_vlm_used"] = "假VLM" in d
+    out["default_vlm_used"] = "假VLM:qwen-vl-max" in d
 
     # ② 配置了模型 → 优先用配置的
+    #    ⚠️ 必须断言**用的是 "mine"**，而不是泛泛地断言"有描述" ——
+    #       后者在"错误地走了 fallback（should-not-use）"时同样成立。
     ctx2 = Ctx(cfg=Client("mine"), dvlm=Client("should-not-use"))
     d2 = await vlm.describe_image(ctx2, PNG, configured_model="p:mine")
-    out["configured_preferred"] = "假VLM" in d2
+    out["configured_preferred"] = ("假VLM:mine" in d2
+                                   and "should-not-use" not in d2)
 
     # ③ 没有任何可用 VLM → 空串、不抛
     try:

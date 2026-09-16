@@ -296,10 +296,23 @@ def run(r) -> None:
         # ⚠️ 排除**已知不是工具**的标识：
         #    · browser_bridge / browser_channel —— 模块名、配置项；
         #    · browser_profile / inherited_profile —— 插件运行期的**数据目录**
-        #      （见 .gitignore）。README 讲"运行期产物"时必然会提到它们，
-        #      不排除的话 B1 会把目录名当成"不存在的工具"误报。
-        mentioned -= {"browser_bridge", "browser_channel",
-                      "browser_profile", "inherited_profile"}
+        #      （见 .gitignore）。README 讲"运行期产物"时必然会提到它们。
+        _NON_TOOL_IDS = {"browser_bridge", "browser_channel",
+                         "browser_profile", "inherited_profile"}
+        # ⚠️ 还要排除**已合并的旧工具名**（如 browser_wait_for）：
+        #    README 讲"工具合并/迁移"时一定会提到它们，
+        #    而它们现在确实不是工具了 —— 但它们**不是错误**，
+        #    是映射表里记录在案的历史名字。
+        #    判据直接从 tool_merge 的映射表取，不手写名单 ——
+        #    手写名单每加一个旧名就要改一次，迟早漏。
+        try:
+            from .tool_merge import LEGACY as _LEGACY_MAP
+            _NON_TOOL_IDS |= {k for k in _LEGACY_MAP
+                              if _LEGACY_MAP[k] is not None
+                              and _LEGACY_MAP[k][0] != k}
+        except Exception:
+            pass
+        mentioned -= _NON_TOOL_IDS
         nonexistent = sorted(mentioned - ext_names - set(sch) - {"browser_send_file"})
         r.ok("B1 README 提到的工具都存在（或已标注为废弃）",
              not nonexistent, f"不存在的={nonexistent or '无'}")

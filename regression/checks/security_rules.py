@@ -50,10 +50,24 @@ for (const p of badPorts) {
   catch (e) { threw = /端口无效/.test(e.message); }
   if (!threw) bad.push("port=" + JSON.stringify(p) + " 竟然没被拒绝");
 }
-// 合法边界值必须**照常通过**
+// 合法边界值必须**照常通过**，而且**端口不能被打折** ——
+// 只验证"能解析成 URL"是不够的：端口被悄悄换成默认值（5267）
+// 时 URL 依然合法，连接却会指向错误的端口，而检查照样绿。
+//
+// ⚠️ 不能直接断言 `u.port === String(p)`：URL 解析会把协议的**默认端口**
+//    省略掉（ws 的默认端口是 80），所以 `:80` 解析出来 u.port 是空串。
+//    要断言的是"落到那个端口的**实际值**与期望一致"，默认端口按空串折算。
+const DEFAULT_FOR_SCHEME = { "ws:": "80", "wss:": "443" };
 const goodPorts = [1, 80, 5267, 65535];
 for (const p of goodPorts) {
-  try { new URL(buildWsUrl("127.0.0.1", p, "T")); }
+  try {
+    const u = new URL(buildWsUrl("127.0.0.1", p, "T"));
+    const actual = u.port || DEFAULT_FOR_SCHEME[u.protocol] || "";
+    if (actual !== String(p)) {
+      bad.push("port=" + p + " 被改成了 " + (u.port || "(空)")
+               + "（实际生效 " + actual + "）");
+    }
+  }
   catch (e) { bad.push("port=" + p + " 被误拒: " + e.message); }
 }
 // "没填"的形态应落到默认端口（不是报错）
@@ -279,15 +293,21 @@ def run(r) -> None:
     #     就会静默地用默认值 —— 用户把配置关掉了，那条路径照样放行。
     #     这正是"加了开关但开关没生效"的经典形态。
     _sec_src = src("security.py")
+    # ⚠️ 要同时认 `def` 与 `async def` —— 只写 `def` 的话，
+    #    封装函数改成异步之后就**扫不到**了，这条"开关必须一路传到底"
+    #    的检查会静默失效（变成空集合 → 永远通过，假绿）。
     _wrappers = re.findall(
-        r'def\s+(\w+)\s*\(([^)]*)\)\s*(?:->[^:]*)?:\s*[\s\S]{0,600}?'
+        r'(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)\s*(?:->[^:]*)?:\s*[\s\S]{0,600}?'
         r'check_url\(',
         _sec_src)
     _pass_bad = []
     for _fn, _args in _wrappers:
         if _fn == "check_url":
             continue
-        _call_seg = _sec_src[_sec_src.find(f"def {_fn}("):]
+        _i = _sec_src.find(f"def {_fn}(")
+        if _i < 0:
+            _i = _sec_src.find(f"async def {_fn}(")
+        _call_seg = _sec_src[max(_i, 0):]
         _call_seg = _call_seg[:2000]
         if "local_access" not in _args or "local_access=local_access" not in _call_seg:
             _pass_bad.append(_fn)
