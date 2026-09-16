@@ -652,10 +652,18 @@ def check_url(
 
 
 def check_write_targets(urls: Iterable[str], allowed: Iterable[str],
-                        blocked: Iterable[str]) -> Tuple[bool, str]:
-    """批量校验写操作涉及的多个 URL，任一失败即整体拒绝。"""
+                        blocked: Iterable[str],
+                        local_access: bool = True) -> Tuple[bool, str]:
+    """批量校验写操作涉及的多个 URL，任一失败即整体拒绝。
+
+    ⚠️ 必须显式收 `local_access` 并传下去。虽然这个函数当前没有被调用，
+    但把开关**隐式**留给默认值是个陷阱：将来有人接上它，就会绕过
+    用户在配置里设的「允许访问本机 / 内网」——因为 `check_url` 的默认值是
+    True，而这里的调用不带参数。开关必须一路传到底，不能有"漏一段"的地方。
+    """
     for url in urls:
-        ok, reason = check_url(url, allowed, blocked, for_write=True)
+        ok, reason = check_url(url, allowed, blocked, for_write=True,
+                               local_access=local_access)
         if not ok:
             return False, reason
     return True, ""

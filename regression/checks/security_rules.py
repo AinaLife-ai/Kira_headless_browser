@@ -242,6 +242,28 @@ def run(r) -> None:
     r.ok("B2.9 归一化规则时不会把裸 IPv6 的尾组当端口削掉",
          not _port_bad, f"不符={_port_bad or '无'}")
 
+    # ── 开关必须一路传到底（不能有"漏一段"的地方）────────────────────
+    #  ⚠️ `check_url` 的 `local_access` 默认是 True（本机默认放行）。
+    #     任何**封装了 check_url** 的函数如果不显式接收并转发这个参数，
+    #     就会静默地用默认值 —— 用户把配置关掉了，那条路径照样放行。
+    #     这正是"加了开关但开关没生效"的经典形态。
+    _sec_src = src("security.py")
+    _wrappers = re.findall(
+        r'def\s+(\w+)\s*\(([^)]*)\)\s*(?:->[^:]*)?:\s*[\s\S]{0,600}?'
+        r'check_url\(',
+        _sec_src)
+    _pass_bad = []
+    for _fn, _args in _wrappers:
+        if _fn == "check_url":
+            continue
+        _call_seg = _sec_src[_sec_src.find(f"def {_fn}("):]
+        _call_seg = _call_seg[:2000]
+        if "local_access" not in _args or "local_access=local_access" not in _call_seg:
+            _pass_bad.append(_fn)
+    r.ok("C6g 所有封装 check_url 的函数都显式转发 local_access",
+         not _pass_bad,
+         f"未转发={_pass_bad or '无'}（会让开关在那条路径上失效）")
+
     # ── SSRF：内网地址必须拦（不只是回环）────────────────────────────
     #  ⚠️ 过去只判 is_loopback / is_unspecified，于是下面这些都放行：
     #      10.0.0.5 / 192.168.1.1 / 172.16.0.1（内网）

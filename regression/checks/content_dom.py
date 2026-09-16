@@ -237,6 +237,27 @@ def run(r) -> None:
                                  _it.get("detail", "")[:150])
             except Exception as e:
                 r.ok("U4 上传会话回收行为", False, f"{type(e).__name__}: {e}"[:140])
+
+        # ── 上传过程中页面变化时，收尾不得假报成功 ──────────────────
+        det = JS_DIR / "upload_detach.mjs"
+        if det.is_file():
+            try:
+                _e4 = dict(env)
+                _e4["KIRA_PLUGIN_DIR"] = str(PLUGIN_DIR)
+                p4 = subprocess.run(["node", str(det)], cwd=str(JS_DIR),
+                                    capture_output=True, text=True,
+                                    env=_e4, timeout=120)
+                if p4.returncode != 0:
+                    r.ok("U5 上传元素变化测试脚本正常退出", False,
+                         f"exit={p4.returncode}；{(p4.stderr or '')[:150]}")
+                else:
+                    _d4 = json.loads((p4.stdout or "[]").strip().splitlines()[-1]
+                                     if p4.stdout.strip() else "[]")
+                    for _it in _d4:
+                        r.ok(f"U5 {_it['name']}", bool(_it.get("ok")),
+                             _it.get("detail", "")[:150])
+            except Exception as e:
+                r.ok("U5 上传元素变化行为", False, f"{type(e).__name__}: {e}"[:140])
     finally:
         # 无论成功失败都要清掉临时 runner，否则会污染下一次的文件清点
         try:

@@ -123,6 +123,12 @@ $("btnConnect").addEventListener("click", async () => {
     _renderBackendUnavailable(e);
     return;
   }
+  // ⚠️ 先判空：background 没返回内容时 r 是 undefined，
+  //    直接读 r.ok 会抛 TypeError，弹窗卡在"连接中…"不回来。
+  if (!r) {
+    _renderBackendUnavailable(new Error("扩展后台没有响应"));
+    return;
+  }
   if (!r.ok) {
     setDot("err");
     setStatus(r.error || "连接失败", true);
@@ -149,6 +155,12 @@ $("btnTest").addEventListener("click", async () => {
     r = await chrome.runtime.sendMessage({ action: "test_ping" });
   } catch (e) {
     _renderBackendUnavailable(e);
+    return;
+  }
+  // ⚠️ 同 connect：background 没返回内容时 r 是 undefined，
+  //    读 r.ok 会抛 TypeError，界面永远停在"正在测试…"。
+  if (!r) {
+    _renderBackendUnavailable(new Error("扩展后台没有响应"));
     return;
   }
   if (r.ok) {

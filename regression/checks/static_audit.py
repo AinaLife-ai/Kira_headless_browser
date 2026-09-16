@@ -404,6 +404,28 @@ def run(r) -> None:
         _win = "\n".join(_lines[max(0, _i - 6):_i + 1])
         if "try {" not in _win and "try{" not in _win:
             _unguarded.append(_i + 1)
+    # ⚠️ 光有 try/catch 还不够：`sendMessage` 在 background 没返回内容时
+    #    会 resolve 成 **undefined**（不 reject），此时读 `r.ok` 会抛
+    #    TypeError，界面就停在"连接中…/正在测试…"不回来了。
+    #    所以每个读取 sendMessage 结果的地方都必须先判空。
+    # ⚠️ 先剥注释再扫：注释里也会提到 `r.ok`（说明为什么要判空），
+    #    不剥掉的话会把"自己的说明文字"当成未保护的代码（假红）。
+    _pop_code = re.sub(r'/\*[\s\S]*?\*/', '', _pop)
+    _pop_code = re.sub(r'(?m)//[^\n]*$', '', _pop_code)
+    _pop_lines = _pop_code.splitlines()
+    _no_guard = []
+    for _i, _ln in enumerate(_pop_lines):
+        if not re.search(r'\br\.ok\b', _ln):
+            continue
+        # 往上找 25 行内有没有 `if (!r)` 之类的判空
+        # （窗口要够大：sendMessage 的 try/catch 块本身就占好几行，
+        #  窗口太小会把"其实判了空"的地方误报成没判）
+        _win = "\n".join(_pop_lines[max(0, _i - 25):_i + 1])
+        if not re.search(r'if\s*\(\s*!\s*r\s*\)', _win):
+            _no_guard.append(_i + 1)
+    r.ok("C16m 读取 sendMessage 结果前先判空（否则 undefined 会抛错卡住界面）",
+         not _no_guard, f"未判空的行={_no_guard or '无'}")
+
     r.ok("C16j popup 里每个 sendMessage 都被 try/catch 兜住",
          not _unguarded,
          f"未兜住的行={_unguarded or '无'}（SW 回收时会卡住弹窗）")

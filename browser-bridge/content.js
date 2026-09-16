@@ -311,7 +311,7 @@
     _cleanupUploads();
     const _now = Date.now();
     _upSessions.set(id, {
-      id, el, name: name || "upload.bin",
+      id, el, selector, name: name || "upload.bin",
       mime: mime || "application/octet-stream",
       declared, cap, chunks: [], received: 0,
       expectIndex: 0, created: _now, lastActive: _now,
@@ -356,6 +356,30 @@
     if (!st) return fail("上传会话不存在或已过期");
     _upSessions.delete(st.id);
 
+    // ⚠️ 元素要在**收尾时重新解析**，不能直接用 uploadBegin 时抓到的那个。
+    //    大文件要传十几秒甚至更久（256MB ≈ 13s），这段时间里页面完全可能
+    //    重新渲染（SPA 换路由、列表重排），**旧 input 已经从文档里摘掉**。
+    //    往脱离文档的元素上写 el.files 不会有任何效果 —— 表单里不会出现
+    //    这个文件，用户点了提交什么都没传上去。而过去这里照样 return ok:true，
+    //    属于"假成功"：调用方和模型都以为传好了。
+    let el = null;
+    try {
+      el = document.querySelector(st.selector);
+    } catch (e) {
+      return fail(`选择器语法错误：${e.message}`);
+    }
+    if (!el || !el.isConnected) {
+      el = st.el && st.el.isConnected ? st.el : null;
+    }
+    if (!el) {
+      return fail(
+        `上传目标「${st.selector}」在传输期间已从页面移除（页面可能重新渲染了）。`
+        + `文件内容已丢弃，请重新发起上传。`);
+    }
+    if (el.tagName.toLowerCase() !== "input" || el.type !== "file") {
+      return fail(`元素 ${st.selector} 不再是文件输入框（tag=${el.tagName}）`);
+    }
+
     const blob = new Blob(st.chunks, { type: st.mime });
     st.chunks = [];                       // 尽快让底层缓冲可回收
     const file = new File([blob], st.name, { type: st.mime });
@@ -363,8 +387,12 @@
     // 用 DataTransfer 造 FileList 塞进去（绕过系统文件对话框）
     const dt = new DataTransfer();
     dt.items.add(file);
-    const el = st.el;
     el.files = dt.files;
+
+    // 最后再确认一次真的挂上去了 —— 受控组件/异常情况下 files 可能没被接受
+    if (!el.files || el.files.length === 0) {
+      return fail(`文件没有被目标输入框接受（${st.selector}），请检查页面状态`);
+    }
 
     flash(el);
     // 受控组件（React/Vue）需要这两个事件才会同步内部状态
