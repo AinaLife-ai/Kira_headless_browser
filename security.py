@@ -124,9 +124,51 @@ def is_local_host(host: str) -> bool:
 
     try:
         ip = ipaddress.ip_address(h)
-        return ip.is_loopback or ip.is_unspecified
     except ValueError:
         return False
+    return _ip_is_internal(ip)
+
+
+def _ip_is_internal(ip) -> bool:
+    """这个 IP 是否指向"内网/本机"？
+
+    ⚠️ 只判 `is_loopback or is_unspecified` 是**不够的**：
+    私有网段（10./172.16-31./192.168./fc00::/7）与链路本地
+    （169.254./fe80::/10）同样能打到内网服务 ——
+    尤其是 **169.254.169.254**（云厂商的实例元数据端点），
+    拿到它就能读走云主机的临时凭据。这是典型的 SSRF 目标。
+
+    所以要按"内部地址"整体拦：回环 / 未指定 / 私有 / 链路本地 /
+    保留段 / 组播。
+    """
+    # ⚠️ `198.18.0.0/15` 是 RFC 2544 的基准测试段，Python 把它算作
+    #    "private"，但 **Clash / mihomo 这类代理默认就用它做 fake-IP**
+    #    （把域名解析成一个假 IP，再由代理按域名转发）。
+    #    如果把它当内网拦掉，代理环境下的**所有站点**都会被拒 ——
+    #    这是比 SSRF 更常见的部署形态，不能误伤。
+    #    （fake-IP 指向的是代理，不是内网服务，所以不构成 SSRF 通道。）
+    try:
+        if ip in ipaddress.ip_network("198.18.0.0/15"):
+            return False
+    except (ValueError, TypeError):
+        pass
+
+    if (ip.is_loopback or ip.is_unspecified or ip.is_private
+            or ip.is_link_local or ip.is_reserved or ip.is_multicast):
+        return True
+    # IPv4-mapped IPv6（::ffff:10.0.0.1）要按内层 IPv4 判
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        return _ip_is_internal(mapped)
+    # 6to4 / Teredo 之类可以把内层地址藏起来，统一按"可疑"处理
+    for attr in ("sixtofour", "teredo"):
+        inner = getattr(ip, attr, None)
+        if inner is not None:
+            try:
+                return _ip_is_internal(ipaddress.ip_address(inner))
+            except (ValueError, TypeError):
+                return True
+    return False
 
 
 def _extract_mapped_ipv4(h: str) -> Optional[str]:
@@ -478,6 +520,46 @@ def _match_any(host: str, patterns: Iterable[str]) -> Optional[str]:
     return None
 
 
+def resolved_url_is_internal(url: str) -> Tuple[bool, str]:
+    """把 URL 的主机名**真正解析一次**，看它是否指向内网。
+
+    ⚠️ 为什么必须有这一步：`check_url` 只能看到**字符串**。
+    `http://internal.corp/` 或 `http://db.local/` 这种名字本身不"像"本机，
+    但解析出来可能就是 10.x —— 只看字符串等于把内网完全敞开（SSRF）。
+
+    返回 ``(True, ip)`` 表示解析到了内网地址。
+
+    注意：这只降低风险、**不是完整防护** ——
+    校验与真正连接之间仍存在 TOCTOU 窗口（DNS rebinding）。
+    要彻底解决必须在**连接时**校验实际用的 IP（各后端的网络层），
+    这里先把"明显的内网目标"挡住。
+    """
+    host = parse_host(url)
+    if not host:
+        return False, ""
+    # 已经是 IP 字面量的，前面 check_url 已经判过，这里不必再解析
+    try:
+        ipaddress.ip_address(host)
+        return False, ""
+    except ValueError:
+        pass
+    try:
+        import socket
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        # 解析不了就不在这里拦（连接时会自然失败）
+        return False, ""
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr.split("%")[0])
+        except ValueError:
+            continue
+        if _ip_is_internal(ip):
+            return True, str(ip)
+    return False, ""
+
+
 def check_url(
     url: str,
     allowed: Iterable[str] = (),
@@ -512,6 +594,16 @@ def check_url(
     if is_local_host(host):
         return False, (
             f"域名 {host} 指向本机地址，已拒绝（避免 AI 操作 KiraAI 自身的服务）"
+        )
+
+    # ⚠️ 主机名字符串"不像本机"不代表它**不是**内网 ——
+    #    internal.corp / db.local 解析出来可能就是 10.x。
+    #    这里真的解析一次，把指向内网的目标挡掉（SSRF）。
+    _internal, _ip = resolved_url_is_internal(url)
+    if _internal:
+        return False, (
+            f"域名 {host} 解析到内网地址 {_ip}，已拒绝"
+            f"（避免 AI 访问内网/云元数据服务）"
         )
 
     blocked_hit = _match_any(host, blocked)

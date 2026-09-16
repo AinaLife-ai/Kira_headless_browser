@@ -1263,11 +1263,10 @@ class HeadlessBackend(Backend):
                     #    cookie 可能被带到不该带的域，也可能该带的不带。
                     #    改成逐个 add_cookie，保留完整语义。
                     raw = await self._context.cookies(url)
-                    for c in raw:
-                        try:
-                            jar.update_cookies({}, response_url=_URL(url))
-                        except Exception:
-                            pass
+                    # ⚠️ 这里原本有个空转循环：
+                    #    `for c in raw: jar.update_cookies({}, ...)`
+                    #    —— 传空 dict、还把异常吞掉，什么都没做。
+                    #    真正写入 jar 的是下面那段基于 raw 的处理。
                     from http.cookies import SimpleCookie as _SC
                     for c in raw:
                         sc = _SC()

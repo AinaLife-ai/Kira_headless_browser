@@ -340,14 +340,55 @@ def run(r) -> None:
     #    收到 ping 只说明"能收"；sendRaw 返回 false 说明 socket 只能收不能发，
     #    链路其实不通。原来无论发没发成都调 state.probe() →
     #    弹窗显示"链路正常"，实际命令发不出去（假成功）。
+    # 判定逻辑抽成函数，并配一个**变异夹具**：把"有守卫"的样本判为过、
+    # 把"没守卫"的样本判为不过 —— 否则断言本身弱了也没人知道。
+    def _ping_guarded(seg):
+        """seg 里 state.probe() 是否**真的**被 sendRaw 的结果把关？
+
+        ⚠️ 不能只检查"存在某个 = sendRaw(...) 的赋值，且出现了 state.probe" ——
+            那两种情况它都会误判为通过：
+              ① 赋值了但没用它做条件（`const s = sendRaw(...); if (true) probe()`）
+              ② 把 probe 放在完全无关的分支里
+            要求：赋值出的**那个标识符**必须出现在 state.probe() 之前的条件里。
+        """
+        m = re.search(
+            r'(?:const|let|var)\s+(\w+)\s*=\s*sendRaw\s*\(', seg)
+        if not m:
+            return False
+        ident = m.group(1)
+        # ⚠️ 先剥掉注释：注释里也会出现 "state.probe()"（说明为什么这么写），
+        #    直接 find("state.probe") 会切在注释里，把真正的守卫代码切没。
+        code = re.sub(r'/\*[\s\S]*?\*/', '', seg)
+        code = re.sub(r'(?m)//[^\n]*$', '', code)
+        if "state.probe(" not in code:
+            return False
+        head = code[:code.find("state.probe(")]
+        # 该标识符必须出现在 probe 之前的**条件**里
+        return (re.search(rf'if\s*\([^)]*\b{re.escape(ident)}\b', head)
+                is not None
+                or re.search(rf'\b{re.escape(ident)}\b\s*&&', head) is not None
+                or re.search(rf'\b{re.escape(ident)}\b\s*\?', head) is not None)
+
     _ping = re.search(r'case MSG\.PING:([\s\S]{0,600}?)break;', bg)
     _ping_seg = _ping.group(1) if _ping else ""
+
+    # ── 变异夹具：证明这条断言**真的能红** ──────────────────────────
+    _fx_good = ('const pongSent = sendRaw({ type: MSG.PONG });\n'
+                'if (pongSent && typeof state.probe === "function") '
+                '{ state.probe(); }')
+    _fx_bad_assign_only = ('const pongSent = sendRaw({ type: MSG.PONG });\n'
+                           'if (typeof state.probe === "function") '
+                           '{ state.probe(); }')
+    _fx_bad_none = 'state.probe();'
+    r.ok("C16k 夹具：有守卫的写法必须判为通过", _ping_guarded(_fx_good) is True)
+    r.ok("C16k 夹具：赋值了但没拿它做守卫 → 必须判为不通过",
+         _ping_guarded(_fx_bad_assign_only) is False)
+    r.ok("C16k 夹具：完全没有守卫 → 必须判为不通过",
+         _ping_guarded(_fx_bad_none) is False)
+
     r.ok("C16k 仅有 PONG 发送成功时才报告链路正常",
-         bool(_ping_seg)
-         and re.search(r'(?:const|let)\s+\w*(?:pong|sent)\w*\s*=\s*sendRaw\(', _ping_seg, re.I)
-         is not None
-         and "state.probe" in _ping_seg,
-         "PING 分支必须用 sendRaw 的返回值来把关 state.probe()")
+         _ping_guarded(_ping_seg),
+         "PING 分支必须用 sendRaw 的返回值**作为条件**来把关 state.probe()")
 
     # ⚠️ popup 里**每一个** chrome.runtime.sendMessage 都必须被 try/catch 兜住。
     #    MV3 的 service worker 被回收/未唤醒时它会 reject；不接住的话
@@ -366,6 +407,19 @@ def run(r) -> None:
     r.ok("C16j popup 里每个 sendMessage 都被 try/catch 兜住",
          not _unguarded,
          f"未兜住的行={_unguarded or '无'}（SW 回收时会卡住弹窗）")
+
+    # ⚠️ 禁止"no-op 循环"：传空 dict 给 update_cookies 再把异常吞掉 ——
+    #    看起来在做 cookie 导入，其实什么都没做。
+    #    这种代码会**一直躺在里面**：它不报错、不影响功能，只是白跑一轮，
+    #    但会让人以为"这里处理了 cookie"（我删过一次，改别处时又带回来了）。
+    _hb_cookie = src("backends/headless_backend.py")
+    # ⚠️ 先剥注释：我在这段旁边加了说明，注释里也写着 update_cookies({}, ...)，
+    #    不剥掉的话**自己的注释会让检查永远为红**（假红）。
+    _hb_code = re.sub(r'#.*$', '', _hb_cookie, flags=re.M)
+    _noop = re.findall(r'update_cookies\(\s*\{\s*\}\s*,', _hb_code)
+    r.ok("C16l 没有 no-op 的 update_cookies({}, ...) 空转",
+         not _noop,
+         f"出现 {len(_noop)} 处：传空 dict 什么也不会写入，只会误导读者")
 
     # ⚠️ 单条 WebSocket 帧有**硬上限**：KiraAI 用 uvicorn，其 ws_max_size
     #    默认 16 MiB，且框架没有覆盖它。实测：整条帧超过 16 MiB 时对端回

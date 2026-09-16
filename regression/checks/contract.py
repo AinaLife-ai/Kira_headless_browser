@@ -201,7 +201,9 @@ def _mk_fake_bridge(P):
 async def _collect_hb(mod, tmp) -> dict[str, set[str]]:
     """每个方法用**全新实例** —— 共用一个会互相污染（前一个改了页面状态）。"""
     out: dict[str, set[str]] = {}
-    upfile = Path(tempfile.mkdtemp()) / "up.txt"
+    # ⚠️ 夹具建在**受管理的 tmp 之下**：另起 mkdtemp 的话，
+    #    它落在 TemporaryDirectory 之外，永远不会被清理。
+    upfile = Path(tmp) / "up.txt"
     upfile.write_text("x")
     for method, kwargs in CALLS.items():
         b = mod.HeadlessBackend(Path(tmp), {
@@ -248,9 +250,10 @@ async def _collect_hb(mod, tmp) -> dict[str, set[str]]:
     return out
 
 
-async def _collect_eb(mod, P) -> dict[str, set[str]]:
+async def _collect_eb(mod, P, tmp) -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
-    upfile = Path(tempfile.mkdtemp()) / "up.txt"
+    # 同上：夹具必须在同一个受管理的根之下
+    upfile = Path(tmp) / "up_eb.txt"
     upfile.write_text("x")
     for method, kwargs in CALLS.items():
         b = mod.ExtensionBackend(_mk_fake_bridge(P), P)
@@ -288,7 +291,8 @@ def run(r) -> None:
     _ = _td   # 持有引用，别被 GC 提前回收
 
     async def go():
-        return await _collect_hb(hbmod, tmp), await _collect_eb(ebmod, P)
+        return (await _collect_hb(hbmod, tmp),
+                await _collect_eb(ebmod, P, tmp))
 
     hb_keys, eb_keys = asyncio.run(go())
 

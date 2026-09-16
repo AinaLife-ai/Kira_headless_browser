@@ -242,6 +242,54 @@ def run(r) -> None:
     r.ok("B2.9 归一化规则时不会把裸 IPv6 的尾组当端口削掉",
          not _port_bad, f"不符={_port_bad or '无'}")
 
+    # ── SSRF：内网地址必须拦（不只是回环）────────────────────────────
+    #  ⚠️ 过去只判 is_loopback / is_unspecified，于是下面这些都放行：
+    #      10.0.0.5 / 192.168.1.1 / 172.16.0.1（内网）
+    #      169.254.169.254（**云厂商实例元数据端点**，拿到就能读走临时凭据）
+    #      fe80::/10（链路本地）
+    #    这是典型的 SSRF 通道，而且是"看起来不像本机"的那一类。
+    _internal = [
+        "127.0.0.1", "0.0.0.0", "::1",
+        "10.0.0.5", "10.255.255.254",
+        "192.168.1.1", "172.16.0.1", "172.31.255.254",
+        "169.254.169.254",          # AWS/GCP/Azure 元数据端点
+        "fe80::1",                  # 链路本地
+        "::ffff:10.0.0.1",          # v4-mapped 内网
+    ]
+    _not_internal = [
+        "8.8.8.8", "1.1.1.1", "93.184.216.34", "example.com",
+        # ⚠️ 198.18.0.0/15 是 RFC 2544，Python 算它 private，
+        #    但 **Clash / mihomo 默认拿它做 fake-IP**。
+        #    拦掉它 = 代理环境下所有站点全废。
+        "198.18.1.1",
+    ]
+    _bad_int = [h for h in _internal if not sec.is_local_host(h)]
+    _bad_ext = [h for h in _not_internal if sec.is_local_host(h)]
+    r.ok("B2.10 内网/元数据地址被判定为内部（SSRF）",
+         not _bad_int, f"漏判={_bad_int or '无'}")
+    r.ok("B2.11 公网地址（含代理 fake-IP 段）不误判为内部",
+         not _bad_ext, f"误判={_bad_ext or '无'}")
+
+    # ── DNS 解析：主机名解析到内网也要拦 ──────────────────────────────
+    #  `internal.corp` / `db.local` 这种名字本身"不像本机"，
+    #  但解析出来可能就是 10.x —— 只看字符串等于把内网敞开。
+    _resolved_ok = True
+    _resolved_detail = ""
+    try:
+        import socket as _sock
+        # 用 localhost 做一次真实解析（一定存在且一定指向回环）
+        _hit, _ip = sec.resolved_url_is_internal("http://localhost/")
+        _resolved_ok = bool(_hit)
+        _resolved_detail = f"localhost -> 内部={_hit} ip={_ip}"
+        # 一个必然解析不到的名字：不该因此报错，也不该判成内部
+        _miss, _ = sec.resolved_url_is_internal("http://nonexistent.invalid/")
+        _resolved_ok = _resolved_ok and (_miss is False)
+    except Exception as e:  # noqa: BLE001
+        _resolved_ok = False
+        _resolved_detail = f"{type(e).__name__}: {e}"
+    r.ok("B2.12 主机名解析到内网会被拦（不只比较字符串）",
+         _resolved_ok, _resolved_detail)
+
     section("C. check_url 整体行为")
     # 黑名单优先
     ok, _ = sec.check_url("https://bankofamerica.com/x", blocked=["*.bank*"])
