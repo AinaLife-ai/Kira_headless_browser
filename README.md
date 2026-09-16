@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.33
+# 浏览器插件 (Browser Plugin) 2.1.34
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,86 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.34（2026-09-17）
+
+**按 CodeRabbit 第三十五轮审查修复 8 项**（5 actionable + 1 duplicate +
+2 nitpick，全部为真）。
+
+#### 🔴 ① 换页没有串行化 → 并发时建出一堆孤儿页面
+
+`_ensure_page()` 在页面失效时会换一张新页，但它**没有锁**：
+并发调用（模型一轮里同时发几个工具请求）会各自发现"页面死了"，
+然后**各建一张新页** —— `_page`/`_own_page` 被后写的那个覆盖，
+先前建出来的页面**没人引用也没人关**（常驻泄漏）。
+
+→ 加独立的一把 `_page_lock`（**不能复用 `_op_lock`**：`_ensure_page` 会在
+已经持有 `_op_lock` 的路径上被调用，复用会自锁死），
+并把换页逻辑抽成 `_replace_page()`；拿到锁后**重新检查一次**页面存活
+（等锁期间别人可能已经换好了）。
+
+**实测**：并发 10 次调用 —— 修复前建 **10 张**页面（9 张泄漏），
+修复后只建 **1 张**。
+
+#### 🟠 ② host-only cookie 被升格成域 cookie
+
+`cookieGet` 导出时**丢掉了 `hostOnly`**，`cookieSet` 导入时**无条件设置
+`domain`** —— 于是 host-only 的 cookie（只该发给精确匹配的那个主机）
+变成了"域 cookie"，**子域也能收到**。这是安全语义被悄悄放宽。
+
+→ 导出带上 `hostOnly`；导入时仅在 `hostOnly !== true` 时设 `domain`
+（`chrome.cookies.set` 不带 domain 会按 url 主机推断，正好还原原语义）。
+缺字段时保持旧行为，兼容旧导出文件。
+
+#### 🟡 ③ `sameSite=None` 的 cookie 没带 `Secure`（会被浏览器拒收）
+
+规范要求 `SameSite=None` 必须搭配 `Secure`，否则浏览器**直接拒绝或静默丢弃**。
+有些导出工具只写 `sameSite: "no_restriction"` 而不标 `secure` ——
+照原样写进去等于这个 cookie **白导了**。
+
+→ `cookies.py` 在 `sameSite` 解析为 `None` 时强制 `secure = True`。
+
+#### 🟡 ④ content_dom 的 U1–U3 失败会**跳过**独立的 U4/U5
+
+`upload_stream.mjs` 崩掉时直接 `return` —— 但 U4/U5 用的是**另外两个脚本**
+（`upload_sweep` / `upload_detach`），与本次失败无关。跳过它们会让报告上
+只看到 U1–U3 红，误以为"就这三项有问题"。
+
+→ 改成 U1–U3 记失败后**继续跑 U4/U5**。
+**实测**：让上传脚本 `exit 3` → U1–U3 报红的同时 **U4/U5 照常执行并通过**。
+
+#### 🟡 ⑤ `tool_merge` 的具名参数检查用**定长切片**
+
+`main[...][:1600]` 会越界切进函数体、甚至切进**下一个工具的定义** ——
+前者让"参数被删"假通过（函数体内同名字符串兜住了），
+后者让 A 工具缺的参数被 B 工具的同名参数满足。
+
+→ 改为从 `name="<tool>"` 切到**它自己的** `async def` 为止（`_tool_segment()`）。
+**实测**：删掉 `browser_wait` 的 `text` 参数 → C1 立刻报红并点名。
+
+#### 🟡 ⑥ `op_timeout_ratio` 的钳制位置太靠后
+
+上一轮把它放在"跟随框架"那条分支里 —— 而只有那条分支会纠正它，
+其它路径（含 `browser_debug` 的展示）看到的仍是非法原值，
+"显示 5.0、实际用 0.8"的对不上会一直存在。
+
+→ 提前到**解析配置时**钳住 (0,1)。
+⚠️ 顺带查证：**schema 里不能**用 `minimum`/`maximum` 表达这个约束 ——
+框架的 `create_field_from_schema` 只读 `type/name/hint/default/options/locales`，
+**不认这两个键**，写进去只是空头承诺（面板照样允许填非法值）。
+
+#### 🟡 ⑦⑧ 两处 nitpick
+
+- **用了 `tempfile` 的私有 API** `_get_candidate_names()`（两个文件都有）→
+  改用公开的 `uuid.uuid4().hex`（私有 API 在小版本升级里可能被改名，会让检查直接崩）。
+- **`download_timeout` 没有 schema 条目** —— 代码会读它，但面板上看不到、
+  也改不了。→ 补上。
+
+#### 结果
+
+`regression/run_all.py` → **295/295，16 组全绿**
+（1 个 WARN 是"工作副本非 git 仓库"时的预期降级提示）。
+版本 2.1.33 → 2.1.34。
 
 ### v2.1.33（2026-09-16）
 

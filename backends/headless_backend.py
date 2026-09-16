@@ -117,6 +117,9 @@ class HeadlessBackend(Backend):
         #    而它们共用同一张 self._page。不串行化的话，
         #    page.goto 还没完成就会有人在上面 click，页面状态直接错乱。
         self._op_lock = asyncio.Lock()
+        # ⚠️ 第三把锁：保护「换页」。_ensure_page 可能在已持 _op_lock 的路径上
+        #    被调用（_op → 自愈），所以**不能**复用 _op_lock（会自锁死）。
+        self._page_lock = asyncio.Lock()
         self._desc = ""
         self._idle_task = None
         self._popup_hooked = False
@@ -724,12 +727,35 @@ class HeadlessBackend(Backend):
             return False
 
     async def _ensure_page(self) -> Optional[str]:
-        if await self._page_alive():
-            return None
-        if self._context is None:
-            err = await self.start()
-            if err:
-                return err
+        """确保有一张可用页面；没有（或已失效）时换一张。
+
+        ⚠️ **必须串行化**：并发调用（模型一轮里同时发几个工具请求，
+        或者 `_ready()` 与 `_op()` 撞在一起）会各自发现"页面死了"，
+        然后**各建一张新页** —— 结果 `_page`/`_own_page` 被后写的那个
+        覆盖，先前建出来的页面**没人引用也没人关**（常驻泄漏），
+        而且两个调用方各自拿到不同的页面，行为不可预期。
+
+        这里用**独立的一把锁**（不复用 `_op_lock`）：`_ensure_page` 可能在
+        已经持有 `_op_lock` 的路径上被调用（`_op` → 自愈），
+        复用会导致自锁死。
+        """
+        async with self._page_lock:
+            if await self._page_alive():
+                return None
+            if self._context is None:
+                err = await self.start()
+                if err:
+                    return err
+            # ⚠️ 拿到锁后**重新检查一次**：等锁期间别的调用可能已经换好了页面。
+            if await self._page_alive():
+                return None
+            return await self._replace_page()
+
+    async def _replace_page(self) -> Optional[str]:
+        """换一张可用页面（复用现有标签，或新建）。
+
+        ⚠️ 调用方必须已经持有 `_page_lock`。
+        """
         try:
             reuse = None
             for p in list(getattr(self._context, "pages", []) or []):

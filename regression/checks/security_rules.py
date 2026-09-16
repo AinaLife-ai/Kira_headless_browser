@@ -87,6 +87,7 @@ console.log("OK");
 
 
 import os as _os
+import uuid as _uuid
 import shutil as _sh
 import subprocess as _sp
 import tempfile as _tf
@@ -227,7 +228,9 @@ def run(r) -> None:
         _probe = _PROBE_JS.replace("__URI__",
                                    (PLUGIN_DIR / "browser-bridge" / "protocol.js").as_uri())
         _tf2 = Path(_tf.gettempdir()) / (
-            f"_kira_ws_{_os.getpid()}_{next(_tf._get_candidate_names())}.mjs")
+            # ⚠️ 与 static_audit 保持一致：用公开的 uuid4().hex，
+            #    不碰 tempfile 的私有 _get_candidate_names()。
+            f"_kira_ws_{_os.getpid()}_{_uuid.uuid4().hex[:12]}.mjs")
         try:
             _tf2.write_text(_probe, encoding="utf-8")
             _rr = _sp.run(["node", str(_tf2)], capture_output=True,

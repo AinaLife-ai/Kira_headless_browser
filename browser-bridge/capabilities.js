@@ -406,10 +406,14 @@ async function cookieGet(params) {
   const cookies = await chrome.cookies.getAll({ url });
   return {
     url,
+    // ⚠️ 必须带上 hostOnly —— 它是**安全语义**，不是可选元数据：
+    //    host-only 的 cookie 只发给**精确匹配**的那个主机；
+    //    丢了它、导入时又无条件设置 domain，这个 cookie 就会
+    //    变成"域 cookie"，**子域也能收到** —— 作用域被悄悄放宽了。
     cookies: cookies.map((c) => ({
       name: c.name, value: c.value, domain: c.domain, path: c.path,
       secure: c.secure, httpOnly: c.httpOnly, sameSite: c.sameSite,
-      expirationDate: c.expirationDate,
+      expirationDate: c.expirationDate, hostOnly: c.hostOnly,
     })),
   };
 }
@@ -425,11 +429,17 @@ async function cookieSet(params) {
       url: `${scheme}://${host}${c.path || "/"}`,
       name: c.name,
       value: c.value == null ? "" : String(c.value),
-      domain: c.domain,
       path: c.path || "/",
       secure: !!c.secure,
       httpOnly: !!c.httpOnly,
     };
+    // ⚠️ host-only 的 cookie **不能**带 domain 字段 ——
+    //    带了就等于把它升格成"域 cookie"，子域也收得到（作用域被放宽）。
+    //    chrome.cookies.set 不带 domain 时会按 url 的主机推断，
+    //    正好还原 host-only 的语义。
+    //    （只有 hostOnly 明确为 false 时才写 domain；缺字段时按旧行为设，
+    //      兼容还没带这个字段的旧扩展/旧导出文件。）
+    if (c.hostOnly !== true) details.domain = c.domain;
     const ss = String(c.sameSite || "").toLowerCase();
     if (ss === "strict") details.sameSite = "strict";
     else if (ss === "lax") details.sameSite = "lax";

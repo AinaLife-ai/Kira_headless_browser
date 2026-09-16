@@ -233,7 +233,11 @@ def run(r) -> None:
                 continue
             # ⚠️ 名字里必须带**每次唯一的**成分：写死的话两个并发跑的
             #    回归进程会互相覆盖、甚至在 finally 里删掉对方的文件。
-            _uniq = f"{os.getpid()}_{next(_tf._get_candidate_names())}"
+            # ⚠️ 用公开的 uuid4().hex，不用 tempfile 的私有
+            #    `_get_candidate_names()` —— 私有 API 在小版本升级里
+            #    可能被改名/删掉，那会让这条检查直接崩。
+            import uuid as _uuid
+            _uniq = f"{os.getpid()}_{_uuid.uuid4().hex[:12]}"
             tmp = (Path(_tf.gettempdir())
                    / f"_kira_chk_{_uniq}_{f_.replace('.', '_')}.mjs")
             try:

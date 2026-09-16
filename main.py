@@ -192,7 +192,24 @@ class BrowserPlugin(BasePlugin):
         self.download_timeout = float(cfg.get("download_timeout", 600) or 600)
 
         self.op_timeout_follows_framework = _b(cfg.get("op_timeout_follows_framework", False))
-        self.op_timeout_ratio = float(cfg.get("op_timeout_ratio", 0.8) or 0.8)
+        # ⚠️ 在这里就**钳住**合法区间 (0,1)，不要留到使用时才判 ——
+        #    留到使用点的话，只有"跟随框架"那条分支会纠正它，
+        #    其它路径（含 browser_debug 的展示）看到的仍是非法原值，
+        #    "显示 5.0、实际用 0.8"这种对不上的情况就会一直存在。
+        #    ⚠️ schema 里**不能**用 minimum/maximum 表达这个约束：
+        #       框架的 create_field_from_schema 只读 type/name/hint/default/
+        #       options/locales，不认这两个键 —— 写进去只是空头承诺，
+        #       面板照样允许填非法值。所以必须在这里兜住。
+        try:
+            _ratio = float(cfg.get("op_timeout_ratio", 0.8) or 0.8)
+        except (TypeError, ValueError):
+            _ratio = 0.8
+        if not (0.0 < _ratio < 1.0):
+            logger.warning(
+                f"op_timeout_ratio={_ratio} 不在 (0,1) 内，已改回 0.8"
+                f"（0 或负数会算出无意义的超时；>=1 会让插件超时越过框架自己的）")
+            _ratio = 0.8
+        self.op_timeout_ratio = _ratio
 
         self._headless_cfg = {
             "headless": cfg.get("headless", True),
@@ -257,16 +274,9 @@ class BrowserPlugin(BasePlugin):
 
         # op_timeout 脱钩：读一次框架的 tool_call_timeout，仅用于"要不要挂钩"
         if self.op_timeout_follows_framework:
-            # ⚠️ ratio 的合法性在**这里**先判一次，不要放进下面的 `fw > 0`
-            #    分支里 —— 那样读不到框架超时（fw<=0 或抛异常）时，
-            #    一个非法值（如 5.0）会**原样留在 self.op_timeout_ratio 上**，
-            #    browser_debug 会照着显示"5.0"，而实际用的是兜底 0.8，
-            #    报告和现实对不上。
-            if not (0.0 < self.op_timeout_ratio < 1.0):
-                logger.warning(
-                    f"op_timeout_ratio={self.op_timeout_ratio} 不合法"
-                    f"（须 0<ratio<1），已改回 0.8")
-                self.op_timeout_ratio = 0.8
+            # ratio 的合法性已在**解析配置时**钳好（见 __init__），
+            # 这里直接用即可 —— 不要再留一份"使用时才纠正"的判断，
+            # 那样两处口径容易分叉。
             try:
                 fw = float(self.ctx.config.get_config(
                     "bot_config.agent.tool_call_timeout", 60.0) or 60.0)

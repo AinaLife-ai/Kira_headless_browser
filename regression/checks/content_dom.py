@@ -201,17 +201,22 @@ def run(r) -> None:
                                "U2 乱序分块被拒绝",
                                "U3 上限为 0 时不误拒"):
                         r.ok(nm, False, "脚本未正常退出，结果不可信")
-                    return
-                checks = [
-                    ("U1 分块上传在真实 DOM 下逐字节一致",
-                     "内容 ✓ 逐字节一致" in out2 and out2.count("内容 ✓") >= 3,
-                     [ln.strip() for ln in out2.splitlines()
-                      if "逐字节一致" in ln or "不一致" in ln][:3]),
-                    ("U2 乱序分块被拒绝",
-                     "乱序分块是否被拒: ✓ 已拒绝" in out2, ""),
-                    ("U3 上限为 0 时不误拒",
-                     "未误拒" in out2, ""),
-                ]
+                    # ⚠️ 不要 return —— U4/U5 用的是**另外两个脚本**
+                    #    （upload_sweep / upload_detach），与本次失败无关。
+                    #    在这里 return 会让那两项**静默不执行**，
+                    #    报告上只看到 U1~U3 红，误以为"就这三项有问题"。
+                    checks = []
+                else:
+                    checks = [
+                        ("U1 分块上传在真实 DOM 下逐字节一致",
+                         "内容 ✓ 逐字节一致" in out2 and out2.count("内容 ✓") >= 3,
+                         [ln.strip() for ln in out2.splitlines()
+                          if "逐字节一致" in ln or "不一致" in ln][:3]),
+                        ("U2 乱序分块被拒绝",
+                         "乱序分块是否被拒: ✓ 已拒绝" in out2, ""),
+                        ("U3 上限为 0 时不误拒",
+                         "未误拒" in out2, ""),
+                    ]
                 for name, ok2, det in checks:
                     r.ok(name, ok2, str(det)[:160] if not ok2 else
                          "base64→Uint8Array→Blob→File 全链路字节无损")

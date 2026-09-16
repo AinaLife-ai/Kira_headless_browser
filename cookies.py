@@ -72,14 +72,22 @@ def cookie_file_to_playwright(raw) -> Tuple[List[dict], List[str]]:
             continue
 
         ss_raw = str(c.get("sameSite", "Lax")).lower()
+        _same_site = _SAME_SITE.get(ss_raw, "Lax")
+        # ⚠️ `sameSite=None` 的 cookie **必须**带 `Secure`，否则浏览器直接拒绝
+        #    （Playwright 的 add_cookies 会抛错，或浏览器静默丢弃）。
+        #    导出文件里若只有 sameSite=None 没标 secure（有些导出工具就是这样），
+        #    照原样写进去 = 这个 cookie 白导了。
+        _secure = bool(c.get("secure", False))
+        if _same_site == "None" and not _secure:
+            _secure = True
         item = {
             "name": str(c["name"]),
             "value": str(c["value"]),
             "domain": str(c["domain"]),
             "path": c.get("path", "/") or "/",
-            "secure": bool(c.get("secure", False)),
+            "secure": _secure,
             "httpOnly": bool(c.get("httpOnly", False)),
-            "sameSite": _SAME_SITE.get(ss_raw, "Lax"),
+            "sameSite": _same_site,
         }
         # 过期时间：扩展用 `expirationDate`（浮点秒），Playwright 用 `expires`（整数秒）
         exp = c.get("expirationDate", c.get("expires"))

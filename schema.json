@@ -368,6 +368,18 @@
       }
     }
   },
+  "download_timeout": {
+    "name": "Download Timeout (Seconds)",
+    "type": "integer",
+    "default": 600,
+    "hint": "How long a single download may take before it is aborted. Downloads run in the background while the tool call returns immediately, so this is a safety net against hanging connections rather than a per-call deadline. Default 600s (10 minutes).",
+    "locales": {
+      "zh": {
+        "name": "下载超时（秒）",
+        "hint": "单次下载最长允许多久，超时即中止。下载是在后台进行的（工具调用会立刻返回），所以这个是**防止连接卡死**的兜底，而不是单次调用的截止时间。默认 600 秒（10 分钟）。"
+      }
+    }
+  },
   "download_max_bytes": {
     "name": "Max Download Size (Bytes)",
     "type": "integer",

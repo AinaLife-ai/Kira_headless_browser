@@ -84,6 +84,27 @@ def _tool_enum(src: str, tool: str) -> set[str]:
     return out
 
 
+def _tool_segment(main_src: str, tool: str) -> str:
+    """取出某个工具**自己**的 @register.tool(...) 段落。
+
+    从 ``name="<tool>"`` 开始，到**它自己的**装饰器结束
+    （即紧跟其后的 ``async def`` / ``def`` 行）为止。
+
+    ⚠️ 不能像以前那样切固定的 1600 字符 —— 那个窗口会
+    **越界切进函数体，甚至切进下一个工具的定义**：
+      · 切进函数体 → 具名参数检查会把函数内部的字符串当成"参数还在"（假通过）；
+      · 切进下一个工具 → A 工具缺的参数被 B 工具的同名参数满足（同样假通过）。
+    两者都是"看起来在检查、实际没检查"。
+    """
+    i = main_src.find(f'name="{tool}"')
+    if i < 0:
+        return ""
+    seg = main_src[i:]
+    # 到下一个顶层 def/async def 为止（工具方法都定义在类里，缩进为 4 空格）
+    m = re.search(r'\n    (?:async )?def ', seg)
+    return seg[:m.start()] if m else seg
+
+
 #: 非 action 式工具的关键参数（丢了就是能力丢失，单靠 enum 查不出来）
 LEGACY_PARAMS = {
     "browser_wait": ("selector", "text", "seconds", "timeout"),
@@ -130,7 +151,7 @@ def run(r) -> None:
             # 有些目标工具本来就**不是** action 式的（browser_wait / browser_tabs
             # 等），没有 enum 是正常的，不该要求 action 存在。
             # 判据：它的参数里声明了 action/mode 吗？声明了才要求 enum。
-            _seg = main[main.find(f'name="{newtool}"'):][:1600]
+            _seg = _tool_segment(main, newtool)
             _has_sel = bool(re.search(r'"(action|mode)":\s*\{"type"', _seg))
             if _has_sel and not enums:
                 ok = False
