@@ -219,12 +219,21 @@ def first_run_notice(plugin_dir: Path, connected: bool,
 
 
 def compatibility_report() -> str:
-    """扩展的浏览器兼容性说明。"""
+    """扩展的浏览器兼容性说明。
+
+    ⚠️ 版本号必须与 `browser-bridge/manifest.json` 的
+    `minimum_chrome_version` 一致 —— 说过低的值会让用户**按提示安装后加载失败**，
+    而失败原因（manifest 版本门禁）和安装步骤毫无关系，很难自行排查。
+    """
     return (
         "扩展兼容性：\n"
-        "  ✅ Chrome 120+（执行 JS 依赖 chrome.userScripts，它从 120 起提供）\n"
-        "  ✅ Edge 120+（同为 Chromium 内核，扩展机制一致，可直接加载）\n"
-        "  ✅ Brave / Vivaldi / Opera 等 Chromium 系浏览器\n"
+        "  ✅ Chrome 135+（manifest 的 minimum_chrome_version=135；\n"
+        "     执行 JS 依赖 chrome.userScripts.execute）\n"
+        "  ✅ Edge 135+（同为 Chromium 内核，扩展机制一致，可直接加载）\n"
+        "  ✅ Brave / Vivaldi / Opera 等 Chromium 系浏览器（版本同步跟进即可）\n"
+        "  ⚠️ Chrome/Edge 120~134：能装扩展，但 manifest 声明的 135 会让\n"
+        "     浏览器**拒绝加载**。要么升级浏览器，要么把 manifest 里的\n"
+        "     minimum_chrome_version 改小（执行 JS 的能力可能受限）\n"
         "  ❌ Firefox —— 不支持（Firefox 的 MV3 用的是 event page，\n"
         "     不接受 manifest 里的 background.service_worker）\n"
         "  ❌ Safari —— 不支持（扩展格式完全不同）"

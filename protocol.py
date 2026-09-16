@@ -153,6 +153,12 @@ class BridgeResult:
     ok: bool
     data: Any = None
     error: Optional[str] = None
+    #: 错误类别（扩展侧上报的 ``error_code``）。
+    #  ⚠️ 存在的意义：**别靠错误文案判断语义**。
+    #  典型用途是"超时 = 结果不确定" —— 命令可能已经执行了，
+    #  此时绝不能换后端重试（同一个点击会被做两次）。
+    #  原来插件侧用 `"超时" in msg` 判定，改个提示文字就静默失效。
+    error_code: Optional[str] = None
 
     @classmethod
     def from_wire(cls, raw: dict) -> "BridgeResult":
@@ -161,6 +167,7 @@ class BridgeResult:
             ok=bool(raw.get("ok", False)),
             data=raw.get("data"),
             error=raw.get("error"),
+            error_code=raw.get("error_code"),
         )
 
 

@@ -120,14 +120,20 @@ console.log(JSON.stringify(out));
 
 
 def run(r) -> None:
-    node = subprocess.run(["which", "node"], capture_output=True, text=True)
-    if node.returncode != 0:
+    # ⚠️ 用 which **解析出的绝对路径**跑 node，而不是裸 "node"。
+    #    下面给子进程换了 env（含自定义 PATH），裸名字会在子进程里
+    #    重新做一次 PATH 查找 —— Homebrew(Apple Silicon) 的 /opt/homebrew/bin、
+    #    nvm 的 ~/.nvm/... 都可能不在那个 PATH 里 → FileNotFoundError，
+    #    整个检查报 FAIL（其实是环境问题，不是产品问题）。
+    import shutil as _shutil
+    node_bin = _shutil.which("node")
+    if not node_bin:
         r.warn("没有 node，跳过 DOM 检查")
         return
 
     # jsdom 是否可用
     probe = subprocess.run(
-        ["node", "-e", "require('jsdom')"],
+        [node_bin, "-e", "require('jsdom')"],
         cwd=str(JS_DIR), capture_output=True, text=True)
     if probe.returncode != 0:
         r.warn("未安装 jsdom，跳过 DOM 检查",
@@ -151,7 +157,7 @@ def run(r) -> None:
         "NODE_PATH": str(JS_DIR / "node_modules"),
     }
     try:
-        p = subprocess.run(["node", str(runner)], cwd=str(JS_DIR),
+        p = subprocess.run([node_bin, str(runner)], cwd=str(JS_DIR),
                            capture_output=True, text=True, env=env, timeout=120)
 
         if p.returncode != 0:
@@ -181,7 +187,7 @@ def run(r) -> None:
             env2["UPLOAD_TARGET_MB"] = "1,5,20"
             try:
                 p2 = subprocess.run(
-                    ["node", str(up)], cwd=str(JS_DIR),
+                    [node_bin, str(up)], cwd=str(JS_DIR),
                     capture_output=True, text=True, env=env2, timeout=300)
                 out2 = (p2.stdout or "")
                 # ⚠️ 必须**先看退出码**：脚本异常退出却恰好打印了全部成功
@@ -218,7 +224,7 @@ def run(r) -> None:
             try:
                 _e3 = dict(env)
                 _e3["KIRA_PLUGIN_DIR"] = str(PLUGIN_DIR)
-                p3 = subprocess.run(["node", str(sweep)], cwd=str(JS_DIR),
+                p3 = subprocess.run([node_bin, str(sweep)], cwd=str(JS_DIR),
                                     capture_output=True, text=True,
                                     env=_e3, timeout=120)
                 # ⚠️ 先判退出码与非空：脚本崩了却恰好留下半截输出时，
@@ -244,7 +250,7 @@ def run(r) -> None:
             try:
                 _e4 = dict(env)
                 _e4["KIRA_PLUGIN_DIR"] = str(PLUGIN_DIR)
-                p4 = subprocess.run(["node", str(det)], cwd=str(JS_DIR),
+                p4 = subprocess.run([node_bin, str(det)], cwd=str(JS_DIR),
                                     capture_output=True, text=True,
                                     env=_e4, timeout=120)
                 if p4.returncode != 0:

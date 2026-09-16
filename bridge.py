@@ -42,6 +42,9 @@ class BridgeTimeout(RuntimeError):
 class BridgeError(RuntimeError):
     """扩展返回了错误。"""
 
+    #: 扩展上报的错误类别（如 ``"timeout"``）。None 表示未分类。
+    err_code: Optional[str] = None
+
 
 class BrowserBridge:
     """管理唯一的扩展连接，并提供 ``send_command`` 请求/应答能力。"""
@@ -450,9 +453,13 @@ class BrowserBridge:
             raise
 
         if not result.ok:
-            self._abort_sink(cmd_id, BridgeError(result.error or "命令失败"))
+            _err = BridgeError(result.error or f"命令 {name} 执行失败")
+            # ⚠️ 把错误类别透传上去 —— 上层（extension_backend）据此判定
+            #    "超时 = 不确定，禁止换后端重试"，不依赖文案匹配。
+            _err.err_code = result.error_code
+            self._abort_sink(cmd_id, _err)
             self.commands_failed += 1
-            raise BridgeError(result.error or f"命令 {name} 执行失败")
+            raise _err
 
         # 下载类命令：分块已经边收边写进了 sink，这里只把落盘结果报回去
         sink = self._finish_sink(cmd_id)

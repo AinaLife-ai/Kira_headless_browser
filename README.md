@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.28
+# 浏览器插件 (Browser Plugin) 2.1.29
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -215,6 +215,15 @@ AES-GCM 加密，密钥由 DPAPI（Windows）/ Keychain（macOS）/ OSCrypt（Li
 | `download_max_bytes` | integer | `2147483648` | 单个下载大小上限（2GB）。下载是**流式落盘**，无论多大都不占内存 |
 | `upload_max_bytes` | integer | `268435456` | 上传大小上限（256MB）。上传走**分块流式**，单帧恒定 ~340KB；分块累积在**页面上下文**（SW 只转发），峰值内存 ≈文件大小 ×1.0。超过 `ExtensionBackend.MAX_UPLOAD_BYTES` 会被自动钳制 |
 | `upload_allow_any_path` | switch | `true` | 是否允许上传任意路径的文件（**默认开**，本插件定位是给 bot 完整浏览能力）。关掉后只允许 `upload_allowed_dirs` 里的目录 |
+
+> **关于 `upload_allow_any_path` 默认值（`true`）**：这是**有意的选择**，
+> 不是遗漏。本插件的定位是"给 bot 完整的浏览器能力"，上传任意本机文件是预期功能
+> （比如把本地 PDF 传进网盘）。审查工具多次建议改成 `false`（安全默认值），
+> 但那样会**改变产品定位**，所以按需求保留 `true`。
+>
+> 想收紧的话把这项关掉即可 —— 白名单在 `upload_allowed_dirs`，
+> 且路径用 `realpath` 归一，能防 `../` 穿越。
+> **代码与 schema 两处始终写同一个值**（有检查盯着，不允许分裂）。
 | `upload_allowed_dirs` | list | `["data/files","data/temp"]` | 上传目录白名单（仅在上项关闭时生效）。用 realpath 归一，可防 `../` 穿越 |
 
 ---
@@ -501,6 +510,88 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.29（2026-09-16）
+
+**按 CodeRabbit 新一轮审查修复**（共 20 条未解决线程，逐条对当前代码核实后
+修复 8 项，其余 12 项为过期/误报或按需求保留，理由见下）。
+
+#### 🔴 页面操作超时不再"可重试"（最重要的一项）
+
+`callContent` 的 `Promise.race` 超时只是**本地不再等待**，
+**并不能取消**已经发出去的操作 —— 慢点击/慢输入很可能在超时之后才真正完成。
+而插件侧原来靠 `"超时" in msg` **文案匹配**来判定"结果不确定、禁止换后端重试"：
+只要改一下提示文字（或换语言），这条安全逻辑就**静默失效**，
+退化成"同一个点击被执行两次"。
+
+→ 改成**显式错误类别**，一路透传到底：
+
+```
+shared.js          超时抛 Error，err.code = ERR_TIMEOUT
+background.js      sendResult(..., e.code)     → WS 消息带 error_code
+protocol.py        BridgeResult.error_code
+bridge.py          BridgeError.err_code
+extension_backend  err_code == "timeout" → OpResult.indeterminate_result
+main.py            明说"可能已生效"，**不换后端重试**
+```
+
+文案匹配**保留为兜底**（兼容还没上报 `error_code` 的旧版扩展）。
+新增常驻检查 **`timeout_semantics`（14 项）** 盯住整条链路 ——
+4 个文件、3 种语言，任何一环断掉都会静默退化成"重复执行"。
+反向验证：拆透传 → A6 FAIL；后端不识别类别 → A7/B2/B4 FAIL；
+主插件不看 `indeterminate` → A8/A9/B5 FAIL；JS 不标记 → A2 FAIL。
+
+#### 🟠 浏览器版本号与实际不符（用户装完会直接加载失败）
+
+`browser-bridge/manifest.json` 的 `minimum_chrome_version` 早已从 120 提到
+**135**，而 `setup_guide` 还在告诉用户"Chrome 120+ 可以" ——
+用户在 128 上照着装，浏览器**直接拒绝加载扩展**，且失败提示与版本无关，
+根本无从排查。
+
+→ 版本号改为 135，并说明 120~134 会怎样、怎么自救。
+**并补上一直缺失的检查 R9b**：`compatibility_report()` 里声明的 Chrome 版本
+必须与 manifest 一致。（这条漂了十几轮才被发现，就是因为**没有任何检查盯着它**。）
+
+#### 🟡 其余修复
+
+- **`vlm_describe` A12 判据写成了 `or`** —— 只漏进**一项**（`HeadlessBackend`）
+  也照样 PASS。改成独立禁止项清单 + `_leaks`，单项泄漏现在能抓到。
+- **`vlm_describe` / `lost_features` 用裸 `["python3", ...]`** →
+  改用 `sys.executable`（套件用别的解释器启动时，探针会落到另一套环境上）。
+- **`content_dom` 用裸 `["node", ...]`** → 改用 `shutil.which("node")` 解析出的路径。
+  原写法给子进程换了 env，裸名字会在**子进程里重新查 PATH**，
+  Homebrew(Apple Silicon) / nvm 装的 node 不在那个 PATH 里 → FileNotFoundError，
+  整个检查报 FAIL（是环境问题，不是产品问题）。
+- **下载后未检查"发送"是否成功** —— 文件在本地、但用户没收到时，
+  仍然回一句"📤 已发送给用户"。现在用 `_send_file` 的返回值区分，
+  失败就明说"没能发出"。
+- **`op_timeout_ratio` 的合法性校验嵌套太深** —— 读不到框架超时时，
+  非法值（如 5.0）会原样留在 `self.op_timeout_ratio` 上，
+  `browser_debug` 显示 5.0 而实际用兜底 0.8，**报告与现实对不上**。
+  → 校验提到 `fw > 0` 之前，非法即改回 0.8。
+- **`_send_chromium`（上轮新增的能力）同样改用 `sys.executable`**。
+
+#### 按需求保留 / 判定为误报的 12 项
+
+- **`upload_allow_any_path` 保持 `true`**（安全审查建议改 `false`）——
+  本插件定位是"给 bot 完整浏览器能力"，上传任意本机文件是**预期功能**；
+  这是有意的产品决定，README 里已写清理由与收紧方法。
+- **`upload_max_bytes` 默认 256MB 不变**（建议降到 32MB）——
+  审查意见基于"单条消息传整个文件"的旧实现；**分块流式上传早已实现**
+  （审查给的两个选项之一），单帧恒定 ~340KB，实测 100MiB 通过、
+  峰值内存 ≈1× 文件大小。已无需降级。
+- **`extension_backend` 的 `display`** —— 审查说 `BrowserBridge.info` 是方法、
+  当前代码会 `AttributeError`；实际它是 **`@property`**，当前写法正确，
+  照审查建议改反而多绕一层。已实测两种写法（见提交说明）。
+- `file_hygiene` 的 `dont_write_bytecode`、`tool_merge`/`spec_compliance`/
+  `static_audit` 的 `src_safe` 守卫、`bridge_e2e` 的 node 版本门禁、
+  `content_dom` 的 U5 空结果判定 —— **均已在更早的提交中修好**，
+  审查基于旧快照（`outdated=true`）。
+
+#### 结果
+
+`regression/run_all.py` → **280/280，15 组全绿**。
+版本 2.1.28 → 2.1.29。
 
 ### v2.1.28（2026-09-16）
 

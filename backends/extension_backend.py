@@ -123,6 +123,14 @@ class ExtensionBackend(Backend):
             # ⚠️ 超时类错误标成**不确定**：命令可能已经在页面里执行了，
             #    只是回执没回来。若当成普通失败，上层会换（无头）后端重试，
             #    同一个点击/输入就被做了两次。
+            #
+            # ⚠️ 优先看**显式错误类别**（扩展上报的 error_code）。
+            #    以前只靠 `"超时" in msg` 判定 —— 那是文案匹配，
+            #    改个提示文字（或换语言）这条安全逻辑就**静默失效**，
+            #    退化成"同一个操作被执行两次"。文案匹配保留为兜底
+            #    （兼容还没上报 error_code 的旧版扩展）。
+            if getattr(e, "err_code", None) == "timeout":
+                return OpResult.indeterminate_result(msg, self.name)
             if "超时" in msg or "timeout" in msg.lower():
                 return OpResult.indeterminate_result(msg, self.name)
             return OpResult.fail(msg, self.name)

@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -226,8 +227,15 @@ def run(r) -> None:
         r.ok(f"A11 读到配置 {key}", f'cfg.get("{key}"' in main)
 
     # ── 两个后端都能用（VLM 在插件进程里，与谁拍的图无关）─────────────
+    # ⚠️ 判据是"**一个都不许有**"，不是 `or`。
+    #    写成 `"backend" not in v or "self.router" not in v` 时，
+    #    只漏进**一项**也照样 PASS（另一个条件把结果兜住了）——
+    #    等于这个守卫在最常见的回归上失效。
+    _leaks = [t for t in ("self.router", "self.backend", "HeadlessBackend",
+                          "ExtensionBackend", "backends.") if t in v]
     r.ok("A12 VLM 调用不依赖具体后端（两个后端都能让 bot 看到图）",
-         "backend" not in v.lower() or "self.router" not in v,
+         not _leaks,
+         f"vlm.py 里引用了后端/路由={_leaks or '无'}；"
          "描述发生在插件进程里，扩展拍的图和无头拍的图走同一条路")
 
     section("B. 行为：真跑一遍（假 VLM 客户端）")
@@ -246,7 +254,7 @@ def run(r) -> None:
         env = dict(os.environ)
         env["KIRA_PLUGIN_DIR"] = str(PLUGIN_DIR)
         env["KIRA_FW_DIR"] = fw_dir
-        p = subprocess.run(["python3", script], capture_output=True,
+        p = subprocess.run([sys.executable, script], capture_output=True,
                            text=True, env=env, timeout=180)
         line = next((ln for ln in (p.stdout or "").splitlines()
                      if ln.startswith("RESULT:")), "")

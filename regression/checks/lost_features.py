@@ -22,6 +22,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def _run_probe(script_src: str, timeout: int = 120) -> dict:
         env = dict(os.environ)
         env["KIRA_PLUGIN_DIR"] = str(PLUGIN_DIR)
         env["KIRA_FW_DIR"] = os.environ.get("KIRA_FW_DIR", "/tmp/kiraai_latest")
-        p = subprocess.run(["python3", path], capture_output=True, text=True,
+        p = subprocess.run([sys.executable, path], capture_output=True, text=True,
                            env=env, timeout=timeout)
         line = next((ln for ln in (p.stdout or "").splitlines()
                      if ln.startswith("RESULT:")), "")

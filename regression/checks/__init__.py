@@ -21,6 +21,7 @@ from . import (
     spec_compliance,
     vlm_describe,
     lost_features,
+    timeout_semantics,
 )
 
 #: (模块, 是否默认启用)
@@ -39,6 +40,7 @@ ALL_CHECKS = [
     spec_compliance,     # KiraAI 规范符合性（包结构 / manifest / 入口 / 路由）
     vlm_describe,        # 截图 → VLM 描述（bot 看图；防止该能力再次丢失）
     lost_features,       # v2.1.0 重写时丢掉的能力（cookie 自动加载 / 下载浏览器 / VLM 自查）
+    timeout_semantics,   # 「结果不确定」链路（超时不得触发换后端重试）
 ]
 
 __all__ = ["ALL_CHECKS"]

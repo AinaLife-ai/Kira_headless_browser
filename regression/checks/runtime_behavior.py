@@ -9,13 +9,14 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+import re
 import sys
 import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..harness import PLUGIN_DIR, STUBS_DIR, install_stubs, section
+from ..harness import PLUGIN_DIR, STUBS_DIR, install_stubs, section, src
 
 TITLE = "运行时行为（生命周期 / 路由 / 内存）"
 
@@ -275,6 +276,36 @@ def run(r) -> None:
     r.ok("R9 页面操作有独立互斥锁（并发工具调用不会互相踩）",
          "_op_lock" in hbsrc and "async with self._op_lock" in hbsrc,
          "模型一轮里并发调 navigate+click 时，共用同一张页面")
+
+    # ── R9b 浏览器版本号：setup_guide 必须与 manifest 一致 ───────────
+    # ⚠️ 这条一直没人盯，漂了十几轮才被外部审查发现：
+    #    manifest 的 minimum_chrome_version 从 120 提到 135，
+    #    而 setup_guide 还在告诉用户"Chrome 120+ 可以" →
+    #    用户在 128 上照着装，浏览器**直接拒绝加载扩展**，
+    #    且失败提示不会提到版本，根本无从排查。
+    #
+    # ⚠️ 只看 `compatibility_report()` 里那句**兼容性声明** ——
+    #    setup_guide 里另有一处 "Chrome 138+（userScripts 开关默认关闭）"
+    #    讲的是另一件事，不能拿来跟 manifest 比。
+    import json as _json
+    _ext_mf = _json.loads(
+        open(PLUGIN_DIR / "browser-bridge" / "manifest.json",
+             encoding="utf-8").read())
+    _min_chrome = str(_ext_mf.get("minimum_chrome_version") or "").strip()
+    _sg_src = src("setup_guide.py")
+    _cr = ""
+    if "def compatibility_report(" in _sg_src:
+        _cr = _sg_src.split("def compatibility_report(")[1]
+        # 到下一个顶层 def 或文件尾
+        for _stop in ("\ndef ", "\nclass "):
+            if _stop in _cr:
+                _cr = _cr.split(_stop)[0]
+    _sg_ver = re.findall(r"Chrome\s+(\d+)\+", _cr)
+    r.ok("R9b 扩展兼容性声明的 Chrome 版本与 manifest 一致",
+         bool(_min_chrome) and bool(_sg_ver)
+         and all(v == _min_chrome for v in _sg_ver),
+         f"manifest minimum_chrome_version={_min_chrome}；"
+         f"compatibility_report 里写的={_sg_ver or '没写'}")
 
     # ── R10 扩展 scroll 用瞬时行为 ──────────────────────────────────
     cjs = open(PLUGIN_DIR / "browser-bridge" / "content.js",

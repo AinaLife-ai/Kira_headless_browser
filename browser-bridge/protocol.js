@@ -10,6 +10,15 @@ export const MSG_HELLO = "hello";
 export const MSG_WELCOME = "welcome";
 export const MSG_CMD = "cmd";
 export const MSG_RESULT = "result";
+
+/** 错误类别标记（result.error_code）。
+ *
+ * ⚠️ 加这个是因为**别靠错误文案判断语义**：
+ *    插件侧原来用 `"超时" in msg` 来判定"结果不确定，禁止换后端重试" ——
+ *    只要有人改一下提示文字（或换个语言），这条安全逻辑就静默失效，
+ *    变成"同一个点击被执行两次"。现在改成显式字段。
+ */
+export const ERR_TIMEOUT = "timeout";
 export const MSG_EVENT = "event";
 export const MSG_PING = "ping";
 export const MSG_PONG = "pong";

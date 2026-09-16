@@ -7,7 +7,7 @@
  * 这些命令（执行JS/上传/下载 + 补齐的 13 个）会整个不可用。
  */
 
-import { MSG } from "./protocol.js";
+import { MSG, ERR_TIMEOUT } from "./protocol.js";
 
 /** 共享的可变状态（socket 会被 background.js 重新赋值，所以放对象里） */
 export const state = {
@@ -35,8 +35,9 @@ export function sendRaw(obj) {
   }
 }
 
-export function sendResult(id, ok, data, error) {
-  sendRaw({ type: MSG.RESULT, id, ok, data: data ?? null, error: error ?? null });
+export function sendResult(id, ok, data, error, errorCode) {
+  sendRaw({ type: MSG.RESULT, id, ok, data: data ?? null,
+            error: error ?? null, error_code: errorCode ?? null });
 }
 
 export function sendEvent(name, data) {
@@ -109,9 +110,19 @@ export async function callContent(tab, action, payload = {}, timeout = 15000) {
     }
   }
 
+  // ⚠️ 超时必须标记成**不确定**（indeterminate）而不是普通失败：
+  //    Promise.race 只是在本地"不再等"，**并不能取消**已经发出去的操作 ——
+  //    慢点击/慢输入很可能在超时之后才真正完成。
+  //    如果报成"失败"，上层会换（无头）后端**重试**，
+  //    于是同一个点击/输入被执行两次，而这是不可撤销的。
+  //    带上 error_code 让插件侧能识别（不依赖文案）。
   const result = await Promise.race([
     send(action, payload),
-    new Promise((_, rej) => setTimeout(() => rej(new Error("页面操作超时")), timeout)),
+    new Promise((_, rej) => {
+      const err = new Error("页面操作超时（操作可能仍在进行）");
+      err.code = ERR_TIMEOUT;
+      setTimeout(() => rej(err), timeout);
+    }),
   ]);
 
   if (result && result.__error) throw new Error(result.__error);

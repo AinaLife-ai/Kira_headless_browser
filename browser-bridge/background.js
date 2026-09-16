@@ -379,7 +379,9 @@ async function runCommand(id, name, params) {
     }
   } catch (e) {
     console.error(`[KiraBridge] 命令 ${name} 失败`, e);
-    sendResult(id, false, null, e.message || String(e));
+    // ⚠️ 把**错误类别**也传回去（e.code）。插件侧据此判断"结果不确定"，
+    //    而不是靠解析错误文案里的"超时"两个字 —— 文案一改，安全逻辑就没了。
+    sendResult(id, false, null, e.message || String(e), e && e.code);
   }
 }
 

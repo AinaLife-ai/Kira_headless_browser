@@ -257,19 +257,21 @@ class BrowserPlugin(BasePlugin):
 
         # op_timeout 脱钩：读一次框架的 tool_call_timeout，仅用于"要不要挂钩"
         if self.op_timeout_follows_framework:
+            # ⚠️ ratio 的合法性在**这里**先判一次，不要放进下面的 `fw > 0`
+            #    分支里 —— 那样读不到框架超时（fw<=0 或抛异常）时，
+            #    一个非法值（如 5.0）会**原样留在 self.op_timeout_ratio 上**，
+            #    browser_debug 会照着显示"5.0"，而实际用的是兜底 0.8，
+            #    报告和现实对不上。
+            if not (0.0 < self.op_timeout_ratio < 1.0):
+                logger.warning(
+                    f"op_timeout_ratio={self.op_timeout_ratio} 不合法"
+                    f"（须 0<ratio<1），已改回 0.8")
+                self.op_timeout_ratio = 0.8
             try:
                 fw = float(self.ctx.config.get_config(
                     "bot_config.agent.tool_call_timeout", 60.0) or 60.0)
                 if fw > 0:
-                    # ⚠️ ratio 必须是 (0,1)：0 或负数会算出无意义的超时，
-                    #    >=1 会让插件的 deadline 越过框架自己的超时，
-                    #    变成"框架先取消、插件还没等到结果"。
                     r = self.op_timeout_ratio
-                    if not (0.0 < r < 1.0):
-                        logger.warning(
-                            f"op_timeout_ratio={r} 不合法（须 0<ratio<1），"
-                            f"本次改用 0.8")
-                        r = 0.8
                     tuned = fw * r
                     # 下限取 min(5.0, 目标值)，**绝不能**被 5 秒顶到框架超时
                     # 之上：fw 很小时（如 6s），max(5, 4.8) 会变成 5，仍可能
@@ -1166,7 +1168,12 @@ class BrowserPlugin(BasePlugin):
         if not _os.path.isfile(path):
             return (f"⚠️ 文件不在路径上（{path}），**没有发送**。"
                     f"请检查下载是否真的成功。")
-        await self._send_file(event, path, name)
+        # ⚠️ 还要看发送本身成没成 —— `_send_file` 返回 False 时
+        #    文件仍在本地，但用户没收到。这里若照旧拼一句"已发送给用户"，
+        #    模型就会对用户说"文件发你了"，而用户那边什么都没有。
+        if not await self._send_file(event, path, name):
+            return (f"{r}\n⚠️ 文件已下载到 {path}，但**发送给用户失败**。"
+                    f"请告知用户文件没能发出。")
         return r + f"\n📤 已发送给用户: {name}"
 
     # ── 7. Cookie（打通两个后端的登录态）──────────────────────────────
