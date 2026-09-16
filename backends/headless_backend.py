@@ -1171,12 +1171,6 @@ class HeadlessBackend(Backend):
         msg = self._check_tab_id(tab_id)
         if msg:
             return OpResult.fail(msg, self.name)
-        msg = self._check_tab_id(tab_id)
-        if msg:
-            return OpResult.fail(msg, self.name)
-        msg = self._check_tab_id(tab_id)
-        if msg:
-            return OpResult.fail(msg, self.name)
         err = await self._ready()
         if err:
             return OpResult.fail(err, self.name)

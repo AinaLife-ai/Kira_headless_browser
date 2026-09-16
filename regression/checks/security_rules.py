@@ -297,18 +297,40 @@ def run(r) -> None:
     #  但解析出来可能就是 10.x —— 只看字符串等于把内网敞开。
     _resolved_ok = True
     _resolved_detail = ""
+    #  ⚠️ 不要依赖"真实解析 localhost"：解析结果取决于运行环境
+    #     （有的沙箱没有 DNS，有的把一切解析成代理 fake-IP），
+    #     用例会随环境飘。这里**换掉解析器**，用可控映射来验。
+    _real_gai = None
     try:
         import socket as _sock
-        # 用 localhost 做一次真实解析（一定存在且一定指向回环）
-        _hit, _ip = sec.resolved_url_is_internal("http://localhost/")
-        _resolved_ok = bool(_hit)
-        _resolved_detail = f"localhost -> 内部={_hit} ip={_ip}"
-        # 一个必然解析不到的名字：不该因此报错，也不该判成内部
+
+        def _fake_gai(host, port=None, *a, **kw):
+            if host == "internal.example":
+                return [(2, 1, 6, "", ("10.0.0.5", 0))]
+            if host == "public.example":
+                return [(2, 1, 6, "", ("93.184.216.34", 0))]
+            raise _sock.gaierror(f"fake: 不解析 {host}")
+
+        _real_gai = _sock.getaddrinfo
+        _sock.getaddrinfo = _fake_gai
+
+        # ① 名字"不像本机"但解析到内网 → 必须判为内部
+        _hit, _ip = sec.resolved_url_is_internal("http://internal.example/")
+        # ② 解析到公网 → 不得误判
+        _pub, _ = sec.resolved_url_is_internal("http://public.example/")
+        # ③ 解析不到 → 不报错、也不算内部
         _miss, _ = sec.resolved_url_is_internal("http://nonexistent.invalid/")
-        _resolved_ok = _resolved_ok and (_miss is False)
+        _resolved_ok = bool(_hit) and (_pub is False) and (_miss is False)
+        _resolved_detail = (f"internal.example→内部={_hit}({_ip})；"
+                            f"public.example→内部={_pub}；"
+                            f"解析失败→内部={_miss}")
     except Exception as e:  # noqa: BLE001
         _resolved_ok = False
         _resolved_detail = f"{type(e).__name__}: {e}"
+    finally:
+        if _real_gai is not None:
+            import socket as _s2
+            _s2.getaddrinfo = _real_gai
     r.ok("B2.12 主机名解析到内网会被拦（不只比较字符串）",
          _resolved_ok, _resolved_detail)
 

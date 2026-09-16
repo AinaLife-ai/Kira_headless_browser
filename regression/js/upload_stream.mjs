@@ -183,12 +183,17 @@ async function run(sizeBytes, step) {
     allOk = allOk && ok;
   }
   // 顺序错乱必须被拒
+  // ⚠️ 必须先确认 upload_begin **成功**：begin 失败时会话压根不存在，
+  //    接下来 chunk 被拒是因为"没有这个会话"，而不是因为"顺序校验生效"——
+  //    那样这条断言会**因为错误的原因通过**。
   const bad = await call("upload_begin", {
     upload_id: "bad1", selector: "#f", name: "b.bin", size: 100, limit: 0,
   });
   const rbad = await call("upload_chunk", { upload_id: "bad1", index: 5, data: "AAAA" });
-  console.log(`  乱序分块是否被拒: ${!rbad.ok ? "✓ 已拒绝" : "✗ 竟然通过"}`);
-  allOk = allOk && !rbad.ok;
+  const orderOk = bad.ok === true && !rbad.ok;
+  console.log(`  乱序分块是否被拒: ${orderOk ? "✓ 已拒绝" : "✗ 未按预期"}` +
+              `（begin ${bad.ok ? "成功" : "失败:" + bad.error}）`);
+  allOk = allOk && orderOk;
   // 超过上限必须被拒
   await call("upload_begin", { upload_id: "cap1", selector: "#f", name: "c.bin", size: 999999, limit: 0 });
   await call("upload_chunk", { upload_id: "cap1", index: 0, data: "A".repeat(4 * 1024 * 1024) });
@@ -198,15 +203,27 @@ async function run(sizeBytes, step) {
   //    套件把它当通过（诊断信息写了但没人看）。
   allOk = allOk && rcap.ok;
 
-  // 上限生效时必须**真的**被拒（limit 设小，第二块应被拒）
-  await call("upload_begin", {
+  // ⚠️ 注意：size=999999 > limit=1000，upload_begin 本身**就该被拒**，
+  //    这是第一道防线；begin 被拒时后面没有会话，chunk 自然也会失败。
+  //    两条都要判，但不能把"会话不存在导致的失败"当成"上限校验生效"。
+  const capBeg = await call("upload_begin", {
     upload_id: "cap2", selector: "#f", name: "d.bin", size: 999999, limit: 1000,
   });
-  const rcap2 = await call("upload_chunk", {
-    upload_id: "cap2", index: 0, data: "A".repeat(4096),
+  const capOk = capBeg.ok !== true;   // begin 就该把超大文件挡掉
+  console.log(`  声明尺寸超限时 upload_begin 是否被拒: `
+              + `${capOk ? "✓ 已拒绝" : "✗ 竟然通过"}`);
+  allOk = allOk && capOk;
+
+  // 再单独验"边收边判"：begin 用不超限的声明放进来，然后真的传超限数据
+  const capBeg2 = await call("upload_begin", {
+    upload_id: "cap3", selector: "#f", name: "e.bin", size: 100, limit: 1000,
   });
-  console.log(`  超过上限是否被拒: ${!rcap2.ok ? "✓ 已拒绝" : "✗ 竟然通过"}`);
-  allOk = allOk && !rcap2.ok;
+  const rcap3 = await call("upload_chunk", {
+    upload_id: "cap3", index: 0, data: "A".repeat(8192),
+  });
+  const cap3Ok = capBeg2.ok === true && !rcap3.ok;
+  console.log(`  实际分块超过上限是否被拒: ${cap3Ok ? "✓ 已拒绝" : "✗ 未按预期"}`);
+  allOk = allOk && cap3Ok;
 
   console.log(allOk ? "全部通过" : "有失败项");
   process.exit(allOk ? 0 : 1);

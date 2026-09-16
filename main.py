@@ -64,9 +64,23 @@ PLUGIN_ID = _read_plugin_id()
 #: 扩展侧二次确认弹窗的等待秒数（与 browser-bridge/protocol.js 对齐）
 CONFIRM_WAIT_SECONDS = 45
 
-#: 写工具名 —— 只读模式下从当次请求的工具表里摘掉
+#: 写工具名 —— 只读模式下从当次请求的工具表里摘掉。
+#
+# ⚠️ 这份名单必须与**实际注册的工具名**一致。
+#    它原来是 `browser_click` / `browser_type` / `browser_scroll` ——
+#    这三个名字在工具合并之后**已经不存在了**（现在叫 browser_interact，
+#    用 action 区分动作）。结果就是：只读模式下这些工具**一个都没被摘掉**，
+#    用户开了只读，AI 照样能点击/输入/执行 JS。
+#
+#    当前会改状态的工具：
+#      browser_interact —— 点击/输入/滚动/键盘/鼠标（用 action 选）
+#      browser_navigate —— 跳转
+#      browser_script   —— 执行任意 JS（能做任何事）
+#      browser_cookie   —— 写 cookie（import 动作）
+#      browser_file     —— 上传/下载（会改变页面与本地状态）
 WRITE_TOOL_NAMES = (
-    "browser_navigate", "browser_click", "browser_type", "browser_scroll",
+    "browser_interact", "browser_navigate", "browser_script",
+    "browser_cookie", "browser_file",
 )
 
 
@@ -148,8 +162,11 @@ class BrowserPlugin(BasePlugin):
         #    200MB 会重新引入"单条消息 >500MB 峰值 + 267MB 单帧被拒"。
         _umb = int(cfg.get("upload_max_bytes", 256 * 1024 * 1024) or 0)
         try:
-            from backends.extension_backend import ExtensionBackend as _EB
-            _ceil = getattr(_EB, "MAX_UPLOAD_BYTES", 0)
+            # ⚠️ 用**已导入的** `ExtensionBackend`（见文件头 `from .backends import ...`）。
+            #    写 `from backends.extension_backend import ...` 是**绝对导入** ——
+            #    插件是以包的形式加载的（`<pkg>.main`），此时 `backends` 并不是
+            #    顶层模块，这条 import 会失败 → 静默落到 except → **钳制失效**。
+            _ceil = getattr(ExtensionBackend, "MAX_UPLOAD_BYTES", 0)
             if _ceil and _umb > _ceil:
                 logger.warning(
                     f"upload_max_bytes={_umb} 超过单条消息能承载的上限，"
@@ -1026,7 +1043,10 @@ class BrowserPlugin(BasePlugin):
     async def tool_script(self, event, script: str, **_):
         if not self.enabled:
             return "浏览器插件未启用"
-        return await self._call("execute_js", script=script)
+        # ⚠️ 必须标成写操作：执行任意 JS 能干任何事，
+        #    不标的话**只读模式对它完全无效**（也不走域名白名单校验）——
+        #    那等于只读模式形同虚设。
+        return await self._call("execute_js", for_write=True, script=script)
 
     # ── 6. 文件 ──────────────────────────────────────────────────────
 
@@ -1073,6 +1093,14 @@ class BrowserPlugin(BasePlugin):
             if not hr.ok:
                 return f"❌ {hr.error}"
             r = f"✅ 文件已下载: {path}（{hr.data.get('size')} 字节）"
+        # ⚠️ 发送前确认文件真的落盘了。
+        #    下载成功之后文件仍可能不在（路径被改、磁盘问题、上面的分支没走到），
+        #    这时还去 _send_file 并回一句"已发送给用户"，就是**假成功** ——
+        #    用户会一直等一个永远不会到的文件。
+        import os as _os
+        if not _os.path.isfile(path):
+            return (f"⚠️ 文件不在路径上（{path}），**没有发送**。"
+                    f"请检查下载是否真的成功。")
         await self._send_file(event, path, name)
         return r + f"\n📤 已发送给用户: {name}"
 

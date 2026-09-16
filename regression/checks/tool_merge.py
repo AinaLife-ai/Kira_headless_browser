@@ -184,14 +184,17 @@ def run(r) -> None:
     #    整组变成一条笼统失败、后面所有检查都不执行。
     _MARK = "export const CMD = {"
     if _MARK not in proto_js:
+        # ⚠️ 记失败但**不要 return**：一 return，后面的 C5b~C9 全都不执行了，
+        #    报告上看不出"后面那些检查其实没跑"。用空集合继续走完。
         r.ok("C5a 协议命令两端一致", False,
              f"protocol.js 里找不到 `{_MARK}`（被改名或删了？）")
-        return
-    cmd_section = proto_js.split(_MARK)[1].split("};")[0]
-    js_cmds = set(re.findall(r'^\s+[A-Z_]+: "([a-z_]+)",', cmd_section, re.M))
-    r.ok("C5a 协议命令两端一致", py_cmds == js_cmds,
-         f"仅 Python={sorted(py_cmds - js_cmds) or '无'}；"
-         f"仅 JS={sorted(js_cmds - py_cmds) or '无'}")
+        js_cmds = set()
+    else:
+        cmd_section = proto_js.split(_MARK)[1].split("};")[0]
+        js_cmds = set(re.findall(r'^\s+[A-Z_]+: "([a-z_]+)",', cmd_section, re.M))
+        r.ok("C5a 协议命令两端一致", py_cmds == js_cmds,
+             f"仅 Python={sorted(py_cmds - js_cmds) or '无'}；"
+             f"仅 JS={sorted(j for j in js_cmds - py_cmds) or '无'}")
 
     bg = src("browser-bridge/background.js")
     impl = set(re.findall(r'async function (\w+)\(', bg))

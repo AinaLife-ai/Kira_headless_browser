@@ -19,7 +19,7 @@ import json
 import re
 from pathlib import Path
 
-from ..harness import PLUGIN_DIR, section, src
+from ..harness import PLUGIN_DIR, section, src, src_safe
 
 TITLE = "KiraAI 规范符合性（交付形态）"
 
@@ -41,7 +41,7 @@ def run(r) -> None:
          "框架用 `module.__file__.parent / manifest.json` 定位 plugin_id，"
          "放错层级会导致 identity 认不出来")
 
-    init = src("__init__.py")
+    init = src_safe("__init__.py")
     r.ok("A3 __init__.py 导出入口类 BrowserPlugin",
          "BrowserPlugin" in init,
          "__init__.py 必须能让框架 `from <pkg> import <Class>` 拿到入口类")
@@ -55,7 +55,7 @@ def run(r) -> None:
     section("B. manifest 字段与身份")
 
     try:
-        mf = json.loads(src("manifest.json"))
+        mf = json.loads(src_safe("manifest.json"))
     except Exception as e:
         r.ok("B0 manifest.json 是合法 JSON", False, f"{type(e).__name__}: {e}")
         return
@@ -81,7 +81,7 @@ def run(r) -> None:
 
     section("C. 入口类与基类契约")
 
-    main = src("main.py")
+    main = src_safe("main.py")
     r.ok("C1 继承 BasePlugin",
          re.search(r"class\s+\w+\s*\(\s*BasePlugin\s*\)", main) is not None,
          "框架要求入口类继承 BasePlugin")
@@ -124,7 +124,7 @@ def run(r) -> None:
 
     pid = mf.get("plugin_id") or EXPECTED_PLUGIN_ID
     # 扩展侧写死的 WS 路径
-    proto = src("browser-bridge/protocol.js")
+    proto = src_safe("browser-bridge/protocol.js")
     m = re.search(r'WS_PATH\s*=\s*["\']([^"\']+)', proto)
     ext_path = m.group(1) if m else ""
     want = f"/ws/plugin/{pid}/bridge"
@@ -138,7 +138,7 @@ def run(r) -> None:
     r.ok("F1 schema.json 存在且是合法 JSON",
          (PLUGIN_DIR / "schema.json").is_file())
     try:
-        sch = json.loads(src("schema.json"))
+        sch = json.loads(src_safe("schema.json"))
         r.ok("F2 schema 是对象且非空", isinstance(sch, dict) and bool(sch),
              f"{len(sch)} 个字段")
     except Exception as e:

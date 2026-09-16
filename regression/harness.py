@@ -56,6 +56,23 @@ def src(rel: str) -> str:
     return (PLUGIN_DIR / rel).read_text(encoding="utf-8")
 
 
+def src_safe(rel: str) -> str:
+    """同 :func:`src`，但文件缺失时返回空串而不是抛异常。
+
+    ⚠️ 用途：某些检查是"先读文件、再按内容断言"。
+    直接 `src()` 在文件被删/改名时会抛 FileNotFoundError，
+    **整个检查组就此中断** —— 后面所有用例都不执行，
+    报告上只留一条笼统失败，看不出真正缺了什么。
+
+    用这个变体可以让检查**继续跑完**，并把它自己的 FAIL 记清楚
+    （例如"__init__.py 缺失"这种本就要报出来的状态）。
+    """
+    try:
+        return (PLUGIN_DIR / rel).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def exists(rel: str) -> bool:
     return (PLUGIN_DIR / rel).is_file()
 

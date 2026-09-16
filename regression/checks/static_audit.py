@@ -14,7 +14,8 @@ from pathlib import Path
 from ..harness import (
     EXT_DIR, PLUGIN_DIR, backend_methods, called_backend_methods,
     ext_file, ext_manifest, exists, headless_src, extension_src,
-    bridge_src, main_src, manifest, schema, section, src, tool_names,
+    bridge_src, main_src, manifest, schema, section, src, src_safe,
+    tool_names,
 )
 
 TITLE = "静态一致性审计"
@@ -106,12 +107,40 @@ def run(r) -> None:
     dupes = sorted({n for n in names if names.count(n) > 1})
     r.ok("A11 工具名无重复", not dupes, f"{len(names)} 个工具，重复={dupes or '无'}")
 
-    # A12 只读模式摘除的写工具名都存在
+    # A12 只读模式摘除的写工具名 —— 必须**双向**都对得上
+    #
+    # ⚠️ 这条以前只验"名单里的名字都真实存在"，那是**单向**的：
+    #    名单里写着三个早已被合并掉的工具名（browser_click/type/scroll），
+    #    而真正的写工具（browser_interact 等）**一个都没在名单里** ——
+    #    于是只读模式下这些工具根本没被摘掉，用户开了只读照样能点击/输入/执行 JS。
+    #    单向检查对此完全无感（它只确认旧名字"存在"，而它们压根不存在……）。
+    #
+    #    现在两个方向都验：
+    #      ① 名单里的每个名字都必须是真实注册的工具（防拼错/防残留）；
+    #      ② **会改状态的**工具必须**全部**在名单里（防漏）。
     wt = re.search(r'WRITE_TOOL_NAMES = \(([^)]+)\)', main, re.S)
-    wt_names = re.findall(r'"([a-z_]+)"', wt.group(1)) if wt else []
-    r.ok("A12 WRITE_TOOL_NAMES 里的名字都是真实工具",
-         all(f'"{n}"' in main for n in wt_names) and bool(wt_names),
-         f"{len(wt_names)} 个")
+    wt_names = set(re.findall(r'"([a-z_]+)"', wt.group(1))) if wt else set()
+    registered = set(names)
+
+    _ghost = sorted(wt_names - registered)
+    r.ok("A12a WRITE_TOOL_NAMES 里的名字都是真实注册的工具",
+         not _ghost and bool(wt_names),
+         f"名单里不存在={_ghost or '无'}（共 {len(wt_names)} 个）")
+
+    # 会改状态的工具必须都在名单里。
+    # 这份"必须被摘掉"的清单是**独立维护的期望值** —— 不是从代码里读出来的，
+    # 所以它能在"有人加了新的写工具却忘了加进名单"时报红。
+    MUST_BE_WRITABLE = {
+        "browser_interact",   # 点击/输入/滚动/键盘/鼠标
+        "browser_navigate",   # 跳转
+        "browser_script",     # 执行任意 JS
+        "browser_cookie",     # 写 cookie
+        "browser_file",       # 上传/下载
+    }
+    _missing = sorted((MUST_BE_WRITABLE & registered) - wt_names)
+    r.ok("A12b 所有会改状态的工具都在 WRITE_TOOL_NAMES 里（只读模式才真的拦得住）",
+         not _missing,
+         f"漏={_missing or '无'}；只读模式下这些工具不会被摘掉")
 
     # A13 **JS 模块符号可解析**
     #     固化「ES 模块之间不共享作用域」这类事故：漏了就是运行时 ReferenceError
@@ -430,6 +459,30 @@ def run(r) -> None:
          not _unguarded,
          f"未兜住的行={_unguarded or '无'}（SW 回收时会卡住弹窗）")
 
+    # ⚠️ 禁止"同一个校验被连续重复调用"的空转。
+    #    真实发生过：cookie_get 里 `_check_tab_id(tab_id)` 连着写了三遍
+    #    （删过一次，后来重写那段时又带回来了）。它不影响功能，
+    #    但会让人以为"这里有额外的校验逻辑"，也白跑两遍。
+    _hb_code2 = re.sub(r'#.*$', '', src("backends/headless_backend.py"), flags=re.M)
+    # ⚠️ 按**函数体**统计，而不是匹配固定的空白形态 ——
+    #    正则匹配缩进/换行很脆（我刚写的版本就没能在反向验证里报红）。
+    #    判据：同一个方法里，同一句校验最多出现一次。
+    _dup_fns = []
+    _cur_fn, _cur_count = None, 0
+    for _ln in _hb_code2.splitlines():
+        _m = re.match(r'\s*(?:async\s+)?def\s+(\w+)', _ln)
+        if _m:
+            if _cur_fn and _cur_count > 1:
+                _dup_fns.append(f"{_cur_fn}×{_cur_count}")
+            _cur_fn, _cur_count = _m.group(1), 0
+        if "_check_tab_id(tab_id)" in _ln:
+            _cur_count += 1
+    if _cur_fn and _cur_count > 1:
+        _dup_fns.append(f"{_cur_fn}×{_cur_count}")
+    r.ok("C16n 没有连续重复的同一校验调用（空转）",
+         not _dup_fns,
+         f"同一方法里重复={_dup_fns or '无'}（不影响功能，但白跑且误导读者）")
+
     # ⚠️ 禁止"no-op 循环"：传空 dict 给 update_cookies 再把异常吞掉 ——
     #    看起来在做 cookie 导入，其实什么都没做。
     #    这种代码会**一直躺在里面**：它不报错、不影响功能，只是白跑一轮，
@@ -505,7 +558,7 @@ def run(r) -> None:
 
     # ⚠️ 面板渲染事件数据/域名时必须用 textContent，不能拼 innerHTML
     #    （这些字段来自持有 bridge token 的一方，是注入口 CWE-79）。
-    web = src("web/index.html")
+    web = src_safe("web/index.html")
     _sinks = re.findall(r'\$\(["\'](?:conflog|domains)["\']\)\.innerHTML\s*=\s*([^;]+)',
                         web)
     r.ok("C16c 面板不用 innerHTML 拼事件数据（XSS）",

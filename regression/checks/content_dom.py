@@ -253,6 +253,11 @@ def run(r) -> None:
                 else:
                     _d4 = json.loads((p4.stdout or "[]").strip().splitlines()[-1]
                                      if p4.stdout.strip() else "[]")
+                    # ⚠️ 空列表会让下面的循环**一次都不执行** → 这个用例静默
+                    #    变成"没有检查"，而报告上什么都不显示（漏检不留痕）。
+                    if not _d4:
+                        r.ok("U5 上传元素变化用例有输出", False,
+                             "解析结果为空，逐项检查被静默跳过")
                     for _it in _d4:
                         r.ok(f"U5 {_it['name']}", bool(_it.get("ok")),
                              _it.get("detail", "")[:150])
