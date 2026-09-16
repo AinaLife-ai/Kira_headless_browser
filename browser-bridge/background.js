@@ -282,6 +282,14 @@ function probeServerRoundTrip(timeoutMs = 30000) {
       resolve({ ok: false, error: "未连接到 KiraAI（请先点连接）" });
       return;
     }
+    // ⚠️ 同一时刻只允许一个探测在跑。
+    //    state.probe 是**单个**槽位：第二个探测会把它覆盖掉，
+    //    于是旧探测的超时定时器仍会触发，并把**新**探测的回调清掉 ——
+    //    表现为"点了测试没反应"或者拿到上一个的结果。
+    if (state.probe) {
+      resolve({ ok: false, error: "已有一次链路测试在进行中，请稍候" });
+      return;
+    }
     let done = false;
     const t0 = Date.now();
     const timer = setTimeout(() => {

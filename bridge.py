@@ -226,7 +226,17 @@ class BrowserBridge:
             return  # 已经被新连接替换了，不要动
 
         self._session_id = None
-        if self._heartbeat_task and not self._heartbeat_task.done():
+        # ⚠️ 不能取消**自己**：心跳循环在发送失败时会调 _force_close，
+        #    那时 current_task() 就是 _heartbeat_task —— cancel() 会把
+        #    当前协程在下一个 await 点取消掉，**后面的 _close_ws 根本执行不到**，
+        #    socket 就那么留着（面板显示已断开、实际连接还在）。
+        #    自己调用自己时只需把引用清掉（本协程随后就会 return）。
+        try:
+            _cur = asyncio.current_task()
+        except RuntimeError:
+            _cur = None
+        if (self._heartbeat_task and not self._heartbeat_task.done()
+                and self._heartbeat_task is not _cur):
             self._heartbeat_task.cancel()
         self._heartbeat_task = None
 

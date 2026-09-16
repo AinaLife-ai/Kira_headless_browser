@@ -540,6 +540,13 @@
         // ⚠️ 只派发一次 click —— 再调 el.click() 会让按钮收到两次点击
         el.dispatchEvent(new MouseEvent("click", opts));
       }
+      // ⚠️ click_count >= 2 时要补一个 dblclick：
+      //    **合成事件**不像真实输入那样由浏览器自动推导出 dblclick，
+      //    只派发两次 click 的话，依赖 dblclick 的交互（双击选词、
+      //    双击打开、编辑器双击等）完全不会触发。
+      if (n >= 2) {
+        el.dispatchEvent(new MouseEvent("dblclick", mouseInit(x, y, button, 2)));
+      }
       return { ok: true, match: `${el.tagName.toLowerCase()}@(${x},${y})` };
     },
 

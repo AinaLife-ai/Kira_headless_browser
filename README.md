@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.18
+# 浏览器插件 (Browser Plugin) 2.1.19
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -77,7 +77,7 @@
 | 浏览器 | 支持 | 说明 |
 |---|---|---|
 | Chrome | ✅ **135+** | `chrome.userScripts.execute`（执行任意 JS 依赖）**从 135 起默认可用**；清单已声明 `minimum_chrome_version: 135`（低于此版本走无头后端执行 JS） |
-| Edge | ✅ **120+** | 同为 Chromium 内核，扩展机制一致；打开的是 `edge://extensions` |
+| Edge | ✅ **135+** | 同为 Chromium 内核，扩展机制一致；打开的是 `edge://extensions`（低于此版本走无头后端执行 JS） |
 | Brave / Vivaldi / Opera | ✅ | Chromium 系，`chrome.*` API 一致 |
 | Firefox | ❌ | Firefox 的 MV3 用 event page，**不接受** `background.service_worker` |
 | Safari | ❌ | 扩展格式完全不同 |
@@ -470,6 +470,56 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.19（2026-09-15）
+
+**按 CodeRabbit 第十五轮审查修复 13 项**（含 2 个运行期崩溃、3 个"假成功"）：
+
+- 🔴 **`mode="selector"` 会在无头后端直接崩**：`main.py` 路由时会传
+  `selector=`，但 `HeadlessBackend.get_page` 的签名里**没有这个参数** ——
+  调用即 `TypeError: got an unexpected keyword argument 'selector'`，
+  而且是在调度层抛出的，模型只会看到一句莫名其妙的报错。
+  → 补上签名与实现（与扩展后端同形状：只取该元素的文本）。
+  实测：`get_page(selector="#x")` 现在返回 `content='selector-text'`。
+- 🔴 **`_force_close` 会取消自己**：心跳循环在发送失败时调
+  `_force_close`，而它会 `cancel()` 自己的 task —— 当前协程在下一个
+  `await` 点被取消，**后面的 `_close_ws` 根本执行不到**，
+  socket 就那么留着（面板显示已断开、实际连接还在）。
+  → 判断 `self._heartbeat_task is asyncio.current_task()` 时不自取消。
+- **扩展后端截图"假成功"**：`screenshot(full_page=True)` / `selector=`
+  被**默默忽略**，照样截一张视口图并返回成功 —— 调用方以为拿到了整页/
+  元素截图。→ 明确返回失败，让路由回退到无头后端。
+- **`get_page` 的 selector 同理**（见上）。
+- **确认通知不会消失**：`chrome.notifications.create` 用了
+  `requireInteraction: true`，但只有**点击**路径会 `clear`，**超时路径不会** ——
+  超时的确认一直挂在通知栏，用户过一会儿再点它还会二次响应。
+  → 把清理统一收进 `settle()`（点击/超时都走它），并去掉 `resolveConfirm`
+  里的重复清理。
+- **`state.probe` 并发互相踩**：它是**单个**槽位，第二个测试会覆盖第一个，
+  而旧探测的超时定时器仍会触发、把**新**探测的回调清掉 ——
+  表现为"点了测试没反应"。→ 有探测在跑时直接拒绝。
+- **合成点击不触发 `dblclick`**：`mouse_click(click_count=2)` 只派发两次
+  `click`，而**合成事件**不像真实输入那样由浏览器推导出 `dblclick` ——
+  双击选词/双击打开这类交互完全不会触发。→ `n>=2` 时补一个 `dblclick`。
+- **README 的 Edge 版本与其它地方矛盾**（120 vs 135）→ 统一为 **135**。
+- **`setup_guide.py` 有句不实说明**："无头后端可以用 `--load-extension`
+  把扩展预装进去" —— 代码里**没有**这条路（启动参数反而带
+  `--disable-extensions`）。→ 改正。
+
+**回归套件 4 项**：
+- **`bridge_e2e` 只判"有没有 node"**：CLIENT_JS 用到 **Node 22+** 的
+  API，Node 20/21 会在跑到一半时以难懂的方式炸。→ 预先判版本，低了就跳过。
+- **`.gitignore` / `file_hygiene` 的名字对不上**：实际生成的是带唯一后缀的
+  `kira_ext_client_*.mjs`，而两边都在匹配旧的确切名
+  `_ext_client.mjs` → 残留永远清不出来、D5 会一直报脏。
+- **`claims` 要求 `cookie_get` 必须是集合里第一个元素** → 改为位置无关；
+  **`upload_max_bytes` 的钳制只判"标识符出现过"**（import/注释也算）→
+  改为要求真的存在夹值逻辑。反向验证：把钳制换成"只提一句" → 立即 FAIL。
+- **`tool_merge` 的 C8 只做语法检查** → 新增 **C8b 行为验证**：
+  把凭据表达式在 HTTP/HTTPS 下**各真跑一次**。
+  ⚠️ 这条很值：把条件写反（HTTPS→omit、HTTP→include）时
+  **C8 照样通过**（表达式里两个字面量都在），只有 C8b 抓得住 ——
+  而那个写法会让**会话 Cookie 在明文 HTTP 上被发出去**。
 
 ### v2.1.18（2026-09-15）
 

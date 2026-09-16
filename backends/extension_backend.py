@@ -221,7 +221,19 @@ class ExtensionBackend(Backend):
                                 timeout=limit + 5)
 
     async def screenshot(self, path: str, full_page: bool = False, selector=None) -> OpResult:
-        """扩展用 captureVisibleTab 截图，返回 base64；这里落盘。"""
+        """扩展用 captureVisibleTab 截图，返回 base64；这里落盘。
+
+        ⚠️ 扩展侧**只支持可视区域**（captureVisibleTab 就是这个语义）。
+        `full_page` / `selector` 是路由层会传下来的参数，但这里没法实现 ——
+        过去是**默默忽略**它们、照样截一张视口图返回成功，
+        调用方（和模型）以为拿到了整页/元素截图。这是**假成功**。
+        → 明确失败，让 BackendRouter 回退到无头后端（那边支持）。
+        """
+        if full_page or selector:
+            return OpResult.fail(
+                "扩展后端只支持可视区域截图（captureVisibleTab），"
+                "不支持整页/指定元素 —— 已跳过，交由无头后端处理",
+                self.name)
         r = await self._send(self._P.CMD_SCREENSHOT, {})
         if not r.ok:
             return r

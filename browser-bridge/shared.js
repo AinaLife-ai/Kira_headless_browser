@@ -149,6 +149,10 @@ export async function askUser(title, message, meta = {}) {
     const settle = (allowed, reason) => {
       if (!pendingConfirms.has(id)) return;
       pendingConfirms.delete(id);
+      // ⚠️ 一定要**清掉通知**：它带 requireInteraction:true，不会自己消失。
+      //    只在点击路径清、超时路径不清的话，超时的确认会一直挂在通知栏，
+      //    用户过一会儿再点它还会二次响应（那时早已 resolve 过了）。
+      try { chrome.notifications.clear(id); } catch (_) {}
       sendEvent("user_confirmed", {
         confirm_id: id, allowed, reason,
         command: meta.command || "",
@@ -178,7 +182,8 @@ export function resolveConfirm(notifId, buttonIndex) {
   const settle = pendingConfirms.get(notifId);
   if (!settle) return false;
   settle(buttonIndex === 0, buttonIndex === 0 ? "approved" : "denied");
-  chrome.notifications.clear(notifId);
+  // 通知的清理由 settle() 统一负责（超时路径也要清，见那边的说明），
+  // 这里不再重复清一次。
   return true;
 }
 

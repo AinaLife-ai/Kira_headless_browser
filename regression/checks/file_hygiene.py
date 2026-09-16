@@ -144,7 +144,11 @@ def run(r) -> None:
                and (p.suffix in BAD_SUFFIX
                     or "__pycache__" in p.parts
                     or p.name.startswith("_click_runner")
-                    or p.name == "_ext_client.mjs")]
+                    or p.name == "_ext_client.mjs"
+                    # ⚠️ 实际生成的是**带唯一后缀**的 kira_ext_client_*.mjs
+                    #    （为了让并发跑互不干扰）。只匹配旧的确切名字，
+                    #    这些残留就永远清不出来、D5 会一直报脏。
+                    or p.name.startswith("kira_ext_client_"))]
     r.ok("D5 回归测试目录无临时产物/缓存", not reg_bad,
          f"发现={[str(x) for x in reg_bad] or '无'}")
     # 插件本体只允许一个 README；regression/ 有自己的 README（已排除在清点之外）

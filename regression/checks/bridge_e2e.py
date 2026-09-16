@@ -114,8 +114,23 @@ def run(r) -> None:
 
     # 需要 node 才能跑假扩展客户端；没有就跳过（不算失败）
     import shutil as _sh
-    if not _sh.which("node"):
-        r.warn("没有 node，跳过端到端检查", "安装 Node.js 后可启用")
+    import subprocess as _sp
+    # ⚠️ 不能只看"有没有 node"：CLIENT_JS 用了 **Node 22+** 才有的 API
+    #    （全局 WebSocket 等），Node 20/21 上会在调用到 bridge 之后
+    #    才以难懂的方式炸掉。这里预先判版本，不支持就走跳过路径。
+    _node = _sh.which("node")
+    if not _node:
+        r.warn("没有 node，跳过端到端检查", "安装 Node.js 22+ 后可启用")
+        return
+    try:
+        _v = _sp.run([_node, "--version"], capture_output=True, text=True,
+                     timeout=15).stdout.strip().lstrip("v")
+        _major = int(_v.split(".")[0])
+    except Exception:
+        _major = 0
+    if _major < 22:
+        r.warn(f"node 版本过低（v{_v}），跳过端到端检查",
+               "需要 Node.js 22+（CLIENT_JS 用到其全局 WebSocket）")
         return
 
     # ⚠️ 用**每次唯一**的临时文件名：写死在 HERE 下的话，

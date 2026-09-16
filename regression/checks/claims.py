@@ -38,14 +38,15 @@ CLAIMS = [
      "browser-bridge/capabilities.js", r"__error"),
     ("面板用 textContent 渲染不受控字段",
      "web/index.html", r"_renderDomains"),
-    # ⚠️ 不能只验集合名存在 —— 集合里可以是空的。
-    #    要求**同一声明**里同时出现集合名与 "cookie_get"。
-    ("cookie_get 真的在「只读但敏感」确认集里（不能只查名字）",
+    # ⚠️ 不能只验集合名存在，也不能要求 cookie_get 必须是**第一个元素** ——
+    #    解析集合字面量的内容，只要它真的在里面就算过（位置无关）。
+    #    匹配 `CONFIRM_ONLY_COMMANDS = new Set([ ... ])` 且括号内出现 cookie_get。
+    ("cookie_get 真的在「只读但敏感」确认集里（位置无关）",
      "browser-bridge/shared.js",
-     r'CONFIRM_ONLY_COMMANDS\s*=\s*new Set\(\s*\[\s*"cookie_get"'),
-    ("插件侧的只读敏感确认集真的含 cookie_get",
+     r'CONFIRM_ONLY_COMMANDS\s*=\s*new Set\(\s*\[[^\]]*"cookie_get"'),
+    ("插件侧的只读敏感确认集真的含 cookie_get（位置无关）",
      "backends/extension_backend.py",
-     r'CONFIRM_ONLY_CMDS\s*=\s*\{\s*"cookie_get"'),
+     r'CONFIRM_ONLY_CMDS\s*=\s*\{[^}]*"cookie_get"'),
     ("上传上限由硬顶钳制",
      "backends/extension_backend.py", r"MAX_UPLOAD_BYTES = 256 \* 1024 \* 1024"),
     ("上传超时/页面超时不会被换后端重试（indeterminate）",
@@ -102,9 +103,19 @@ def _check_upload_defaults(r):
         if got != ceiling:
             bad.append(f"MAX_UPLOAD_BYTES={got}（期望 {ceiling}）")
 
-    # main.py 必须**真的钳制**到扩展后端的上限
-    if "MAX_UPLOAD_BYTES" not in main:
-        bad.append("main.py 没有按 MAX_UPLOAD_BYTES 钳制配置值")
+    # main.py 必须**真的钳制**到扩展后端的上限。
+    # ⚠️ 不能只判 "MAX_UPLOAD_BYTES 这个词出现过" —— import、注释、
+    #    甚至是另一处无关引用都会让检查通过，而配置值并没有被夹住。
+    #    判据：必须存在一段同时包含「MAX_UPLOAD_BYTES」与
+    #    「对 _umb/upload 值做 min/比较后赋值」的代码。
+    _clamp = re.search(
+        r'MAX_UPLOAD_BYTES[\s\S]{0,400}?'
+        r'(?:if[^\n]*_umb\s*>\s*_ceil|_umb\s*=\s*_ceil|'
+        r'min\([^)]*_umb[^)]*_ceil)', main)
+    _decl = re.search(r'_umb\s*=\s*int\(cfg\.get\("upload_max_bytes"', main)
+    if not (_clamp and _decl):
+        bad.append("main.py 没有把配置值**真正**夹到 MAX_UPLOAD_BYTES 之内"
+                   f"（clamp={bool(_clamp)}, decl={bool(_decl)}）")
 
     r.ok("H2 upload 上限的四处默认值一致，且配置值被钳制在硬顶内",
          not bad, f"不一致={bad or '无'}")

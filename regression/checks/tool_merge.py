@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import re
 
-from ..harness import section, src, tool_names
+import json
+import os as _os
+import shutil as _shutil
+import subprocess as _subprocess
+
+from ..harness import JS_DIR, PLUGIN_DIR, section, src, tool_names
 
 TITLE = "工具合并零丢失"
 
@@ -219,5 +224,25 @@ def run(r) -> None:
          bool(_dl) and _cond_ok and "sendChunk" in _dl,
          "凭据必须是按协议条件的表达式（HTTPS->include, 否则 omit），"
          f"且 sendChunk 在 downloadViaSession 内；实际 credentials={_expr!r}")
+    # ── 凭据模式的**行为**验证（HTTP/HTTPS 各跑一次）──────────────
+    # 语法检查只能证明"表达式里有 include 和 omit"；把条件写反
+    # （HTTPS→omit、HTTP→include）或者条件恒真，语法检查照样通过，
+    # 但**会话 Cookie 会在明文 HTTP 上被发出去**。
+    _cred_js = JS_DIR / "cred_mode.mjs"
+    if _cred_js.is_file() and _shutil.which("node"):
+        try:
+            _env = {
+                "PATH": _os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/local/bin",
+                "KIRA_PLUGIN_DIR": str(PLUGIN_DIR),
+            }
+            _cp = _subprocess.run(["node", str(_cred_js)], cwd=str(JS_DIR),
+                                  capture_output=True, text=True, env=_env,
+                                  timeout=60)
+            _data = json.loads((_cp.stdout or "[]").strip().splitlines()[-1])
+            for _it in _data:
+                r.ok(f"C8b {_it['name']}", bool(_it.get("ok")), _it.get("detail", ""))
+        except Exception as e:
+            r.ok("C8b 凭据模式行为验证", False, f"{type(e).__name__}: {e}"[:140])
+
     r.ok("C9 扩展侧实现 cookie 导出/写入",
          "async function cookieGet(" in cap and "async function cookieSet(" in cap)

@@ -28,4 +28,6 @@ regression/__pycache__/
 regression/checks/__pycache__/
 regression/stubs/**/__pycache__/
 regression/_ext_client.mjs
+regression/kira_ext_client_*.mjs
+regression/**/kira_ext_client_*.mjs
 regression/js/_click_runner_*.mjs

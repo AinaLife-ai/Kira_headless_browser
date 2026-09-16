@@ -692,7 +692,8 @@ class HeadlessBackend(Backend):
                 f"如需操作多标签，请使用扩展桥后端（browser_list_tabs 查看）。")
 
     async def get_page(self, detail: str = "text", tab_id=None,
-                       offset: int = 0, max_chars=None) -> OpResult:
+                       offset: int = 0, max_chars=None,
+                       selector: str = "", **kw) -> OpResult:
         """读取页面内容。支持 ``offset`` / ``max_chars`` 做**分页续读** ——
         单次返回的长度不该限制 bot 能看多少：它拿到「还有 N 字符未读」之后，
         可以带更大的 offset 再要一段，必要时自己翻到底。
@@ -707,6 +708,25 @@ class HeadlessBackend(Backend):
             return OpResult.fail(err, self.name)
         try:
             page = self._page
+            # ⚠️ mode=selector 时 main.py 会传 selector 进来。这个参数过去
+            #    **不在签名里** —— 于是无头后端会直接 TypeError：
+            #    "get_page() got an unexpected keyword argument 'selector'"，
+            #    而且因为是在调度层抛的，模型只会看到一句莫名其妙的报错。
+            #    这里补上实现（与扩展后端同形状：只取该元素的文本）。
+            if selector:
+                content = await self._op(
+                    page.evaluate(
+                        "(sel) => { const el = document.querySelector(sel);"
+                        " return el ? (el.innerText || el.textContent || '')"
+                        ".trim() : ''; }", selector),
+                    "读取选择器内容")
+                title = await self._op(page.title(), "读取标题")
+                return OpResult(data={
+                    "title": title, "url": page.url, "content": content,
+                    "total_chars": len(content), "offset": 0,
+                    "returned": len(content), "has_more": False,
+                    "next_offset": None, "selector": selector,
+                }, backend=self.name)
             if detail == "html":
                 content = await self._op(page.content(), "读取 HTML")
             elif detail == "outline":

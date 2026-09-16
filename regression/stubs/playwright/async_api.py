@@ -200,6 +200,9 @@ class FakePage:
         # 针对几个常见脚本给出"像真的"返回值，方便上层组装 data
         if isinstance(script, str) and "querySelectorAll" in script:
             return ["item1", "item2"]
+        # 取单个选择器文本（get_page(detail=..., selector=...) 用的脚本）
+        if isinstance(script, str) and "querySelector(sel)" in script:
+            return "selector-text"
         if isinstance(script, str) and "querySelectorAll" not in script and "scrollY" in script:
             return 100
         return 1
