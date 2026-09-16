@@ -21,9 +21,53 @@ RUNTIME_GENERATED = {"kira_visible_test.html"}
 BAD_SUFFIX = {".pyc", ".pyo", ".log", ".db", ".sqlite", ".DS_Store"}
 BAD_NAMES = {".DS_Store", "Thumbs.db"}
 
+#: ⚠️ 运行期**正常**会在插件目录里生成的产物 —— 由框架/插件自己写，
+#    且已在 .gitignore 里排除。它们出现在磁盘上**不是**问题。
+#    （判据必须是"会不会被提交"，不是"磁盘上有没有" ——
+#      否则只要用户正常用过一次插件，D1 就必然误报。）
+#      data/log.log 就是典型：框架导入插件时会自己写这个日志。
+RUNTIME_ARTIFACTS = {
+    "data/log.log",
+}
+
 
 #: 回归测试自己的子目录 —— 它们是测试资产，规则与插件本体不同
 REGRESSION_DIRS = ("regression",)
+
+
+def _read_gitignore() -> list:
+    """读 .gitignore，返回去掉注释/空行的规则列表。"""
+    p = PLUGIN_DIR / ".gitignore"
+    if not p.is_file():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            out.append(line)
+    return out
+
+
+def _is_ignored(rel: str, rules: list) -> bool:
+    """判断相对路径是否被 .gitignore 覆盖（够用的简化实现）。
+
+    ⚠️ 只做 gitignore 的**常见形态**：目录规则（``x/``）、后缀规则（``*.log``）、
+    精确路径。不追求完整语义 —— 这里只用来做一条自检，
+    宁可漏判（会报 FAIL 让人来看）也不错判成"已忽略"。
+    """
+    import fnmatch
+    for rule in rules:
+        r = rule.rstrip("/")
+        if rule.endswith("/"):
+            # 目录规则：路径在它里面
+            if rel == r or rel.startswith(r + "/"):
+                return True
+            continue
+        if fnmatch.fnmatch(rel, rule):
+            return True
+        if fnmatch.fnmatch(Path(rel).name, rule):
+            return True
+    return False
 
 
 def _all_files(include_regression: bool = False):
@@ -124,9 +168,21 @@ def run(r) -> None:
 
     # ── D. 不该有的东西 ─────────────────────────────────────────────
     section("D. 不该出现在提交里的东西")
-    bad = [f for f in files
+    # ⚠️ 判据：**会不会被提交**，而不是"磁盘上有没有"。
+    #    `data/log.log` 是框架导入插件时自己写的运行日志（.gitignore 已排除），
+    #    只在文件系统上判红的话，用户正常用过一次插件 → D1 必然误报，
+    #    而这不是产品问题。所以这里把已声明为运行期产物的路径排除掉。
+    _checked = [f for f in files if str(f) not in RUNTIME_ARTIFACTS]
+    bad = [f for f in _checked
            if f.suffix in BAD_SUFFIX or f.name in BAD_NAMES]
     r.ok("D1 无编译产物 / 日志 / 系统文件", not bad, f"发现={bad or '无'}")
+    # 反向保护：白名单里的东西**必须**真的被 .gitignore 排除，
+    # 否则就变成"用白名单掩盖漏提交"。
+    _gi = _read_gitignore()
+    _unignored = [a for a in RUNTIME_ARTIFACTS if not _is_ignored(a, _gi)]
+    r.ok("D1b 运行期产物确实被 .gitignore 排除（白名单不是遮羞布）",
+         not _unignored,
+         f"未被忽略={_unignored or '无'}；白名单={sorted(RUNTIME_ARTIFACTS)}")
     r.ok("D2 无 __pycache__",
          not any("__pycache__" in str(f) for f in files))
     # ⚠️ 判据是"**目录**里的运行时数据"，不是"路径里含某个词" ——
