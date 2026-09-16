@@ -122,12 +122,17 @@ def run(r) -> None:
     if not _node:
         r.warn("没有 node，跳过端到端检查", "安装 Node.js 22+ 后可启用")
         return
+    # ⚠️ _v 必须先给默认值：subprocess 本身抛异常（超时/权限）时，
+    #    下面的 f-string 会去读未定义的 _v → NameError，
+    #    把"node 版本判不出来"变成一句与版本无关的崩溃。
+    _v = "?"
     try:
         _v = _sp.run([_node, "--version"], capture_output=True, text=True,
                      timeout=15).stdout.strip().lstrip("v")
         _major = int(_v.split(".")[0])
     except Exception:
         _major = 0
+        _v = "?"
     if _major < 22:
         r.warn(f"node 版本过低（v{_v}），跳过端到端检查",
                "需要 Node.js 22+（CLIENT_JS 用到其全局 WebSocket）")

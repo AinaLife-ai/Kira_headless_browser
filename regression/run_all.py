@@ -56,7 +56,10 @@ def main() -> int:
 
     print("=" * 76)
     print("KiraAI 浏览器插件 · 回归测试")
-    print(f"插件目录: {HERE.parent}")
+    # ⚠️ 打印**检查实际用的**目录（可能被 KIRA_PLUGIN_DIR 覆盖），
+    #    写死 HERE.parent 会在多副本/反向验证时把人误导到别的树。
+    from regression.harness import PLUGIN_DIR as _PD
+    print(f"插件目录: {_PD}")
     print(f"检查项  : {len(selected)} 组")
     print("=" * 76)
 

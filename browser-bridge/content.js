@@ -253,11 +253,36 @@
     return u;
   }
 
+  //: 会话超过这个时长没有任何**活动**就回收（10 分钟）
+  const _UP_IDLE_MS = 10 * 60 * 1000;
+  let _upSweeper = null;
+
+  /**
+   * 回收"被遗弃"的上传会话。
+   *
+   * ⚠️ 只靠"下次 uploadBegin 时顺手清"是不够的：如果插件在传到一半时崩溃
+   *    （或者用户换了页面、连接断了），`upload_finish` 永远不来，那个会话
+   *    连同已经收到的分块（可能几百 MB）会**一直挂在页面里** ——
+   *    而下次上传可能几小时之后才发生。
+   *    所以：只要有活跃会话就起一个定时器，空了就停掉。
+   *
+   * 判据用的是 `lastActive`（每次收块都会刷新）而不是 `created` ——
+   * 否则一个传得很慢的**大文件**会在传输途中被误回收。
+   */
   function _cleanupUploads() {
     const now = Date.now();
     for (const [k, v] of _upSessions) {
-      if (now - v.created > 10 * 60 * 1000) _upSessions.delete(k);
+      if (now - (v.lastActive || v.created) > _UP_IDLE_MS) _upSessions.delete(k);
     }
+    if (_upSessions.size === 0 && _upSweeper) {
+      clearInterval(_upSweeper);
+      _upSweeper = null;
+    }
+  }
+
+  function _ensureSweeper() {
+    if (_upSweeper) return;
+    _upSweeper = setInterval(_cleanupUploads, 60 * 1000);
   }
 
   /** 建立上传会话：此时就把目标 input 解析好，避免最后才发现选择器不对。 */
@@ -284,12 +309,14 @@
     }
 
     _cleanupUploads();
+    const _now = Date.now();
     _upSessions.set(id, {
       id, el, name: name || "upload.bin",
       mime: mime || "application/octet-stream",
       declared, cap, chunks: [], received: 0,
-      expectIndex: 0, created: Date.now(),
+      expectIndex: 0, created: _now, lastActive: _now,
     });
+    _ensureSweeper();
     return { ok: true, upload_id: id, size: declared };
   }
 
@@ -318,6 +345,8 @@
     }
     st.chunks.push(bytes);
     st.expectIndex = idx + 1;
+    // 刷新活动时间：让"传得很慢的大文件"不会被定期清理器误回收
+    st.lastActive = Date.now();
     return { ok: true, received: st.received };
   }
 
@@ -436,45 +465,6 @@
     upload_finish: (p) => uploadFinish(p),
     upload_abort: (p) => uploadAbort(p),
 
-    upload_blob(payload) {
-      const { selector, name, mime, base64 } = payload;
-      if (!selector) return fail("缺少 selector");
-
-      let el;
-      try {
-        el = document.querySelector(selector);
-      } catch (e) {
-        return fail(`选择器语法错误：${e.message}`);
-      }
-      if (!el) return fail(`找不到文件输入框「${selector}」`);
-      if (el.tagName.toLowerCase() !== "input" || el.type !== "file") {
-        return fail(`元素 ${selector} 不是文件输入框（tag=${el.tagName}, type=${el.type}）`);
-      }
-
-      // base64 → Uint8Array → File
-      const bin = atob(base64 || "");
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const file = new File([bytes], name || "upload.bin",
-                            { type: mime || "application/octet-stream" });
-
-      // 用 DataTransfer 造 FileList 塞进去（绕过系统文件对话框）
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      el.files = dt.files;
-
-      flash(el);
-
-      // 受控组件（React/Vue）需要这两个事件才会同步内部状态
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-
-      return {
-        ok: true,
-        matched: `input[type=file]${el.id ? "#" + el.id : ""}`,
-        name, size: file.size,
-      };
-    },
 
     hover(payload) {
       const { selector } = payload;

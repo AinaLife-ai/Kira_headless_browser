@@ -11,7 +11,9 @@ KiraAI 的 WebUI 用 JWT（HS256）鉴权，签名密钥来自 ``JWT_SECRET`` �
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -335,15 +337,54 @@ def load_saved_token(data_dir: Optional[Path] = None) -> Optional[str]:
 
 
 def save_token(token: str, data_dir: Optional[Path] = None) -> Path:
-    """把令牌写入插件数据目录（权限尽量收紧）。"""
+    """把令牌写入插件数据目录（权限尽量收紧）。
+
+    ⚠️ 不能"先写入最终路径、再 chmod"：那样在写入与 chmod 之间有一小段
+    窗口，文件是**默认权限**（通常 0644，同机其他用户可读）；
+    而且中途被杀掉时权限永远补不上。
+
+    正确做法：
+      1. 目录建成 **0o700**（只有自己可进）；
+      2. 令牌写进**同目录**下的临时文件，**创建时就**是 0o600；
+      3. `os.replace` **原子替换**到最终路径。
+    这样任何时候别人都读不到中间态，也不存在"写一半"的坏文件。
+    """
     path = token_file_path(data_dir)
+    # 目录权限：0o700（已存在则只补权限，不报错）
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token, encoding="utf-8")
     try:
-        # Windows 上 chmod 基本无效，尽力而为
-        path.chmod(0o600)
+        path.parent.chmod(0o700)
     except OSError:
-        pass
+        pass  # Windows 上 chmod 基本无效，尽力而为
+
+    fd = None
+    tmp_path = None
+    try:
+        # 用 O_CREAT|O_EXCL 保证"创建时就带 0o600"，没有中间态
+        fd, tmp_name = tempfile.mkstemp(prefix=".token_", dir=str(path.parent))
+        tmp_path = Path(tmp_name)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None          # fdopen 接管后不要再自己关
+            f.write(token)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)   # 原子
+        tmp_path = None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
     return path
 
 

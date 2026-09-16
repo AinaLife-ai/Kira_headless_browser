@@ -70,7 +70,32 @@ def run(r) -> None:
                             defined.add(t.id)
                 elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
                     defined.add(st.target.id)
-            # 类里赋值的属性（self.x = ... 在 __init__ 里）也算"存在"
+            # ⚠️ 先把「类里赋过值的属性」收集起来：`self._sink = fn` 之后
+            #    再 `self._sink()` 是**完全合法**的（存起来的可调用），
+            #    不收集的话 A1 会把它误报成"未定义" —— 误报多了，
+            #    这条检查就会被当成噪音而没人看。
+            #
+            #    ⚠️ 只扫**本类**（不含嵌套 ClassDef）：嵌套类的 self.x
+            #    属于那个内部类，拿它来满足外层类的调用是错的。
+            # 收集本类的属性赋值，**排除嵌套类**（那个类的 self 是自己）。
+            _nested_nodes = set()
+            for _nc in ast.walk(cls):
+                if isinstance(_nc, ast.ClassDef) and _nc is not cls:
+                    for _n2 in ast.walk(_nc):
+                        _nested_nodes.add(id(_n2))
+            for _st in ast.walk(cls):
+                if id(_st) in _nested_nodes:
+                    continue
+                if isinstance(_st, (ast.Assign, ast.AnnAssign)):
+                    _tgts = (_st.targets if isinstance(_st, ast.Assign)
+                             else [_st.target])
+                    for _t in _tgts:
+                        # `self._x = ...`
+                        if (isinstance(_t, ast.Attribute)
+                                and isinstance(_t.value, ast.Name)
+                                and _t.value.id == "self"):
+                            defined.add(_t.attr)
+
             for n in ast.walk(cls):
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
                         and isinstance(n.func.value, ast.Name) \

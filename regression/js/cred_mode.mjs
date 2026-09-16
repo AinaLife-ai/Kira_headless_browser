@@ -9,9 +9,12 @@
  * 输出最后一行是 JSON（供 Python 侧解析）。
  */
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
+// ⚠️ 用 fileURLToPath 而不是 URL.pathname：后者在 Windows 上会留下
+//    `/C:/...`，含空格/非 ASCII 的目录也不会正确解码（%20 之类）。
 const PLUGIN = process.env.KIRA_PLUGIN_DIR
-  || new URL("../..", import.meta.url).pathname;
+  || fileURLToPath(new URL("../..", import.meta.url));
 const cap = readFileSync(`${PLUGIN}/browser-bridge/capabilities.js`, "utf8");
 
 const results = [];

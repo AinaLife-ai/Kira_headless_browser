@@ -211,6 +211,23 @@ def run(r) -> None:
                          "base64→Uint8Array→Blob→File 全链路字节无损")
             except subprocess.TimeoutExpired:
                 r.ok("U0 分块上传 DOM 测试", False, "超时")
+
+        # ── 上传会话的回收行为 ──────────────────────────────────────
+        sweep = JS_DIR / "upload_sweep.mjs"
+        if sweep.is_file():
+            try:
+                _e3 = dict(env)
+                _e3["KIRA_PLUGIN_DIR"] = str(PLUGIN_DIR)
+                p3 = subprocess.run(["node", str(sweep)], cwd=str(JS_DIR),
+                                    capture_output=True, text=True,
+                                    env=_e3, timeout=120)
+                _d3 = json.loads((p3.stdout or "[]").strip().splitlines()[-1]
+                                 if p3.stdout.strip() else "[]")
+                for _it in _d3:
+                    r.ok(f"U4 {_it['name']}", bool(_it.get("ok")),
+                         _it.get("detail", "")[:150])
+            except Exception as e:
+                r.ok("U4 上传会话回收行为", False, f"{type(e).__name__}: {e}"[:140])
     finally:
         # 无论成功失败都要清掉临时 runner，否则会污染下一次的文件清点
         try:

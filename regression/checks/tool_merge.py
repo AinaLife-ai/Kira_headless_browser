@@ -180,7 +180,14 @@ def run(r) -> None:
     proto_py = src("protocol.py")
     proto_js = src("browser-bridge/protocol.js")
     py_cmds = set(re.findall(r'^CMD_[A-Z_]+ = "([a-z_]+)"', proto_py, re.M))
-    cmd_section = proto_js.split("export const CMD = {")[1].split("};")[0]
+    # ⚠️ 先确认标记存在再 split：否则 IndexError 会逃出 run()，
+    #    整组变成一条笼统失败、后面所有检查都不执行。
+    _MARK = "export const CMD = {"
+    if _MARK not in proto_js:
+        r.ok("C5a 协议命令两端一致", False,
+             f"protocol.js 里找不到 `{_MARK}`（被改名或删了？）")
+        return
+    cmd_section = proto_js.split(_MARK)[1].split("};")[0]
     js_cmds = set(re.findall(r'^\s+[A-Z_]+: "([a-z_]+)",', cmd_section, re.M))
     r.ok("C5a 协议命令两端一致", py_cmds == js_cmds,
          f"仅 Python={sorted(py_cmds - js_cmds) or '无'}；"
