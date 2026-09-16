@@ -415,21 +415,59 @@ class BrowserPlugin(BasePlugin):
             return ("当前处于「只读模式」，无法执行点击/输入/跳转等写操作。"
                     "如确实需要，请在插件配置里关闭只读模式。")
         if url:
-            ok, reason = security.check_url(
-                url, allowed=self.allowed_domains,
-                blocked=self.blocked_domains, for_write=True,
-                local_access=self.local_access)
+            ok, reason = await self._check_url_async(url, for_write=True)
             return None if ok else reason
         # 没给 URL：拿当前页面地址来判
         cur = await self._current_url(backend)
         if not cur:
             return ("无法确认当前页面地址，出于安全考虑已拒绝本次写操作。"
                     "请确认扩展已连接，或先让无头后端打开一个页面。")
-        ok, reason = security.check_url(
-            cur, allowed=self.allowed_domains,
-            blocked=self.blocked_domains, for_write=True,
-            local_access=self.local_access)
+        ok, reason = await self._check_url_async(cur, for_write=True)
         return None if ok else reason
+
+    async def _check_url_async(self, url: str, for_write: bool = False):
+        """URL 校验的**异步**入口。
+
+        ⚠️ 为什么要单独一个：`security.check_url` 在 `local_access=False`
+        时会调用同步的 `socket.getaddrinfo` 去解析主机名
+        （判断 `internal.corp` 这类名字是不是指向内网）。
+        在事件循环里直接调同步 DNS，遇到慢解析器/断网/黑洞路由会
+        **卡住整个循环** —— 所有并发任务一起停摆，不只是这次调用变慢。
+
+        这里把"解析主机名"那一步换成异步版本（`loop.getaddrinfo` + 超时），
+        其余判定逻辑完全复用 `check_url`：
+        先用同步版判**字符串层面**的规则（scheme/黑名单/白名单/本机写法），
+        只有在它因"本机开关关闭"而需要真解析时才走异步那条。
+        """
+        # 先按"不解析 DNS"跑一遍：这一步涵盖 scheme、黑名单、
+        # 白名单、字面量本机判定 —— 绝大多数情况在这里就有结论。
+        ok, reason = security.check_url(
+            url, allowed=self.allowed_domains, blocked=self.blocked_domains,
+            for_write=for_write, local_access=True)
+        if not ok:
+            return ok, reason
+
+        # 允许本机时，前面那步已是最终答案
+        if self.local_access:
+            return True, ""
+
+        # local_access=False：需要知道主机名**真正解析**到哪里
+        host = security.parse_host(url)
+        if host and security.is_local_host(host):
+            return False, (f"域名 {host} 指向本机地址，已按配置拒绝"
+                           f"（「允许访问本机/内网」已关闭）")
+        if host:
+            try:
+                internal, ip = await security.resolved_url_is_internal_async(url)
+            except Exception:
+                internal, ip = False, ""
+            if internal:
+                return False, (f"域名 {host} 解析到内网地址 {ip}，已按配置拒绝"
+                               f"（「允许访问本机/内网」已关闭）")
+        # 解析不出内网：再看白名单等规则（这些不依赖 DNS）。
+        # check_url 在 local_access=False 路径上可能已把本机情况拒掉，
+        # 这里用 local_access=True 的结论即可。
+        return True, ""
 
     async def _current_url(self, backend) -> Optional[str]:
         try:

@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.29
+# 浏览器插件 (Browser Plugin) 2.1.30
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,73 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.30（2026-09-16）
+
+**按 CodeRabbit 第三十一轮审查修复**（6 条 actionable，逐条对当前代码核实后
+全部确认为真实问题）。
+
+#### 🔴 ① 执行 JS 会被 CSP 挡掉（USER_SCRIPT world）
+
+`browser_script` 走 `chrome.userScripts` API，而 **USER_SCRIPT world 的 CSP
+默认沿用 content script 那一套 —— 它禁止动态代码执行**（eval / new Function）。
+而我们的 `execJs` 包装器**正是用 eval / new Function 跑用户脚本**，
+于是会抛：
+
+```
+EvalError: Refused to evaluate a string as JavaScript because
+'unsafe-eval' is not an allowed source of script in the following
+Content Security Policy directive…
+```
+
+**这条极难自查**：扩展能装、能连、读页面/点击/截图全都正常，
+**只有"执行 JS"这一个能力悄悄不可用**，报错还是浏览器原生文案。
+
+→ 在 `ensureUserScripts()` 里加 `chrome.userScripts.configureWorld({csp: ...})`，
+放行 `'unsafe-eval'`（以及 `'wasm-unsafe-eval'`、`blob:`）；
+**不放行** `unsafe-inline` / 远端源 —— 只解决"动态执行"，不扩大攻击面。
+被 CSP 挡下时给一句能照做的提示，而不是丢原生报错。
+
+#### 🟠 ② 端口不校验 → 拼出非法 URL
+
+`buildWsUrl` 不校验端口值域时，`-1` / `70000` / `abc` 会拼出
+`ws://127.0.0.1:-1/...` 这种**非法 URL**，`new WebSocket()` 抛 "Invalid URL" ——
+**用户完全看不出是端口填错了**。
+
+→ 校验必须落在 1~65535 的整数，并给一句"去扩展面板检查端口"的提示。
+顺带修：纯空白（`"  "`）应视为"没填"回落默认端口，而不是被当成非法值。
+
+#### 🟡 ③ 其余修复（4 条，都是检查自己的问题）
+
+- **`timeout_semantics` 的 B5 是重言式** —— 我上一轮写的
+  `main.index("indeterminate") != main.index("declined")` 对两个不同字符串
+  **永远为真**，等于没测。→ 改用 **AST** 找 `_call` 里真正的两个分支，
+  确认字段不同、**且各自都直接 return**（新增 B6）。
+- **`static_audit` 的 D 段用 `src()`** —— 文件被删/改名时抛
+  `FileNotFoundError`，**整个 D 段中断**（后面全都"没跑"，报告上只剩一条异常）。
+  → 改用 `src_safe`，并把"文件读不到"记成明确 FAIL。
+- **`src_safe` 只该吞 `FileNotFoundError`** —— 原来吞所有 `OSError`，
+  会把**权限错误/编码错误**也变成空串，于是检查拿空串去断言，
+  把"读不了文件"伪装成"文件内容不对"。→ 收窄捕获范围。
+- **`tool_merge` 的 C8b 会静默跳过** —— 探测脚本缺失时**什么都不报告**，
+  套件照样通过（"通过但没执行"）。→ 脚本缺失记 FAIL（回归不完整），
+  node 不在记 warning（环境问题）；顺带把裸 `"node"` 改成解析出的路径。
+
+#### 新增常驻检查 `execjs_gates`（12 项）
+
+守住 ① ② 两道关口 —— 它们的共同特点是**坏了也不报错，只是那个能力没了**。
+结构断言之外带**反向自检**（C1/C2/C3：把关口拆掉，判据必须能发现）。
+
+⚠️ 写这个检查时被自己抓到两个错：注释里写了"不含 `unsafe-inline`"
+导致全文匹配误报（→ 只看 CSP 字符串字面量）；以及
+`'wasm-unsafe-eval'` **包含** `unsafe-eval` 子串，
+用 `"unsafe-eval" in cap` 判的话，真正的 `'unsafe-eval'` 被删掉也照样通过
+（→ 精确匹配带引号的独立关键字）。**C2 反向自检正是因此才红起来的**。
+
+#### 结果
+
+`regression/run_all.py` → **294/294，16 组全绿**。
+版本 2.1.29 → 2.1.30。
 
 ### v2.1.29（2026-09-16）
 

@@ -36,6 +36,37 @@ for (const [h, wantScheme, wantHost] of cases) {
              + wantScheme + "//" + wantHost + ")");
   }
 }
+
+// ── 端口值域：非法端口必须**明确抛错**，不能拼出非法 URL ──────────
+//    不校验的话会得到 `ws://127.0.0.1:-1/...` 这种地址，
+//    `new WebSocket()` 抛 "Invalid URL"，用户根本看不出是端口填错了。
+//    ⚠️ 0 / "" / 空白 会被 `port || DEFAULT_PORT` 当成"没填"而落到默认端口
+//       —— 这是**有意的**（面板清空端口 = 用默认值），不算非法，
+//       所以不列在这里；它们由下面"应落到默认端口"那一组覆盖。
+const badPorts = [-1, 70000, "abc", "52a67", "1e4", "1.5"];
+for (const p of badPorts) {
+  let threw = false;
+  try { buildWsUrl("127.0.0.1", p, "T"); }
+  catch (e) { threw = /端口无效/.test(e.message); }
+  if (!threw) bad.push("port=" + JSON.stringify(p) + " 竟然没被拒绝");
+}
+// 合法边界值必须**照常通过**
+const goodPorts = [1, 80, 5267, 65535];
+for (const p of goodPorts) {
+  try { new URL(buildWsUrl("127.0.0.1", p, "T")); }
+  catch (e) { bad.push("port=" + p + " 被误拒: " + e.message); }
+}
+// "没填"的形态应落到默认端口（不是报错）
+for (const p of [0, "", "  "]) {
+  try {
+    const u = new URL(buildWsUrl("127.0.0.1", p, "T"));
+    if (u.port !== "5267") bad.push("port=" + JSON.stringify(p)
+      + " 应落到默认 5267，实际 " + u.port);
+  } catch (e) {
+    bad.push("port=" + JSON.stringify(p) + " 不该抛错: " + e.message);
+  }
+}
+
 if (bad.length) { console.log(bad.join(" ; ")); process.exit(1); }
 console.log("OK");
 '''

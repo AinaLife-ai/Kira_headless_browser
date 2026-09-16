@@ -66,10 +66,16 @@ def src_safe(rel: str) -> str:
 
     用这个变体可以让检查**继续跑完**，并把它自己的 FAIL 记清楚
     （例如"__init__.py 缺失"这种本就要报出来的状态）。
+
+    ⚠️ 只吞 **FileNotFoundError**（以及目录缺失导致的 NotADirectoryError）——
+    这两种是"文件不在"的确定性状态，检查自己会报出来。
+    **权限错误 / 编码错误等要抛出去**：把那些也吞掉的话，
+    检查会拿着空串去断言，把"读不了文件"伪装成"文件内容不对"，
+    排查时会往完全错误的方向走。
     """
     try:
         return (PLUGIN_DIR / rel).read_text(encoding="utf-8")
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return ""
 
 

@@ -32,6 +32,50 @@ import {
 //    仍然会拿到缓存的失败结果 —— 只能重载扩展才行，体验很糟。
 let userScriptsUsable = null;
 
+/**
+ * 给 USER_SCRIPT world 配一个允许 eval / new Function 的 CSP。
+ *
+ * ⚠️ **不配这个，exec_js 会直接失败**：
+ *    USER_SCRIPT world 的 CSP **默认沿用 content script 那一套**，
+ *    它**禁止动态代码执行**（eval / new Function）——
+ *    而下面的 wrap 正是用 eval / new Function 去跑用户传来的脚本，
+ *    于是会抛 `EvalError: Refused to evaluate a string as JavaScript
+ *    because 'unsafe-eval' is not an allowed source of script in the
+ *    following Content Security Policy directive…`。
+ *
+ *    这条很容易漏：**扩展能装、能连、其它命令都正常**，
+ *    只有"执行 JS"这一个能力悄悄不可用。
+ *
+ * 官方文档：userScripts.configureWorld() 可以配置 USER_SCRIPT world 的 CSP；
+ * MDN 关于默认值的说明是 "Defaults to the default CSP for content scripts,
+ * which prohibits dynamic code execution, such as eval and new Function"。
+ *
+ * 这里额外放行 `wasm-unsafe-eval` 与 `blob:`：
+ *   * WebAssembly —— 用户脚本里用 wasm 时不该无谓失败；
+ *   * blob: —— 有些页面脚本会动态建 blob URL 再加载。
+ * 仍然**不含** `unsafe-inline` / 远端源：我们只放行"动态执行"，
+ * 不放行"注入任意内联脚本"或"加载远端代码"。
+ */
+let worldConfigured = false;
+
+async function ensureUserScriptWorld() {
+  if (worldConfigured) return true;
+  // 老版本没有 configureWorld —— 不报错，让执行时的真实结果说话
+  if (!chrome.userScripts || !chrome.userScripts.configureWorld) return false;
+  try {
+    await chrome.userScripts.configureWorld({
+      csp: "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
+    });
+    worldConfigured = true;
+    return true;
+  } catch (e) {
+    // 配置失败不直接终止：某些版本可能只接受部分关键字。
+    // 记录下来，让 exec_js 的真实报错去解释（比在这里编一个错更准）。
+    console.warn("[KiraBridge] configureWorld 失败（执行 JS 可能受限）", e);
+    return false;
+  }
+}
+
 async function ensureUserScripts() {
   if (userScriptsUsable && userScriptsUsable.ok) return userScriptsUsable;
   if (!chrome.userScripts) {
@@ -41,6 +85,9 @@ async function ensureUserScripts() {
   try {
     // 探测开关是否已打开：读一下配置即可，没权限会抛
     await chrome.userScripts.getScripts({});
+    // ⚠️ 开关确认打开后，**必须**先配 world 的 CSP，
+    //    否则下面的 eval / new Function 会被默认 CSP 挡掉。
+    await ensureUserScriptWorld();
     userScriptsUsable = { ok: true };
   } catch (e) {
     userScriptsUsable = { ok: false, reason: "toggle_off", detail: e.message };
@@ -122,6 +169,18 @@ async function execJs(params) {
   }
 
   const first = (results && results[0]) || {};
+  // ⚠️ 如果是**动态执行被 CSP 挡掉**，给一句能照做的话。
+  //    默认 CSP 禁止 eval / new Function，而下面的包装器正是用它们
+  //    跑用户脚本 —— 正常情况下我们在 ensureUserScriptWorld() 里
+  //    已经把这个 CSP 放开了；走到这里说明放开失败（老版本或配置被拒）。
+  if (first.error && /unsafe-eval|Content Security Policy|EvalError/i.test(
+      String(first.error))) {
+    throw new Error(
+      "执行 JS 被浏览器的内容安全策略挡下了（需要允许动态执行）。\n" +
+      "  请更新扩展后重试；若仍失败，改用无头后端执行 JavaScript。\n" +
+      "  原始错误：" + first.error
+    );
+  }
   if (first.error) throw new Error("执行出错：" + first.error);
   // ⚠️ 注入的包装器会把**脚本自身的异常**吞成 `{ __error: "..." }` 返回
   //    （见上面的 wrap）。first.error 只能反映 chrome.userScripts.execute

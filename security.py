@@ -16,6 +16,7 @@ from __future__ import annotations
 import fnmatch
 import ipaddress
 import re
+import socket
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -533,10 +534,19 @@ def resolved_url_is_internal(url: str) -> Tuple[bool, str]:
     校验与真正连接之间仍存在 TOCTOU 窗口（DNS rebinding）。
     要彻底解决必须在**连接时**校验实际用的 IP（各后端的网络层），
     这里先把"明显的内网目标"挡住。
+
+    ⚠️ 这是**同步**版本，内部调 `socket.getaddrinfo` ——
+    在事件循环里直接调用会**阻塞整个循环**（解析器慢/超时时尤其明显）。
+    异步调用方请用 :func:`resolved_url_is_internal_async`。
     """
     host = parse_host(url)
     if not host:
         return False, ""
+    return _host_resolves_internal(host)
+
+
+def _host_resolves_internal(host: str) -> Tuple[bool, str]:
+    """主机名 → 是否解析到内网（同步实现，见上面关于阻塞的说明）。"""
     # 已经是 IP 字面量的，前面 check_url 已经判过，这里不必再解析
     try:
         ipaddress.ip_address(host)
@@ -544,11 +554,15 @@ def resolved_url_is_internal(url: str) -> Tuple[bool, str]:
     except ValueError:
         pass
     try:
-        import socket
         infos = socket.getaddrinfo(host, None)
     except Exception:
         # 解析不了就不在这里拦（连接时会自然失败）
         return False, ""
+    return _addrs_internal(infos)
+
+
+def _addrs_internal(infos) -> Tuple[bool, str]:
+    """从 getaddrinfo 的结果里判断有没有内网地址。"""
     for info in infos:
         addr = info[4][0]
         try:
@@ -558,6 +572,44 @@ def resolved_url_is_internal(url: str) -> Tuple[bool, str]:
         if _ip_is_internal(ip):
             return True, str(ip)
     return False, ""
+
+
+async def resolved_url_is_internal_async(
+    url: str, timeout: float = 3.0
+) -> Tuple[bool, str]:
+    """``resolved_url_is_internal`` 的异步版本 —— **不阻塞事件循环**。
+
+    ⚠️ 为什么需要：`socket.getaddrinfo` 是同步的。在 `_check_write` 这类
+    async 路径里直接调用它，解析器一慢（内网 DNS、断网、黑洞路由）
+    就会**卡住整个事件循环** —— 所有并发任务一起停摆，
+    而不只是这一次工具调用变慢。
+
+    这里用 `loop.getaddrinfo`（内部走线程池）并加超时：
+    超时就返回"解析不出来"（与同步版解析失败的处理一致 ——
+    不在这里拦，让真正的连接去失败）。
+    """
+    host = parse_host(url)
+    if not host:
+        return False, ""
+
+    # IP 字面量不必查 DNS
+    try:
+        ipaddress.ip_address(host)
+        return False, ""
+    except ValueError:
+        pass
+
+    import asyncio
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(host, None, type=socket.SOCK_STREAM),
+            timeout=timeout,
+        )
+    except (asyncio.TimeoutError, Exception):
+        # 超时 / 解析失败：不在这里拦（连接时会自然失败）
+        return False, ""
+    return _addrs_internal(infos)
 
 
 def check_url(

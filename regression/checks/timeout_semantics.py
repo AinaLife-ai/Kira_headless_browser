@@ -99,7 +99,47 @@ def run(r) -> None:
                    r"indeterminate_result", ext) is not None,
          "识别出超时却还返回普通 fail = 白识别")
 
-    # ③ declined 与 indeterminate 是**两种**终止性结果，不能混用
-    r.ok("B5 declined（用户拒绝）与 indeterminate（不确定）分开处理",
-         "declined" in main and "indeterminate" in main
-         and main.index("indeterminate") != main.index("declined"))
+    # ③ declined 与 indeterminate 是**两种**终止性结果，不能混用。
+    # ⚠️ 不能用 `main.index("a") != main.index("b")` 那种判据 ——
+    #    两个不同的字符串下标**必然**不等，那条断言永远为真（形同虚设）。
+    #    这里用 AST 找 `_call` 里真正的两个分支，并确认：
+    #      · 各自判断的是**不同**的字段名；
+    #      · 每个分支都**直接 return**（不能只是打条日志继续往下走 ——
+    #        那样还会去换后端重试）。
+    import ast
+    _call = None
+    try:
+        _tree = ast.parse(main)
+        _call = next((n for n in ast.walk(_tree)
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and n.name == "_call"), None)
+    except SyntaxError:
+        _call = None
+
+    def _branches(fn, field):
+        """返回 fn 里判断 getattr(<x>, 'field', ...) 的分支列表。"""
+        out = []
+        if fn is None:
+            return out
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.If):
+                continue
+            src_txt = ast.dump(node.test)
+            if f"'{field}'" not in src_txt and f'"{field}"' not in src_txt:
+                continue
+            # 分支体里是否**直接 return**
+            has_ret = any(isinstance(s, ast.Return) for s in node.body)
+            out.append((node.lineno, has_ret))
+        return out
+
+    _ind = _branches(_call, "indeterminate")
+    _dec = _branches(_call, "declined")
+    r.ok("B5 _call 里 indeterminate 与 declined 是**两个独立分支**",
+         bool(_ind) and bool(_dec)
+         and {ln for ln, _ in _ind}.isdisjoint({ln for ln, _ in _dec}),
+         f"indeterminate 分支={[l for l, _ in _ind]}；"
+         f"declined 分支={[l for l, _ in _dec]}")
+    r.ok("B6 两个分支都**直接返回**（不会继续换后端重试）",
+         _ind and _dec and all(h for _, h in _ind) and all(h for _, h in _dec),
+         f"indeterminate 有 return={[h for _, h in _ind]}；"
+         f"declined 有 return={[h for _, h in _dec]}")

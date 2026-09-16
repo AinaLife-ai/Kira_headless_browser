@@ -239,13 +239,26 @@ def run(r) -> None:
     # （HTTPS→omit、HTTP→include）或者条件恒真，语法检查照样通过，
     # 但**会话 Cookie 会在明文 HTTP 上被发出去**。
     _cred_js = JS_DIR / "cred_mode.mjs"
-    if _cred_js.is_file() and _shutil.which("node"):
+    # ⚠️ 不能"文件不在就静默跳过" —— 那样回归套件会**通过但没执行 C8b**，
+    #    看起来一切正常，实际凭据模式没有任何行为验证。
+    #    探测脚本是仓库文件，缺了就是回归不完整 → 记 FAIL。
+    #    node 不在是环境问题 → 记 warning（不算失败）。
+    _node = _shutil.which("node")
+    if not _cred_js.is_file():
+        r.ok("C8b 凭据探测脚本存在", False,
+             f"缺少 {_cred_js} —— 凭据模式将没有任何行为验证")
+    elif not _node:
+        r.warn("没有 node，跳过 C8b 凭据模式行为验证",
+               "安装 Node.js 后可启用")
+    else:
         try:
             _env = {
                 "PATH": _os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/local/bin",
                 "KIRA_PLUGIN_DIR": str(PLUGIN_DIR),
             }
-            _cp = _subprocess.run(["node", str(_cred_js)], cwd=str(JS_DIR),
+            # ⚠️ 用 which 解析出的路径跑，不用裸 "node" ——
+            #    这里给子进程换了 env，裸名字会在**子进程里**重新查 PATH。
+            _cp = _subprocess.run([_node, str(_cred_js)], cwd=str(JS_DIR),
                                   capture_output=True, text=True, env=_env,
                                   timeout=60)
             # ⚠️ 必须判退出码 + 结果完整性：脚本崩了/少打一项时，

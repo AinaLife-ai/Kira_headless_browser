@@ -22,6 +22,7 @@ from . import (
     vlm_describe,
     lost_features,
     timeout_semantics,
+    execjs_gates,
 )
 
 #: (模块, 是否默认启用)
@@ -41,6 +42,7 @@ ALL_CHECKS = [
     vlm_describe,        # 截图 → VLM 描述（bot 看图；防止该能力再次丢失）
     lost_features,       # v2.1.0 重写时丢掉的能力（cookie 自动加载 / 下载浏览器 / VLM 自查）
     timeout_semantics,   # 「结果不确定」链路（超时不得触发换后端重试）
+    execjs_gates,        # 扩展执行 JS 的两道关口（USER_SCRIPT world CSP / 端口值域）
 ]
 
 __all__ = ["ALL_CHECKS"]

@@ -735,15 +735,21 @@ def run(r) -> None:
     # ══════════════════════════════════════════════════════════════
     section("D. 运行时坑")
     # ══════════════════════════════════════════════════════════════
+    # ⚠️ 用 src_safe 而不是 src()：这些文件里任何一个被删/改名，
+    #    直接 src() 会抛 FileNotFoundError，**整个 D 段就此中断** ——
+    #    后面 D2/D3/编译检查全都不执行，报告上只剩一条笼统异常，
+    #    看不出到底缺了哪个文件。
     for name in ("main.py", "backends/headless_backend.py",
                  "backends/extension_backend.py", "bridge.py", "setup_guide.py"):
-        body = src(name)
-        if "logger." in body:
+        body = src_safe(name)
+        if not body:
+            r.ok(f"D1 {name} 可读", False, "文件缺失或读不到")
+        elif "logger." in body:
             r.ok(f"D1 {name} 的 logger 有定义", "logger = get_logger" in body)
 
     for name in ("main.py", "backends/headless_backend.py",
                  "backends/extension_backend.py"):
-        body = src(name)
+        body = src_safe(name)
         if re.search(r'\basyncio\.', body):
             r.ok(f"D2 {name} 用到 asyncio 且已导入",
                  bool(re.search(r'^import asyncio', body, re.M)))

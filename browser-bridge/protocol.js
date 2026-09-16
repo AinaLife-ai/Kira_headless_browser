@@ -154,8 +154,10 @@ function _expandV6(h) {
  */
 export function buildWsUrl(host, port, token) {
   const raw = (host || DEFAULT_HOST).trim();
-  let p = String(port || DEFAULT_PORT).trim();
-
+  // ⚠️ 先 trim 再判空：`"  "`（纯空白）应当等同于"没填" → 用默认端口，
+  //    而不是因为 `"  "` 是真值就被当成一个（非法的）端口值。
+  let p = String(port ?? "").trim();
+  if (!p || p === "0") p = String(DEFAULT_PORT);
   // 解析出 scheme（用户可能填 `ws://` / `wss://` / 误填 `http://` / 裸主机名）
   // ⚠️ 必须认 http/https：面板上让用户填地址时，他们很自然会粘
   //    `http://127.0.0.1:5267`。不认的话前缀会整个留在主机名里，
@@ -191,6 +193,19 @@ export function buildWsUrl(host, port, token) {
   if (embeddedPort) {
     // 显式端口优先于端口字段
     p = embeddedPort;
+  }
+
+  // ⚠️ 端口必须是 1~65535 的整数。
+  //    不校验的话，`-1` / `70000` / `abc` 会拼出
+  //    `ws://127.0.0.1:-1/...` 这种**非法 URL**，
+  //    `new WebSocket()` 直接抛错 —— 而报错信息只会说
+  //    "Invalid URL"，用户完全看不出是端口填错了。
+  //    在这里拦下来，给一句能直接照做的话。
+  if (!/^\d+$/.test(p) || Number(p) < 1 || Number(p) > 65535) {
+    throw new Error(
+      `端口无效：${p}（必须是 1~65535 的整数）。`
+      + `请在扩展面板里检查「端口」这一项。`
+    );
   }
 
   const loopback = isLoopbackHost(h);
