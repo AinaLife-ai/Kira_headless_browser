@@ -97,6 +97,13 @@ def run(r) -> None:
                             defined.add(_t.attr)
 
             for n in ast.walk(cls):
+                # ⚠️ 调用扫描**也要**排除嵌套类的节点 ——
+                #    赋值扫描排除了（见上面 `_nested_nodes`），调用扫描却漏了，
+                #    于是嵌套类里的 `self.method()` 会按**外层类**的成员去查，
+                #    明明定义在嵌套类里也报"未定义"（A1 误报）。
+                #    嵌套类的 self 是它自己，跟外层类不是一回事。
+                if id(n) in _nested_nodes:
+                    continue
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
                         and isinstance(n.func.value, ast.Name) \
                         and n.func.value.id == "self":

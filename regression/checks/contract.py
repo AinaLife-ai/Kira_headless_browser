@@ -99,7 +99,11 @@ def _render_fields() -> dict[str, set[str]]:
     tree = ast.parse(src)
     out: dict[str, set[str]] = {}
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.FunctionDef) and node.name == "_render"):
+        # ⚠️ 同时接受 async def —— `_render()` 若将来改成异步函数，
+        #    只认 ast.FunctionDef 的话这里会**静默找不到**，
+        #    字段提取返回空 → F1 契约校验变成空转（看起来还是 PASS）。
+        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_render"):
             continue
         for sub in ast.walk(node):
             if not isinstance(sub, ast.If):

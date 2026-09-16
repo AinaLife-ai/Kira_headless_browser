@@ -35,6 +35,28 @@ RUNTIME_ARTIFACTS = {
 REGRESSION_DIRS = ("regression",)
 
 
+def _git_tracked_files():
+    """返回 git **已跟踪**的文件（相对插件根的 Path 列表）。
+
+    ⚠️ 为什么不用文件系统扫描：`.gitignore` 挡不住**已经跟踪**的文件
+    （曾 `git add -f` 或先提交后加 ignore 都会绕过），
+    所以"磁盘上有没有 node_modules"判断不出"会不会被提交"。
+
+    返回 ``None`` 表示拿不到（没有 git / 不是仓库）—— 调用方自行降级。
+    """
+    import subprocess
+    try:
+        p = subprocess.run(["git", "ls-files", "-z"],
+                           cwd=str(PLUGIN_DIR), capture_output=True,
+                           timeout=60)
+        if p.returncode != 0:
+            return None
+        raw = p.stdout.decode("utf-8", errors="replace")
+        return [Path(x) for x in raw.split("\0") if x]
+    except Exception:
+        return None
+
+
 def _read_gitignore() -> list:
     """读 .gitignore，返回去掉注释/空行的规则列表。"""
     p = PLUGIN_DIR / ".gitignore"
@@ -200,22 +222,38 @@ def run(r) -> None:
     r.ok("D3 无运行时数据目录", not _runtime_hits,
          f"发现={_runtime_hits or '无'}")
     # 回归测试自己的产物（node_modules / 临时脚本）不该被提交
-    reg_files = list((PLUGIN_DIR / "regression").rglob("*")) \
-        if (PLUGIN_DIR / "regression").is_dir() else []
-    reg_bad = [p.relative_to(PLUGIN_DIR) for p in reg_files
-               if p.is_file()
-               # node_modules 是被 .gitignore 掉的依赖目录，不逐个查
-               and "node_modules" not in p.parts
-               and (p.suffix in BAD_SUFFIX
-                    or "__pycache__" in p.parts
-                    or p.name.startswith("_click_runner")
-                    or p.name == "_ext_client.mjs"
-                    # ⚠️ 实际生成的是**带唯一后缀**的 kira_ext_client_*.mjs
-                    #    （为了让并发跑互不干扰）。只匹配旧的确切名字，
-                    #    这些残留就永远清不出来、D5 会一直报脏。
-                    or p.name.startswith("kira_ext_client_"))]
-    r.ok("D5 回归测试目录无临时产物/缓存", not reg_bad,
-         f"发现={[str(x) for x in reg_bad] or '无'}")
+    # ⚠️ 判据是"**会不会被提交**"，不是"在不在磁盘上" ——
+    #    所以这里问 git：哪些文件是**被跟踪的**。
+    #    只靠"排除 node_modules 目录"是不够的：`.gitignore` 拦不住
+    #    **已经跟踪**（或曾被 `git add -f` 强制添加）的文件，
+    #    那些依赖产物会稳稳通过 D5。
+    tracked = _git_tracked_files()
+    reg_files = [t for t in tracked if t.parts and t.parts[0] == "regression"] \
+        if tracked else []
+    if tracked is None:
+        # 没有 git（例如只拿到一个解压出来的目录）→ 退回扫文件系统，
+        # 保留原有的排除规则，并说明降级了。
+        r.warn("无法读取 git 跟踪清单，D5 退化为文件系统扫描",
+               "在 git 仓库里跑能覆盖『已跟踪的依赖产物』")
+        reg_files = [p.relative_to(PLUGIN_DIR)
+                     for p in (PLUGIN_DIR / "regression").rglob("*")
+                     if p.is_file() and "node_modules" not in p.parts] \
+            if (PLUGIN_DIR / "regression").is_dir() else []
+    reg_bad = [p for p in reg_files
+               if p.suffix in BAD_SUFFIX
+               or "__pycache__" in p.parts
+               or p.name.startswith("_click_runner")
+               or p.name == "_ext_client.mjs"
+               # ⚠️ 实际生成的是**带唯一后缀**的 kira_ext_client_*.mjs
+               #    （为了让并发跑互不干扰）。只匹配旧的确切名字，
+               #    这些残留就永远清不出来、D5 会一直报脏。
+               or p.name.startswith("kira_ext_client_")
+               # ⚠️ node_modules **里的文件**一旦被跟踪就是真问题
+               #    （依赖产物不该进版本库）。未跟踪时 git 不会报出来，
+               #    所以这里不再需要"整个目录排除"。
+               or "node_modules" in p.parts]
+    r.ok("D5 回归测试目录无临时产物/缓存（含被跟踪的依赖产物）", not reg_bad,
+         f"发现={[str(x) for x in reg_bad[:8]] or '无'}（跟踪清单 {len(reg_files)} 个）")
     # 插件本体只允许 README（+ 一份**白名单**的说明文档）。
     # ⚠️ 规则的本意是防"文档散落"，不是禁止一切文档 —— 所以用白名单
     #    而不是放开。目前白名单里只有 SECURITY_DESIGN.md：

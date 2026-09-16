@@ -95,12 +95,19 @@ def run(r) -> None:
     # A9/A10 扩展权限
     need = {"tabs", "scripting", "storage", "alarms", "notifications",
             "webNavigation", "activeTab", "cookies", "userScripts"}
-    have = set(exm["permissions"])
+    # ⚠️ 用 .get() 取值：`exm["permissions"]` 直接索引时，
+    #    键缺失/被改名会抛 KeyError → **整组检查中断**（B~E 段全不执行），
+    #    报告上只剩一条笼统失败，看不出真正缺的是哪个键。
+    #    改成安全取值后，只有**这一条**断言失败，信息也明确。
+    _perm = exm.get("permissions") or []
+    have = set(_perm)
     r.ok("A9 扩展权限齐全（含新能力所需）", need <= have,
-         f"缺={sorted(need - have) or '无'}")
+         f"缺={sorted(need - have) or '无'}；permissions 键={'有' if _perm else '缺失/为空'}")
+    _hosts = exm.get("host_permissions") or []
     r.ok("A10 host_permissions 覆盖本地 + 全站",
-         any("127.0.0.1" in h for h in exm["host_permissions"])
-         and "<all_urls>" in exm["host_permissions"])
+         any("127.0.0.1" in h for h in _hosts)
+         and "<all_urls>" in _hosts,
+         f"host_permissions={'有' if _hosts else '缺失/为空'}")
 
     # A11 工具名不重复
     names = re.findall(r'name="(browser_[a-z_]+)"', main)
@@ -252,8 +259,14 @@ def run(r) -> None:
     # A14 硬编码的插件 id 必须与 manifest 一致
     #     （面板 API 路径 / WS 路径 / 扩展路径都依赖它，
     #      对不上就是 404 或连不上，而且"看起来都写对了"）
-    pid = man["plugin_id"]
+    pid = man.get("plugin_id") or ""
     hard = []
+    if not pid:
+        # manifest 缺 plugin_id → 只报这一条，不往下用空串去比对
+        # （空串会让"该行必须含 plugin_id"永远不成立 → 满屏误报）
+        r.ok("A14 硬编码的插件 id 与 manifest 一致", False,
+             "manifest 缺 plugin_id，无法比对")
+        pid = "headless_browser"
     for rel in ("web/index.html", "browser-bridge/protocol.js"):
         if not exists(rel):
             continue
@@ -307,8 +320,10 @@ def run(r) -> None:
                    "auto_send_screenshot", "notify_setup_via_chat"]
         stale = [x for x in removed if x in readme]
         r.ok("B3 README 不含已删除的配置项", not stale, f"残留={stale or '无'}")
+        _ver = man.get("version") or ""
         r.ok("B4 README 版本号与 manifest 一致",
-             man["version"] in readme, f"manifest={man['version']}")
+             bool(_ver) and _ver in readme,
+             f"manifest={_ver or '（缺失）'}")
 
     # ══════════════════════════════════════════════════════════════
     section("C. 历史问题回归（防止修过的又回来）")
@@ -773,15 +788,21 @@ def run(r) -> None:
     r.ok("D3 所有 Python 文件可编译", not bad_compile,
          f"失败={bad_compile or '无'}")
 
+    _mpid = man.get("plugin_id") or ""
     r.ok("D4 plugin_id 与上游一致（避免升级后出现两个插件）",
-         man["plugin_id"] == "headless_browser",
-         f"plugin_id={man['plugin_id']}")
+         _mpid == "headless_browser",
+         f"plugin_id={_mpid or '（缺失）'}")
+    _author = man.get("author") or ""
     r.ok("D5 manifest 作者含 nyx / znq19 / 萧洋",
-         all(x in man["author"] for x in ("nyx", "znq19", "萧洋")),
-         f"author={man['author']}")
-    r.ok("D6 manifest 引用的图标存在", exists(man["icon"]))
+         bool(_author) and all(x in _author for x in ("nyx", "znq19", "萧洋")),
+         f"author={_author or '（缺失）'}")
+    _icon = man.get("icon") or ""
+    r.ok("D6 manifest 引用的图标存在", bool(_icon) and exists(_icon),
+         f"icon={_icon or '（缺失）'}")
+    _icons = exm.get("icons") or {}
     r.ok("D7 扩展图标都在",
-         all(exists(f"browser-bridge/{v}") for v in exm["icons"].values()))
+         bool(_icons) and all(exists(f"browser-bridge/{v}") for v in _icons.values()),
+         f"icons 键={'有' if _icons else '缺失/为空'}")
 
     rel = set(re.findall(r'^from \.(\w+) import', main, re.M))
     rel |= set(re.findall(r'^from \.(\w+) import', hb, re.M))
@@ -801,7 +822,8 @@ def run(r) -> None:
     imported = set(re.findall(r'from "\./([\w.]+)"', bg))
     popup_html = ext_file("popup.html")
     popup_js = set(re.findall(r'src="([\w.]+)"', popup_html))
-    reachable = declared | imported | popup_js | {exm["background"]["service_worker"]}
+    _sw = (exm.get("background") or {}).get("service_worker") or ""
+    reachable = declared | imported | popup_js | ({_sw} if _sw else set())
     present = {f.name for f in EXT_DIR.iterdir() if f.suffix == ".js"}
     orphan = sorted(present - reachable - {"protocol.js"})
     r.ok("D9 扩展里没有游离的 JS 文件", not orphan, f"未引用={orphan or '无'}")

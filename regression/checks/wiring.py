@@ -18,6 +18,54 @@ from ..harness import section, src
 
 TITLE = "接线完整性（配置接通 / 数据透传）"
 
+#: 扩展侧**不允许裸引用**的状态标识符（ES 模块不共享顶层作用域）
+NAKED_STATE_NAMES = (
+    "socket|reconnectAttempt|reconnectTimer|"
+    "intentionalClose|userDisconnected|lastError"
+)
+
+
+def _keep_interp(m):
+    """模板串处理：把 `${...}` 里的内容抽出来保留，其余模板文本删掉。
+
+    ⚠️ 模板串不能**整体**删掉 —— `${socket.readyState}` 里的标识符是
+    真实求值的，删了就会漏判（检查假绿，运行时却 ReferenceError）。
+    """
+    inner = re.findall(r'\$\{([^{}]*)\}', m.group(0))
+    return " " + " ".join(inner) + " "
+
+
+def _strip_js_noise(src_text: str) -> str:
+    """剥掉 JS 的注释与字符串字面量，只留「真正的代码」。
+
+    注释里提到这些名字是**正常的**（说明为什么这么写），
+    字符串里的词是运行时才存在的文本 —— 都不该当成变量引用。
+    """
+    code = re.sub(r'/\*[\s\S]*?\*/', '', src_text)   # 块注释（含跨行）
+    code = re.sub(r'(?m)//[^\n]*$', '', code)        # 行注释
+    code = re.sub(r'`(?:[^`\\]|\\.)*`', _keep_interp, code)   # 模板串
+    code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', code)         # 双引号
+    code = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", code)         # 单引号
+    return code
+
+
+def _scan_naked_state(src_text: str):
+    """扫描裸的状态标识符，返回去重排序后的名字列表。
+
+    **G1 检查与它的自检夹具都用这一个函数** —— 之前夹具内联了一份副本，
+    结果两边各自演化（夹具用 `code[m.end():...]`、真逻辑改成了局部变量
+    `after`），副本已与真逻辑不同步：自检永远绿，真检查坏了也发现不了。
+    """
+    code = _strip_js_noise(src_text)
+    found = []
+    for m in re.finditer(r'(?<![\w.$])\b(' + NAKED_STATE_NAMES + r')\b', code):
+        # 排除"对象字面量的键"（`socket: "OPEN"`）—— 那不是引用
+        after = code[m.end():m.end() + 3].lstrip()
+        if after.startswith(":"):
+            continue
+        found.append(m.group(1))
+    return sorted(set(found))
+
 
 def run(r) -> None:
     main = src("main.py")
@@ -193,26 +241,15 @@ def run(r) -> None:
          f"未处理={naked or '无'}")
     # ── G1 的**自检夹具** ────────────────────────────────────────────
     #  CodeRabbit 指出的盲区：模板串整体删除会漏掉 `${...}` 里的标识符。
-    #  这里内联一份与 G1 相同的扫描逻辑，喂一段"只在插值里出现裸标识符"
-    #  的样本，要求它**必须报错**。夹具失效时本项会立刻变红。
+    #  喂一段"只在插值里出现裸标识符"的样本，要求它**必须报错**。
+    #
+    #  ⚠️ 这里**必须调用 G1 真正用的那个扫描器**（`_scan_naked_state`），
+    #     不能内联一份"看起来一样"的副本 —— 副本会与真逻辑一起漂移，
+    #     于是自检永远绿、而真检查已经坏了（这正是上一版的毛病：
+    #     夹具用 `code[m.end():...]`，真逻辑后来改成了局部变量 `after`，
+    #     两边早已不同步）。
     def _scan(src_text):
-        code = _re2.sub(r'/\*[\s\S]*?\*/', '', src_text)
-        code = _re2.sub(r'(?m)//[^\n]*$', '', code)
-
-        def _keep(m):
-            inner = _re2.findall(r'\$\{([^{}]*)\}', m.group(0))
-            return " " + " ".join(inner) + " "
-
-        code = _re2.sub(r'`(?:[^`\\]|\\.)*`', _keep, code)
-        code = _re2.sub(r'"(?:[^"\\\n]|\\.)*"', '""', code)
-        code = _re2.sub(r"'(?:[^'\\\n]|\\.)*'", "''", code)
-        found = []
-        for m in _re2.finditer(
-                r'(?<![\w.$])\b(socket|reconnectAttempt|reconnectTimer|'
-                r'intentionalClose|userDisconnected|lastError)\b', code):
-            if not code[m.end():m.end() + 3].lstrip().startswith(":"):
-                found.append(m.group(1))
-        return sorted(set(found))
+        return _scan_naked_state(src_text)
 
     _fixture = 'const s = `readyState=${socket.readyState}`;'
     r.ok("G1 自检夹具：插值里的裸标识符必须被抓到",
@@ -233,33 +270,7 @@ def run(r) -> None:
     # background.js 里还留着 `socket.onopen = ...` 这种裸引用 ——
     # 严格模式下直接 ReferenceError，**扩展永远连不上**。
     import re as _re
-    # 只看真正的代码行 —— 注释里提到这些名字是**正常的**（说明为什么这么写）
-    # ⚠️ 注释必须**完整剥掉**，包括跨行的块注释 ——
-    #    逐行过滤只能处理 `//`，块注释（/* ... */，中间那些行不以
-    #    注释符开头）会漏，里面的词会被误当成裸引用。
-    bg_code = _re2.sub(r'/\*[\s\S]*?\*/', '', bg_bg)        # 块注释
-    bg_code = _re2.sub(r'(?m)//[^\n]*$', '', bg_code)          # 行注释
-    # ⚠️ 还要剥掉**字符串字面量**（含反引号模板串）。
-    #    注释剥完仍会把 `\`...socket 开着...\`` 这种提示文本里的词
-    #    当成标识符引用 —— 那是运行时才存在的字符串，不是变量。
-    # ⚠️ 模板串不能**整体**删掉：`${socket.readyState}` 里的标识符是
-    #    真实求值的，删了就会漏判（G1 假绿，运行时却 ReferenceError）。
-    #    做法：先把 `${...}` 里的内容**抽出来保留**，再删掉其余模板文本。
-    def _keep_interp(m):
-        inner = _re2.findall(r'\$\{([^{}]*)\}', m.group(0))
-        return " " + " ".join(inner) + " "
-
-    bg_code = _re2.sub(r'`(?:[^`\\]|\\.)*`', _keep_interp, bg_code)  # 模板串
-    bg_code = _re2.sub(r'"(?:[^"\\\n]|\\.)*"', '""', bg_code)     # 双引号
-    bg_code = _re2.sub(r"'(?:[^'\\\n]|\\.)*'", "''", bg_code)     # 单引号
-    naked = []
-    for m in _re.finditer(r'(?<![\w.$])\b(socket|reconnectAttempt|reconnectTimer|'
-                          r'intentionalClose|userDisconnected|lastError)\b', bg_code):
-        # 排除"对象字面量的键"（`socket: "OPEN"`）—— 那不是引用
-        after = bg_code[m.end():m.end() + 3].lstrip()
-        if after.startswith(":"):
-            continue
-        naked.append(m.group(1))
-    naked = sorted(set(naked))
+    bg_code = _strip_js_noise(bg_bg)
+    naked = _scan_naked_state(bg_bg)
     r.ok("G1 没有裸的状态标识符（都走 state.xxx）", not naked,
          f"裸引用={naked or '无'} —— ES 模块严格模式下会 ReferenceError")

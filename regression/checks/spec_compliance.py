@@ -150,3 +150,26 @@ def run(r) -> None:
 
     sec = PLUGIN_DIR / "SECURITY_DESIGN.md"
     r.ok("F4 有独立的安全设计说明（供自动审阅读，避免误报）", sec.is_file())
+
+    section("G. 回归套件自身的文档与登记表一致")
+
+    # ⚠️ 这条是补一次"文档漂移"的教训：`regression/README.md` 里的
+    #    checks/ 清单漏了 6 个已登记模块（claims / spec_compliance /
+    #    vlm_describe / lost_features / timeout_semantics / execjs_gates），
+    #    而**没有任何检查盯着它** —— 于是漂了很久才被外部审查发现。
+    #    登记表（checks/__init__.py 的 ALL_CHECKS）是唯一事实来源。
+    try:
+        import importlib
+        _pkg = importlib.import_module("regression.checks")
+        _registered = {m.__name__.rsplit(".", 1)[-1] for m in _pkg.ALL_CHECKS}
+    except Exception as e:
+        _registered = set()
+        r.ok("G1 能读到检查登记表", False, f"{type(e).__name__}: {e}")
+
+    if _registered:
+        _readme = src_safe("regression/README.md")
+        _missing = sorted(n for n in _registered
+                          if f"{n}.py" not in _readme)
+        r.ok("G1 regression/README.md 的 checks 清单覆盖所有已登记模块",
+             not _missing,
+             f"README 里缺={_missing or '无'}（已登记 {len(_registered)} 个）")

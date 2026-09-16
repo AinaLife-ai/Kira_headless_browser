@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.30
+# 浏览器插件 (Browser Plugin) 2.1.31
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,82 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.31（2026-09-16）
+
+**按 CodeRabbit 第三十二轮审查修复**（6 条，逐条核实后全部为真）。
+
+> ⚠️ 这轮开始时我**只看到 4 条**：14:09 那条 review 里另有一块
+> `Duplicate comments (2)` 折叠区，我第一次拉取只取了每线程的**第一条**评论，
+> 于是漏了那 2 条。教训：拉审查意见要按**线程最后一条评论**排序，
+> 并展开所有折叠区。
+
+#### 🔴 ① 检查器会因为一个缺键而整组中断（5 处裸索引）
+
+`exm["permissions"]` / `man["author"]` / `exm["background"]["service_worker"]`
+这类**直接索引**，一旦 manifest 缺键或被改名就抛 `KeyError` ——
+**整个检查中断**，后面所有段落都不执行，报告上只剩一条笼统失败，
+完全看不出缺的是哪个键。
+
+→ 全部改 `.get()` 安全取值，并且**每处只让自己的断言失败**，信息明确。
+顺带把 CR 没点到的 3 处（`man["version"]` / `man["plugin_id"]`×2）一并修掉 ——
+同一个风险，不修等于留着。
+
+**实测**：删掉 `permissions` / `host_permissions` / `author` / `icon` /
+`background` 五种键，每次都**只有自己那条**失败（各 1 FAIL），
+`KeyError` 数量为 0。
+
+#### 🟠 ② D5 查不出「已被跟踪」的依赖产物
+
+D5 原来在检查前**整个排除** `node_modules` 目录。但 `.gitignore`
+拦不住**已经跟踪**的文件（曾 `git add -f`，或先提交后再加 ignore），
+所以已提交的依赖产物能稳稳通过检查。
+
+→ 判据从"磁盘上有没有"改成"**会不会被提交**"：用 `git ls-files` 拿
+**跟踪清单**再判。没有 git 时降级为文件系统扫描并记 WARN（说明覆盖不完整）。
+
+**实测**：干净仓库 → PASS；`git add -f` 一个
+`regression/js/node_modules/dep/index.js` → **D5 立刻报红**，修之前查不出来。
+
+#### 🟡 ③ `callgraph` 的调用扫描漏了嵌套类
+
+赋值扫描排除了 `_nested_nodes`，**调用扫描没有** —— 嵌套类里的
+`self.method()` 会按**外层类**的成员去查，明明定义在嵌套类里也报"未定义"。
+
+→ 调用扫描一并排除。**实测**：注入一个带嵌套类的类，
+修复前报 `_NestedProbeOuter.self._inner_only() 未定义`（误报），修复后通过。
+
+#### 🟡 ④ `contract` 不认异步 `_render()`
+
+`_render()` 将来若改成 `async def`，AST 只认 `FunctionDef` 会**静默找不到**，
+字段提取返回空 → F1 契约校验**变成空转**（看起来还是 PASS）。
+→ 同时接受 `ast.AsyncFunctionDef`。
+
+#### 🟡 ⑤ `wiring` 的自检夹具守的是**副本**，不是真逻辑
+
+G1 的自检夹具内联了一份 `_scan()` —— 它和真扫描器**已经漂移了**
+（夹具用 `code[m.end():...]`，真逻辑改成了局部变量 `after`）。
+于是自检永远绿，真检查坏了也发现不了。
+
+→ 抽出共享的 `_strip_js_noise()` / `_scan_naked_state()`，
+**夹具与 G1 都调用同一个函数**。
+**实测**：把共享扫描器的模板串处理改坏，夹具**立刻报红**（修之前照样绿）。
+
+#### 🟡 ⑥ `regression/README.md` 的 checks 清单漏了 6 个模块
+
+漏了 `claims` / `spec_compliance` / `vlm_describe` / `lost_features` /
+`timeout_semantics` / `execjs_gates`。
+
+→ 补全，**并新增守卫 G1**：README 的清单必须覆盖 `checks/__init__.py`
+里登记的所有模块（登记表是唯一事实来源）。
+**实测**：删掉任意一行 → G1 报红并精确指出缺哪个。（这条漂了很久没人发现，
+就是因为没有任何检查盯着它。）
+
+#### 结果
+
+`regression/run_all.py` → **295/295，16 组全绿**
+（1 个 WARN 是"工作副本非 git 仓库"时的预期降级提示）。
+版本 2.1.30 → 2.1.31。
 
 ### v2.1.30（2026-09-16）
 
