@@ -76,7 +76,13 @@ class Ctx:
 
 async def main():
     out = {}
-    d = tempfile.mkdtemp()
+    # ⚠️ 用 TemporaryDirectory（而不是 mkdtemp）—— mkdtemp 建的目录
+    #    没人清理，每跑一次回归就留一份 cookie 夹具在 /tmp 里。
+    with tempfile.TemporaryDirectory(prefix="kira_cookie_fixture_") as d:
+        return await _run_cases(out, d)
+
+
+async def _run_cases(out, d):
     json.dump({"cookies": [{"name": "sid", "value": "v", "domain": ".e.com",
         "secure": True, "httpOnly": True, "sameSite": "no_restriction",
         "expirationDate": 1893456000.5}]}, open(os.path.join(d, "a.json"), "w"))

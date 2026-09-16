@@ -30,6 +30,13 @@ MSG_EVENT = "event"          # 扩展主动上报事件（页面加载、标签�
 MSG_PING = "ping"            # 插件心跳
 MSG_PONG = "pong"            # 扩展心跳应答
 MSG_ERROR = "error"          # 错误
+
+#: 错误类别：**超时**（扩展侧的 ``error_code`` 取值）。
+#  ⚠️ 与 `browser-bridge/protocol.js` 的 `ERR_TIMEOUT` 必须一致 ——
+#  两边各写一个字面量的话，改了一边另一边不会跟着动，
+#  而这条链路决定"超时要不要禁止换后端重试"（重复执行的风险）。
+#  插件侧一律用这个常量比较，不要再写裸 "timeout"。
+ERR_TIMEOUT = "timeout"
 MSG_CHUNK = "chunk"          # 大文件分块回传（下载用，避免把整个文件塞进一条消息）
 
 PROTOCOL_VERSION = 1

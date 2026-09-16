@@ -215,7 +215,11 @@ export function buildWsUrl(host, port, token) {
   if (scheme === "ws" && !loopback) {
     throw new Error(
       `拒绝以明文 ws:// 连接非本机地址 ${h} —— 接入令牌会暴露在网络上。`
-      + `请去掉地址里的 ws://（默认会用 wss://）。`
+      // ⚠️ 提示要覆盖 **http://**：用户粘 `http://host:port` 时，
+      //    scheme 会被映射成 "ws" 并走到这个分支 —— 而他的输入里
+      //    根本没有 "ws://"，照提示去找会一头雾水。
+      + `请把地址里的 ws:// 或 http:// 改成 wss:// / https://，`
+      + `或直接只填主机名（默认会用 wss://）。`
     );
   }
   // 裸 IPv6 在 URL 里必须加方括号，否则 `::1:5267` 无法解析。

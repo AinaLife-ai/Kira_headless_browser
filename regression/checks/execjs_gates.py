@@ -53,9 +53,17 @@ def run(r) -> None:
          "'unsafe-eval'" in cap,
          "execJs 的包装器正是用 eval / new Function 跑的；"
          "只放行 wasm-unsafe-eval 是不够的")
+    # ⚠️ 两个标记**都要先判存在**再 index/rindex ——
+    #    只守 "ensureUserScriptWorld" 的话，`cap.rindex("userScripts.execute")`
+    #    在标记被改名/重构掉后抛 ValueError，异常逃出 run() →
+    #    run_all.py 记一条笼统失败，**A4~A6 与 B、C 段全不执行**。
+    #    这正是本组检查自己在防的那类"整组中断"。
+    _has_cfg = "ensureUserScriptWorld" in cap
+    _has_exec = "userScripts.execute" in cap
     r.ok("A3 配置 world 发生在**执行之前**",
-         "ensureUserScriptWorld" in cap
+         _has_cfg and _has_exec
          and cap.index("ensureUserScriptWorld") < cap.rindex("userScripts.execute"),
+         f"两个标记都存在={_has_cfg}/{_has_exec}；"
          "配置要早于首次执行，否则第一次调用必然失败")
     # ⚠️ 只看 **CSP 字符串字面量本身**，不看全文 ——
     #    注释里写着"不含 `unsafe-inline`"也会命中全文匹配（误报）。
@@ -81,9 +89,15 @@ def run(r) -> None:
     r.ok("B1 buildWsUrl 校验了端口范围",
          "端口无效" in proto,
          "否则 -1/70000/abc 会拼出非法 URL，报错只说 Invalid URL")
+    # ⚠️ 同样两个标记都先判存在（与 A3 保持一致）——
+    #    写成 `a < b if (x in s and y in s) else False` 虽然不抛错，
+    #    但意图绕、容易在改动时改坏。显式短路更清楚。
+    _hp = "端口无效" in proto
+    _hr = "return `${scheme}" in proto
     r.ok("B2 校验发生在拼 URL **之前**",
-         proto.index("端口无效") < proto.rindex("return `${scheme}")
-         if "端口无效" in proto and "return `${scheme}" in proto else False)
+         _hp and _hr
+         and proto.index("端口无效") < proto.rindex("return `${scheme}"),
+         f"两个标记都存在={_hp}/{_hr}")
     r.ok("B3 纯空白端口当作\"没填\"（回落默认值，而不是报错）",
          'String(port ?? "").trim()' in proto,
          '`"  "` 是真值，不 trim 就会被当成非法端口值')

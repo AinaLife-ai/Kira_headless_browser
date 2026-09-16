@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.31
+# 浏览器插件 (Browser Plugin) 2.1.32
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,66 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.32（2026-09-16）
+
+**按 CodeRabbit 第三十三轮审查修复 6 项**（逐条核实后全部为真）。
+
+#### 🔴 ① D1–D3 又漏了同一类问题（我上轮只修了一半）
+
+上一轮我把 **D1** 的判据改成"会不会被提交"，但 **D2/D3 还在扫文件系统** ——
+正常用一次插件就会生成 `screenshots/` / `browser_profile/` / `__pycache__/`
+（都已 `.gitignore`），于是 D2/D3 对**任何真实使用过的副本**必然误报。
+
+→ 三条统一用「提交清单」判定：优先 `git ls-files`，无 git 时退回
+"文件系统 + 排除 `.gitignore` 命中的路径"（并声明降级）。
+**实测**：造出截图/profile/cookie/log/pycache 的"用过的副本" →
+D1/D2/D3 全部 PASS（修前全红）。
+
+#### 🟠 ② `spec_compliance` 的 B0 早退屏蔽了 C~G 全部检查
+
+manifest 是坏 JSON 时直接 `return` —— 而入口点、路由、资源、文档一致性
+这些检查与 manifest 是否合法**互相独立**，早退让它们的结果完全看不见。
+
+→ 记 B0 失败 + `mf = {}` 继续往下走。
+**实测**：坏 JSON / 非法顶层（数组）/ 空文件三种情形下，
+B0 都报告了，**C~G 段照常执行**（各 9 项），无崩溃。
+（顺带加了一条：合法 JSON 但不是对象时也按无效处理，否则后面 `.get()` 会炸。）
+
+#### 🟡 ③ `execjs_gates` 的 A3 会因缺标记而整组中断
+
+`cap.rindex("userScripts.execute")` 只守了前一个标记 —— 后一个被改名/重构掉
+就抛 `ValueError`，异常逃出 `run()` → **A4~A6 与 B、C 段全不执行**。
+（这正是本组检查自己在防的那类"整组中断"，讽刺。）
+
+→ 两个标记都先判存在（B2 同样处理，顺手把绕口的三元表达式改清楚）。
+**实测**：删掉该标记 → 只有 A3 报 FAIL，其余照常执行。
+
+#### 🟡 ④ 两处探针的临时目录不清理
+
+`lost_features` / `vlm_describe` 的嵌套探针用 `tempfile.mkdtemp()`，
+每跑一次回归就在 `/tmp` 里留一份 cookie 夹具 / PNG。
+→ 改用 `TemporaryDirectory`。**实测**：跑完残留数为 0。
+
+#### 🟡 ⑤ 提示文案漏了 `http://`
+
+`buildWsUrl` 把 `http://host:port` 映射成 `scheme === "ws"` 并走"非本机明文拒绝"
+分支 —— 但提示只说"去掉 `ws://`"，而用户的输入里**根本没有 `ws://`**。
+→ 提示补上 `http://`。
+
+#### 🟡 ⑥ `ERR_TIMEOUT` 常量两侧各写一份
+
+`protocol.js` 有 `ERR_TIMEOUT = "timeout"`，`protocol.py` 没有 ——
+`extension_backend` 用裸字面量比较。这条链路决定"超时要不要禁止换后端重试"
+（重复执行的风险），改一边另一边不会跟着动。
+→ `protocol.py` 补同名常量，插件侧改用它。判据同步更新为
+**同时接受字面量与常量**（否则一改常量就误报"识别逻辑不见了"）。
+
+#### 结果
+
+`regression/run_all.py` → **295/295，16 组全绿**
+（1 个 WARN 是"工作副本非 git 仓库"时的预期降级提示）。
+版本 2.1.31 → 2.1.32。
 
 ### v2.1.31（2026-09-16）
 

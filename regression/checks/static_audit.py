@@ -293,7 +293,13 @@ def run(r) -> None:
         # 别把文件名（browser_bridge.py）或配置项（browser_channel）算进来 ——
         # 这里额外排除已知不是工具的标识。
         mentioned = set(re.findall(r'\bbrowser_[a-z_]+\b', readme))
-        mentioned -= {"browser_bridge", "browser_channel"}
+        # ⚠️ 排除**已知不是工具**的标识：
+        #    · browser_bridge / browser_channel —— 模块名、配置项；
+        #    · browser_profile / inherited_profile —— 插件运行期的**数据目录**
+        #      （见 .gitignore）。README 讲"运行期产物"时必然会提到它们，
+        #      不排除的话 B1 会把目录名当成"不存在的工具"误报。
+        mentioned -= {"browser_bridge", "browser_channel",
+                      "browser_profile", "inherited_profile"}
         nonexistent = sorted(mentioned - ext_names - set(sch) - {"browser_send_file"})
         r.ok("B1 README 提到的工具都存在（或已标注为废弃）",
              not nonexistent, f"不存在的={nonexistent or '无'}")

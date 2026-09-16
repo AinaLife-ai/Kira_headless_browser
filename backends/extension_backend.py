@@ -129,7 +129,7 @@ class ExtensionBackend(Backend):
             #    改个提示文字（或换语言）这条安全逻辑就**静默失效**，
             #    退化成"同一个操作被执行两次"。文案匹配保留为兜底
             #    （兼容还没上报 error_code 的旧版扩展）。
-            if getattr(e, "err_code", None) == "timeout":
+            if getattr(e, "err_code", None) == self._P.ERR_TIMEOUT:
                 return OpResult.indeterminate_result(msg, self.name)
             if "超时" in msg or "timeout" in msg.lower():
                 return OpResult.indeterminate_result(msg, self.name)

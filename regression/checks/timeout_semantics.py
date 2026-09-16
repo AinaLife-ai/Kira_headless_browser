@@ -17,7 +17,7 @@
       ↓
     bridge.py          包成 BridgeError 时把 err_code 带上去
       ↓
-    extension_backend  err_code == "timeout" → OpResult.indeterminate_result
+    extension_backend  err_code == ERR_TIMEOUT → OpResult.indeterminate_result
       ↓
     main.py            看到 indeterminate → 明说"可能已生效"，**不换后端**
 
@@ -33,6 +33,17 @@ import re
 from ..harness import section, src, src_safe
 
 TITLE = "「结果不确定」链路（超时不得重复执行）"
+
+#: 「后端识别超时」的判据。
+#  ⚠️ 要同时接受**字面量**和**共享常量**两种写法 ——
+#    插件侧已经改用 `protocol.ERR_TIMEOUT`（避免两边各写一个字面量），
+#    判据只认 "timeout" 的话，一改常量就误报"识别逻辑不见了"。
+#  ⚠️ `.*==` 中间还有东西（`getattr(e, "err_code", None) == self._P.ERR_TIMEOUT`），
+#  所以判据是"出现 err_code…… 然后某个 == 比较的对象是超时标识"。
+#  末尾用 `\b` 收口，避免 `ERR_TIMEOUT_X` 这类同前缀名字误命中。
+_ERRCODE_PAT = re.compile(
+    r'err_code[\s\S]{0,80}?==[\s\S]{0,40}?(?:"timeout"|ERR_TIMEOUT)\b')
+
 
 
 def run(r) -> None:
@@ -68,7 +79,7 @@ def run(r) -> None:
          "err_code" in bridge and re.search(r"_err\.err_code\s*=", bridge)
          is not None)
     r.ok("A7 后端**优先**看显式类别（文案匹配只作兜底）",
-         re.search(r'err_code.*==\s*"timeout"', ext) is not None)
+         _ERRCODE_PAT.search(ext) is not None)
 
     # ── 主插件：最终必须禁止重试 ─────────────────────────────────────
     r.ok("A8 主插件识别 indeterminate 并明说「可能已生效」",
@@ -84,7 +95,7 @@ def run(r) -> None:
         return re.search(pat, text) is not None
 
     # ① 文案匹配兜底还在（兼容旧扩展）—— 不能把兜底删了却没加显式判断
-    has_code_check = detects(r'err_code.*==\s*"timeout"', ext)
+    has_code_check = detects(_ERRCODE_PAT, ext)
     has_text_check = detects(r'"超时" in msg', ext)
     r.ok("B1 显式类别与文案兜底**至少有一个**", has_code_check or has_text_check)
     r.ok("B2 显式类别判断确实在（不只是兜底）", has_code_check,
@@ -95,7 +106,7 @@ def run(r) -> None:
     r.ok("B3 OpResult 有 indeterminate 字段与构造器",
          "indeterminate: bool" in base and "indeterminate_result" in base)
     r.ok("B4 后端在超时路径上真的用了它",
-         re.search(r'err_code.*==\s*"timeout"[\s\S]{0,200}?'
+         re.search(_ERRCODE_PAT.pattern + r'[\s\S]{0,200}?'
                    r"indeterminate_result", ext) is not None,
          "识别出超时却还返回普通 fail = 白识别")
 

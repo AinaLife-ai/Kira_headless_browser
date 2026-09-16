@@ -44,7 +44,7 @@ def _fake_vlm_src() -> str:
     所以一个实现 `chat()` 的假客户端就够验整条链路了。
     """
     return r'''
-import asyncio, importlib.util, json, os, sys, tempfile
+import asyncio, atexit, importlib.util, json, os, sys, tempfile
 
 PLUGIN = os.environ["KIRA_PLUGIN_DIR"]
 sys.path.insert(0, PLUGIN)
@@ -55,9 +55,14 @@ vlm = importlib.util.module_from_spec(spec)
 sys.modules["vlm_uut"] = vlm
 spec.loader.exec_module(vlm)
 
-# 框架的 Image(image=path) 要求文件真实存在 —— 造一个真 PNG
-_tmp = tempfile.mkdtemp()
-PNG = os.path.join(_tmp, "shot.png")
+# 框架的 Image(image=path) 要求文件真实存在 —— 造一个真 PNG。
+# ⚠️ 用 TemporaryDirectory（而不是 mkdtemp）：mkdtemp 建的目录没人清理，
+#    每跑一次回归就在 /tmp 里留一份 PNG 夹具。
+#    这里挂在模块级 —— 探针进程是**一次性**的（跑完就退出），
+#    注册 atexit 清理即可，不必把整段塞进 with（探针代码是长脚本字符串）。
+_TMPDIR = tempfile.TemporaryDirectory(prefix="kira_vlm_fixture_")
+atexit.register(_TMPDIR.cleanup)
+PNG = os.path.join(_TMPDIR.name, "shot.png")
 with open(PNG, "wb") as f:
     f.write(bytes.fromhex("89504e470d0a1a0a") + b"0" * 128)
 
@@ -136,8 +141,10 @@ async def main():
 
     # ⑤ 文件不存在 → 空串、不抛（且报错要能看懂）
     try:
+        # ⚠️ 用 _TMPDIR（不是旧变量名 _tmp）—— 改名后这里没跟上就
+        #    会 NameError，被下面的 except 吞成 False → 检查"静默失败"。
         d5 = await vlm.describe_image(Ctx(dvlm=Client("v")),
-                                      os.path.join(_tmp, "nope.png"))
+                                      os.path.join(_TMPDIR.name, "nope.png"))
         out["missing_file_returns_empty"] = (d5 == "")
     except Exception:
         out["missing_file_returns_empty"] = False

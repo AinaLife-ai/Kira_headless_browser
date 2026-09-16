@@ -56,9 +56,18 @@ def run(r) -> None:
 
     try:
         mf = json.loads(src_safe("manifest.json"))
+        if not isinstance(mf, dict):
+            # 合法 JSON 但不是对象（比如是个数组/字符串）→ 当作无效处理，
+            # 否则下面所有 mf.get(...) 都会抛 AttributeError。
+            raise ValueError(f"manifest 顶层不是对象（{type(mf).__name__}）")
     except Exception as e:
         r.ok("B0 manifest.json 是合法 JSON", False, f"{type(e).__name__}: {e}")
-        return
+        # ⚠️ **不要 return** —— 一个坏掉的 manifest 不该把
+        #    C~G 段（入口点、路由、资源、文档一致性）全部屏蔽掉：
+        #    那些检查与 manifest 是否合法**互相独立**，
+        #    早退会让它们的结果完全看不见（报告上只有一条 B0 失败）。
+        #    赋空对象继续走，让后面每一段各自报自己的结果。
+        mf = {}
 
     miss = [k for k in REQUIRED_MANIFEST if not mf.get(k)]
     r.ok("B1 manifest 必备字段齐全", not miss, f"缺={miss or '无'}")

@@ -190,30 +190,45 @@ def run(r) -> None:
 
     # ── D. 不该有的东西 ─────────────────────────────────────────────
     section("D. 不该出现在提交里的东西")
-    # ⚠️ 判据：**会不会被提交**，而不是"磁盘上有没有"。
-    #    `data/log.log` 是框架导入插件时自己写的运行日志（.gitignore 已排除），
-    #    只在文件系统上判红的话，用户正常用过一次插件 → D1 必然误报，
-    #    而这不是产品问题。所以这里把已声明为运行期产物的路径排除掉。
-    _checked = [f for f in files if str(f) not in RUNTIME_ARTIFACTS]
+    # ⚠️ 判据是"**会不会被提交**"，而不是"磁盘上有没有"。
+    #    正常用一次插件就会生成 `screenshots/`、`browser_profile/`、
+    #    `data/log.log`、`__pycache__/` 这些东西（都已 .gitignore）——
+    #    拿文件系统判红的话，D1/D2/D3 对**任何真实使用过的副本**都必然误报，
+    #    而那不是产品问题。
+    #
+    #    优先用 git 跟踪清单（`.gitignore` 拦不住**已跟踪**的文件，
+    #    所以"跟踪清单"才是唯一准确的判据）；没有 git 时退回
+    #    "扫文件系统 + 排除已忽略的路径"。
+    tracked = _git_tracked_files()
+    _gi = _read_gitignore()
+    if tracked is None:
+        commit_files = [f for f in files if not _is_ignored(str(f), _gi)]
+        r.note(f"   无 git，D1~D3 按 .gitignore 过滤后的清单判定"
+               f"（{len(commit_files)}/{len(files)} 个文件）")
+    else:
+        commit_files = [f for f in tracked
+                        if not (f.parts and f.parts[0] in REGRESSION_DIRS)]
+        r.note(f"   D1~D3 按 git 跟踪清单判定（{len(commit_files)} 个文件）")
+
+    _checked = [f for f in commit_files if str(f) not in RUNTIME_ARTIFACTS]
     bad = [f for f in _checked
            if f.suffix in BAD_SUFFIX or f.name in BAD_NAMES]
     r.ok("D1 无编译产物 / 日志 / 系统文件", not bad, f"发现={bad or '无'}")
     # 反向保护：白名单里的东西**必须**真的被 .gitignore 排除，
     # 否则就变成"用白名单掩盖漏提交"。
-    _gi = _read_gitignore()
     _unignored = [a for a in RUNTIME_ARTIFACTS if not _is_ignored(a, _gi)]
     r.ok("D1b 运行期产物确实被 .gitignore 排除（白名单不是遮羞布）",
          not _unignored,
          f"未被忽略={_unignored or '无'}；白名单={sorted(RUNTIME_ARTIFACTS)}")
     r.ok("D2 无 __pycache__",
-         not any("__pycache__" in str(f) for f in files))
+         not any("__pycache__" in str(f) for f in commit_files))
     # ⚠️ 判据是"**目录**里的运行时数据"，不是"路径里含某个词" ——
     #    后者会误伤源码文件（例如 `cookies.py` 含 "cookie"，
     #    但它是模块不是数据目录）。
     _RUNTIME_DIR_MARKERS = ("cookie", "browser_profile", "inherited_profile",
                             "screenshots")
     _runtime_hits = []
-    for f in files:
+    for f in commit_files:
         rel = str(f)
         # 只看这些标记作为**路径片段**出现（后面跟着 / 或者是目录本身）
         if any(f"/{k}/" in f"/{rel}" or f"/{k}s/" in f"/{rel}"
@@ -222,12 +237,9 @@ def run(r) -> None:
     r.ok("D3 无运行时数据目录", not _runtime_hits,
          f"发现={_runtime_hits or '无'}")
     # 回归测试自己的产物（node_modules / 临时脚本）不该被提交
-    # ⚠️ 判据是"**会不会被提交**"，不是"在不在磁盘上" ——
-    #    所以这里问 git：哪些文件是**被跟踪的**。
-    #    只靠"排除 node_modules 目录"是不够的：`.gitignore` 拦不住
-    #    **已经跟踪**（或曾被 `git add -f` 强制添加）的文件，
+    # ⚠️ 同样用跟踪清单 —— 只靠"排除 node_modules 目录"是不够的：
+    #    `.gitignore` 拦不住**已经跟踪**（或曾被 `git add -f`）的文件，
     #    那些依赖产物会稳稳通过 D5。
-    tracked = _git_tracked_files()
     reg_files = [t for t in tracked if t.parts and t.parts[0] == "regression"] \
         if tracked else []
     if tracked is None:
