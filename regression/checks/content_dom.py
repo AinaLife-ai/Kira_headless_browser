@@ -221,11 +221,20 @@ def run(r) -> None:
                 p3 = subprocess.run(["node", str(sweep)], cwd=str(JS_DIR),
                                     capture_output=True, text=True,
                                     env=_e3, timeout=120)
-                _d3 = json.loads((p3.stdout or "[]").strip().splitlines()[-1]
-                                 if p3.stdout.strip() else "[]")
-                for _it in _d3:
-                    r.ok(f"U4 {_it['name']}", bool(_it.get("ok")),
-                         _it.get("detail", "")[:150])
+                # ⚠️ 先判退出码与非空：脚本崩了却恰好留下半截输出时，
+                #    "逐项报告"会变成少报几项（而少报等于漏检）。
+                if p3.returncode != 0:
+                    r.ok("U4 上传会话回收测试脚本正常退出", False,
+                         f"exit={p3.returncode}；{(p3.stderr or '')[:150]}")
+                else:
+                    _d3 = json.loads((p3.stdout or "[]").strip().splitlines()[-1]
+                                     if p3.stdout.strip() else "[]")
+                    if not _d3:
+                        r.ok("U4 回收用例有输出", False, "解析结果为空")
+                    else:
+                        for _it in _d3:
+                            r.ok(f"U4 {_it['name']}", bool(_it.get("ok")),
+                                 _it.get("detail", "")[:150])
             except Exception as e:
                 r.ok("U4 上传会话回收行为", False, f"{type(e).__name__}: {e}"[:140])
     finally:

@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.20
+# 浏览器插件 (Browser Plugin) 2.1.21
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -470,6 +470,37 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.21（2026-09-15）
+
+**按 CodeRabbit 第十七轮审查修复 6 项**（含 1 个"假成功"+ 3 处测试可信度）：
+
+- 🔴 **链路测试会假报"正常"**：收到服务端 `PING` 后，原来的代码**无论
+  PONG 有没有发出去**都会调 `state.probe()` —— 而收到 ping 只说明"我们能收"，
+  `sendRaw` 返回 `false` 说明 socket 只能收不能发，链路其实是不通的。
+  结果是弹窗显示"链路正常"，实际连命令都发不出去。
+  → 只有 `sendRaw(...)` 返回真时才认定往返成立。新增守卫 **C16k**。
+- **桩与真实 Playwright 不一致**：`regression/stubs` 里的 `mouse.down/up`
+  只收 `button`，而 `HeadlessBackend.mouse_click` 会传 `click_count` ——
+  桩直接 `TypeError`，**双击那条路在测试里根本走不到**。
+  → 补上 `click_count` 参数。
+
+**测试可信度 3 项**（都是"检查本身不够硬"）：
+- **U4 / C8b 不判退出码**：脚本崩了却恰好留下能解析的输出时，逐项断言会
+  "少报"（少报 = 漏检），甚至一项都不报。→ 都改成**先判 `returncode`**，
+  并且要求结果完整（U4 非空、C8b 覆盖到必要场景）。
+- **`cred_mode.mjs` 是"注入式"验证**：它把 `isHttps` 作为变量**直接喂进**
+  凭据表达式 —— 那样只验证了三元表达式本身，**生产里 `isHttps` 是怎么算出来的
+  完全没被覆盖**。把 `url.startsWith("https://")` 改成恒真（HTTP 也带 Cookie）
+  照样通过。→ 改成**从 capabilities.js 抽出真实的 `isHttps` 定义行**，
+  用真实 URL 驱动执行，并加大小写不敏感与本机 HTTP 两个用例。
+  反向验证：`isHttps = true` → 立即 FAIL。
+- **`upload_sweep.mjs` 只做"源码里有没有 setInterval"的间接检查** →
+  改成用**可控定时器**（替掉 `setInterval` 与 `Date.now`）真跑回收：
+  推进时钟到 10 分钟空闲后，被遗弃的会话必须收块失败、
+  而"一直有活动"的慢速会话必须活着。另加"清理器随会话启停"一条。
+  反向验证：判据改回 `created` → 慢速会话那条 FAIL；删掉 sweeper →
+  遗弃会话那条 FAIL。
 
 ### v2.1.20（2026-09-15）
 

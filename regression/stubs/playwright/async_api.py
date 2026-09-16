@@ -179,10 +179,13 @@ class FakePage:
             async def move(self, x, y, steps=1):
                 page._alive()
 
-            async def down(self, button="left"):
+            # ⚠️ 必须和真实 Playwright 一样收 click_count：
+            #    HeadlessBackend.mouse_click 会传它，桩不收就会 TypeError，
+            #    把"双击"这条路完全挡住。
+            async def down(self, button="left", click_count=1):
                 page._alive()
 
-            async def up(self, button="left"):
+            async def up(self, button="left", click_count=1):
                 page._alive()
 
             async def wheel(self, dx, dy):

@@ -327,13 +327,17 @@ async function handleMessage(raw) {
       console.log("[KiraBridge] 服务端协议版本", msg.protocol);
       break;
 
-    case MSG.PING:
-      sendRaw({ type: MSG.PONG, ts: Date.now() });
-      // 若 popup 正在做链路验证，这一次真实往返就是证据
-      if (typeof state.probe === "function") {
+    case MSG.PING: {
+      // ⚠️ 只有 **PONG 真的发出去了**，这次往返才算成立。
+      //    收到 ping 说明"我们能收"，但发不出去 = socket 只能收不能发，
+      //    链路其实是不通的。原来无论 sendRaw 成功与否都调 state.probe()
+      //    → 弹窗显示"链路正常"，而实际连命令都发不出去（假成功）。
+      const pongSent = sendRaw({ type: MSG.PONG, ts: Date.now() });
+      if (pongSent && typeof state.probe === "function") {
         try { state.probe(); } catch (_) {}
       }
       break;
+    }
 
     case MSG.CMD:
       await runCommand(msg.id, msg.name, msg.params || {});

@@ -336,6 +336,19 @@ def run(r) -> None:
     r.ok("C15 MV3 里不用 DOM API（FileReader）",
          "FileReader" not in _cap_code,
          "Service Worker 里没有 FileReader，用了就是 ReferenceError")
+    # ⚠️ 收到 PING 后**只有 PONG 真的发出去了**才算链路通。
+    #    收到 ping 只说明"能收"；sendRaw 返回 false 说明 socket 只能收不能发，
+    #    链路其实不通。原来无论发没发成都调 state.probe() →
+    #    弹窗显示"链路正常"，实际命令发不出去（假成功）。
+    _ping = re.search(r'case MSG\.PING:([\s\S]{0,600}?)break;', bg)
+    _ping_seg = _ping.group(1) if _ping else ""
+    r.ok("C16k 仅有 PONG 发送成功时才报告链路正常",
+         bool(_ping_seg)
+         and re.search(r'(?:const|let)\s+\w*(?:pong|sent)\w*\s*=\s*sendRaw\(', _ping_seg, re.I)
+         is not None
+         and "state.probe" in _ping_seg,
+         "PING 分支必须用 sendRaw 的返回值来把关 state.probe()")
+
     # ⚠️ popup 里**每一个** chrome.runtime.sendMessage 都必须被 try/catch 兜住。
     #    MV3 的 service worker 被回收/未唤醒时它会 reject；不接住的话
     #    弹窗会卡在"连接中…/测试中…"不回来，而且每 3 秒的轮询会不断产生

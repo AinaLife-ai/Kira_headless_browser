@@ -245,9 +245,26 @@ def run(r) -> None:
             _cp = _subprocess.run(["node", str(_cred_js)], cwd=str(JS_DIR),
                                   capture_output=True, text=True, env=_env,
                                   timeout=60)
-            _data = json.loads((_cp.stdout or "[]").strip().splitlines()[-1])
-            for _it in _data:
-                r.ok(f"C8b {_it['name']}", bool(_it.get("ok")), _it.get("detail", ""))
+            # ⚠️ 必须判退出码 + 结果完整性：脚本崩了/少打一项时，
+            #    逐项断言会"少报"（少报 = 漏检），甚至一项都不报。
+            if _cp.returncode != 0:
+                r.ok("C8b 凭据探测脚本正常退出", False,
+                     f"exit={_cp.returncode}；{(_cp.stderr or '')[:150]}")
+            else:
+                _data = json.loads((_cp.stdout or "[]").strip().splitlines()[-1])
+                # 至少要覆盖：1 条 isHttps 来源 + HTTPS/HTTP 两种协议
+                # （现在还会多测大小写不敏感与本机 HTTP）
+                _names = [str(x.get("name", "")) for x in _data]
+                _need = ("凭据表达式引用了由 URL 推导出的 isHttps",
+                         "HTTPS 下载带凭据", "HTTP 下载不带凭据")
+                _miss = [n for n in _need if n not in _names]
+                if _miss:
+                    r.ok("C8b 凭据探测覆盖必要场景", False,
+                         f"缺少={_miss}；实际={_names}")
+                else:
+                    for _it in _data:
+                        r.ok(f"C8b {_it['name']}", bool(_it.get("ok")),
+                             _it.get("detail", ""))
         except Exception as e:
             r.ok("C8b 凭据模式行为验证", False, f"{type(e).__name__}: {e}"[:140])
 
