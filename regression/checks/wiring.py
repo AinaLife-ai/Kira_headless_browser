@@ -165,6 +165,29 @@ def _scan_naked_state(src_text: str):
     return sorted(set(found))
 
 
+def _write_commands_from_protocol() -> set:
+    """从 protocol.py 的 `WRITE_COMMANDS` 取真实成员。
+
+    ⚠️ 这是"权威定义"：插件侧的 `WRITE_CMDS` 已经从它派生。
+    取真实值（而不是正则扫字面量）才能覆盖"派生形式"，
+    也才能验证"protocol 加了新命令时确实会自动生效"。
+    """
+    # ⚠️ 不要在这里写 `src = src("protocol.py")` —— 那会在本函数内
+    #    遮蔽模块级导入的 `src`，之后再调 `src(...)` 就 UnboundLocalError。
+    _proto_src = src("protocol.py")
+    m = re.search(r'WRITE_COMMANDS\s*=\s*frozenset\(\{(.*?)\}\)', _proto_src, re.S)
+    if not m:
+        return set()
+    body = m.group(1)
+    # 成员写成 CMD_XXX 常量 → 去常量表里解析真实字符串值
+    consts = dict(re.findall(r'^(CMD_[A-Z_]+)\s*=\s*"([a-z_]+)"', _proto_src, re.M))
+    out = set()
+    for name in re.findall(r'\b(CMD_[A-Z_]+)\b', body):
+        if name in consts:
+            out.add(consts[name])
+    return out
+
+
 def run(r) -> None:
     main = src("main.py")
     eb = src("backends/extension_backend.py")
@@ -216,8 +239,16 @@ def run(r) -> None:
     # 确认覆盖的命令集合两端要一致
     bg_set = re.search(r'PRIVILEGED_COMMANDS = new Set\(\[([^\]]+)\]', bg, re.S)
     bg_cmds = set(re.findall(r'"([a-z_]+)"', bg_set.group(1))) if bg_set else set()
-    eb_set = re.search(r'WRITE_CMDS = \{([^}]+)\}', eb, re.S)
-    eb_cmds = set(re.findall(r'"([a-z_]+)"', eb_set.group(1))) if eb_set else set()
+    # ⚠️ Python 侧现在是**从 protocol 派生**（`WRITE_CMDS = set(...)`），
+    #    不再是字面量集合。判据要认两种形态：
+    #      · 派生形式 → 去 protocol.py 里取 **WRITE_COMMANDS 的真实成员**
+    #        （那才是权威定义，而且是"加了新命令自动纳入"的保证）
+    #      · 字面量形式 → 直接解析（兼容旧写法）
+    eb_set = re.search(r'WRITE_CMDS = \{(.*?)\}', eb, re.S)
+    if eb_set:
+        eb_cmds = set(re.findall(r'"([a-z_]+)"', eb_set.group(1)))
+    else:
+        eb_cmds = _write_commands_from_protocol()
     only_bg = sorted(bg_cmds - eb_cmds)
     only_eb = sorted(eb_cmds - bg_cmds)
     r.ok("B2 两端「需要确认的命令」集合一致",
@@ -365,12 +396,14 @@ def run(r) -> None:
     #    切标签页 / 关标签页 / 模拟鼠标）。
     #    历史上已经漏过一次（activate_tab/close_tab/mouse_move），
     #    所以这里把它变成机器可判定的约束。
-    _py_writes = set(re.findall(
-        r'WRITE_CMDS\s*=\s*\{([^}]*)\}', src("backends/extension_backend.py"),
-        re.S)[0].split('"')) if re.search(
-        r'WRITE_CMDS\s*=\s*\{', src("backends/extension_backend.py")) else set()
-    _py_writes = {w for w in _py_writes if w and w.strip().isidentifier()
-                  or (w and w.replace("_", "").isalnum())}
+    # ⚠️ 与 B2 用**同一个解析入口**：Python 侧现在是"从 protocol 派生"，
+    #    不再是字面量集合。判据要认两种形态，否则一改定义方式就误报。
+    _eb_src = src("backends/extension_backend.py")
+    _lit = re.search(r'WRITE_CMDS\s*=\s*\{(.*?)\}', _eb_src, re.S)
+    if _lit:
+        _py_writes = set(re.findall(r'"([a-z_]+)"', _lit.group(1)))
+    else:
+        _py_writes = _write_commands_from_protocol()
     _js_writes = set(re.findall(
         r'"([a-z_]+)"', re.search(
             r'PRIVILEGED_COMMANDS\s*=\s*new Set\(\[([^\]]*)\]',

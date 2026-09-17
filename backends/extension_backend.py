@@ -15,6 +15,7 @@ from typing import Optional
 
 from core.logging_manager import get_logger
 
+from .. import protocol as _P_MOD
 from .base import OpResult
 from .router import Backend
 
@@ -92,15 +93,15 @@ class ExtensionBackend(Backend):
     CONFIRM_ONLY_CMDS = {"cookie_get"}
 
     #: 需要用户确认的命令（与扩展侧 shared.js 的 PRIVILEGED_COMMANDS 对齐）
-    WRITE_CMDS = {
-        "navigate", "click", "type", "scroll",
-        "exec_js", "upload", "download", "cookie_set",
-        "go_back", "refresh", "hover",
-        "key_press", "key_down", "key_up",
-        "mouse_click", "mouse_down", "mouse_up", "mouse_wheel", "mouse_drag",
-        # 与扩展侧 shared.js 的 PRIVILEGED_COMMANDS 保持**逐字一致**
-        "activate_tab", "close_tab", "mouse_move",
-    }
+    # ⚠️ **从 protocol 派生**，不要在这里再抄一份字面量 ——
+    #    这里原本抄了一份，而 protocol.py 里早就有权威的
+    #    `WRITE_COMMANDS`（用 CMD_* 常量拼的）。两份定义迟早漂移：
+    #    protocol 加了新写命令，这份字面量不会自动跟上 →
+    #    那条命令**静默绕过确认框**。
+    #    派生之后"新增命令自动纳入确认"，不再需要人工同步。
+    #    （用类定义处的模块级导入 `_P_MOD`，不用构造函数的 `self._P` ——
+    #      类属性在类定义时求值，那时还没有实例。）
+    WRITE_CMDS = set(_P_MOD.WRITE_COMMANDS)
 
     async def _send(self, cmd: str, params: Optional[dict] = None, timeout=None,
                     cmd_id: str = None) -> OpResult:

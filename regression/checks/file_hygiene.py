@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..harness import EXT_DIR, PLUGIN_DIR, ext_manifest, section, src
+from ..harness import EXT_DIR, PLUGIN_DIR, ext_manifest, section, src, src_safe
 
 TITLE = "文件冗余/缺失清点"
 
@@ -289,9 +289,26 @@ def run(r) -> None:
     # ⚠️ 守卫：D 段（"不该提交的东西"）**必须**统一用 commit_files。
     #    这个 bug 在 D1/D2/D3/D4 上各漏过一次（改了这条忘了那条），
     #    所以在这里写一条**自检**：D 段的判据里不允许再出现裸 `files`。
-    _dsec = src("regression/checks/file_hygiene.py")
-    _dd = _dsec[_dsec.index("section(\"D. 不该出现在提交里的东西\")"):
-                _dsec.index("section(\"E. .gitignore\")")]
+    #    ⚠️ 用 src_safe（不是 src）+ 先判标记存在：这两个标记任一缺失时
+    #    `index()` 会抛 ValueError，**整个检查组就此中断** ——
+    #    那正是守卫自己想要防的那类"一处出错、后面全不执行"。
+    #    标记找不到就跳过本守卫并**明确报告跳过**（不静默通过）。
+    #
+    #    ⚠️ 判"标记在不在"时必须**用正则找真正的 `section(...)` 调用**，
+    #    不能写 `'section("D. ...")' in 源码` —— 那个字符串字面量
+    #    就写在守卫**自己的代码**里，永远为真（**自指**）：
+    #    即使真正的 section 调用被改名删掉，守卫也照样"找得到"。
+    _dsec = src_safe("regression/checks/file_hygiene.py")
+    _find = lambda _mk: re.search(
+        r'^\s*section\(\s*["\']' + re.escape(_mk), _dsec or "", re.M)
+    _m_d = _find("D. 不该出现在提交里的东西")
+    _m_e = _find("E. .gitignore")
+    if not _dsec or not _m_d or not _m_e:
+        r.ok("D-guard 能定位到 D/E 段（否则守卫无法生效）", False,
+             "读不到源文件，或 D/E 段标记被改名/删除了")
+        _dd = ""
+    else:
+        _dd = _dsec[_m_d.start():_m_e.start()]
     #    判据要精确：`commit_files = [f for f in files if not _is_ignored(...)]`
     #    是**正确用法**（那正是"从裸清单算出提交清单"的降级路径），
     #    只有"**直接用** files 做断言"才算违规。
