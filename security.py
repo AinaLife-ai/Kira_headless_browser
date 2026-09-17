@@ -154,6 +154,20 @@ def _ip_is_internal(ip) -> bool:
     except (ValueError, TypeError):
         pass
 
+    # ⚠️ `100.64.0.0/10`（RFC 6598 载体级 NAT / CGNAT）**不在** Python 的
+    #    `is_private` 里（实测 3.12 返回 False），但它可以指向内部服务 ——
+    #    最典型的是**阿里云的实例元数据端点 `100.100.100.200`**：
+    #    读到它就能拿走这台机器的 RAM 角色临时凭据。
+    #    实测（补之前）：把「允许访问本机/内网」**关掉也拦不住**它 ——
+    #    开关承诺"拦住本机/内网/元数据"，实际漏了这一整段。
+    #    （和 198.18 的区别：那段是**代理的** fake-IP，指向的是代理而非内网，
+    #      所以排除；这一段在部署环境里就是真的内网/元数据地址，所以要拦。）
+    try:
+        if ip in ipaddress.ip_network("100.64.0.0/10"):
+            return True
+    except (ValueError, TypeError):
+        pass
+
     if (ip.is_loopback or ip.is_unspecified or ip.is_private
             or ip.is_link_local or ip.is_reserved or ip.is_multicast):
         return True

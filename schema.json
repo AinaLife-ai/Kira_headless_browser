@@ -434,11 +434,11 @@
     "name": "Allow Local / Intranet Access",
     "type": "switch",
     "default": true,
-    "hint": "ON (default): the AI may open localhost, 127.0.0.1 and intranet addresses - including your own dev servers (e.g. http://localhost:3000) AND KiraAI's own web panel. This plugin exists to let the AI operate a browser for you, so local pages are normal work targets, not an attack surface. OFF: block loopback / private / link-local entirely (including the cloud metadata endpoint 169.254.169.254). Worth knowing before turning it OFF: if you keep it ON while the panel has no auth, the AI could open the panel and change plugin settings.",
+    "hint": "ON (default): the AI may open localhost, 127.0.0.1 and intranet addresses - including your own dev servers (e.g. http://localhost:3000) AND KiraAI's own web panel. This plugin exists to let the AI operate a browser for you, so local pages are normal work targets, not an attack surface. OFF: block loopback / private / link-local / CGNAT entirely - that covers the cloud metadata endpoints used by AWS/Azure/GCP (169.254.169.254) and Alibaba Cloud (100.100.100.200), and it also resolves hostnames to see whether they land on an intranet address. Note: in a fake-IP proxy setup hostnames resolve to the proxy's placeholder range, so that last step can't tell - in that setup the browser goes through the proxy too, so it can't reach the intranet anyway. Worth knowing before turning it OFF: if you keep it ON while the panel has no auth, the AI could open the panel and change plugin settings.",
     "locales": {
       "zh": {
         "name": "允许访问本机 / 内网",
-        "hint": "开启（默认）：AI 可以打开 localhost / 127.0.0.1 / 内网地址 -- 包括你自己的本地开发服务器（如 http://localhost:3000）以及 KiraAI 自身的面板。本插件的定位就是「让 AI 帮你操作浏览器」，本机页面是正常的工作目标，不是攻击面，所以默认放开。关闭：本机 / 内网 / 链路本地一律拒绝（含云厂商元数据端点 169.254.169.254）。关闭前值得知道：如果保持开启、而面板又没有认证，AI 理论上可以打开面板并修改插件配置。"
+        "hint": "开启（默认）：AI 可以打开 localhost / 127.0.0.1 / 内网地址 -- 包括你自己的本地开发服务器（如 http://localhost:3000）以及 KiraAI 自身的面板。本插件的定位就是「让 AI 帮你操作浏览器」，本机页面是正常的工作目标，不是攻击面，所以默认放开。关闭：本机 / 内网 / 链路本地 / CGNAT 一律拒绝 —— 覆盖 AWS/Azure/GCP 的元数据端点 169.254.169.254 与**阿里云的 100.100.100.200**；同时会把主机名真解析一次，看它是不是落到内网地址。注意：fake-IP 代理环境里主机名会解析到代理的占位段，这一步判不出来（但那种环境下浏览器也走代理，实际到不了内网）。关闭前值得知道：如果保持开启、而面板又没有认证，AI 理论上可以打开面板并修改插件配置。"
       }
     }
   },

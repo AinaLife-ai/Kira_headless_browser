@@ -552,6 +552,60 @@ def run(r) -> None:
          not _leak,
          f"仍放过={_leak or '无'}（这才是「拦住本机」的正确开关）")
 
+    # ── C6m 关掉开关后，"本机/内网/元数据"必须**整类**拦住 ─────────
+    #  ⚠️ 补一段**穷举特殊网段**的判据。之前只有上面那 7 种等价写法，
+    #    覆盖不到"整段地址范围没被当成内网"这种漏 —— 实测那时
+    #    `100.64.0.0/10`（CGNAT，**阿里云元数据 `100.100.100.200` 就在里面**）
+    #    把开关**关掉也照样放行**：Python 的 `ipaddress` 不把这段算 private，
+    #    代码里也从没提过 CGNAT。开关承诺"拦住本机/内网/元数据"，实际漏了一整段。
+    #    值 = 关掉 local_access 后**是否应当拒绝**。
+    _ranges = [
+        ("回环 127/8", "127.0.0.1", True),
+        ("未指定 0/8", "0.0.0.0", True),
+        ("私有 10/8", "10.1.2.3", True),
+        ("私有 172.16/12", "172.16.0.1", True),
+        ("私有 192.168/16", "192.168.1.1", True),
+        ("链路本地 169.254/16（AWS/Azure/GCP 元数据）",
+         "169.254.169.254", True),
+        ("CGNAT 100.64/10（**阿里云元数据**）", "100.100.100.200", True),
+        ("CGNAT 段起点", "100.64.0.1", True),
+        ("IANA 保留 192.0.0/24", "192.0.0.1", True),
+        ("保留 240/4", "240.0.0.1", True),
+        ("IPv6 回环", "[::1]", True),
+        ("IPv6 链路本地", "[fe80::1]", True),
+        ("IPv6 唯一本地 fc00::/7", "[fd00::1]", True),
+        # ↓ 这两条是**有意放行**的，写进来是为了防止"一刀切加严"误伤
+        ("代理 fake-IP 占位段 198.18/15（有意排除）", "198.18.0.1", False),
+        ("CGNAT 段之外 100.128/9", "100.128.0.1", False),
+        ("公网 8.8.8.8", "8.8.8.8", False),
+    ]
+    _missed = []
+    for _label, _ip, _want_block in _ranges:
+        _ok, _ = sec.check_url(f"http://{_ip}/", local_access=False)
+        if (not _ok) != _want_block:
+            _missed.append(f"{_label}（{'漏放' if _want_block else '误拦'}）")
+    r.ok("C6m local_access=False 时特殊网段整类判定正确",
+         not _missed,
+         f"不符={_missed or '无'}（含阿里云元数据 100.100.100.200 / "
+         f"代理 fake-IP 段不误伤）")
+
+    # C6m-self：钉住"**为什么需要**这条特判"的先决条件 ——
+    #  哪天 Python 把 100.64/10 归进 private，这条会红，提示特判可以删了。
+    #  （不用"把特判去掉再跑一遍"那种写法：在套件里没法真删代码，
+    #    硬凑一个"复刻版"就成了重言式，看着在验其实恒真 —— 那种假检查
+    #    不如不要。真删代码的反向验证放在套件外用变异测试做。）
+    import ipaddress as _ipmod
+    _ali = _ipmod.ip_address("100.100.100.200")
+    _generic_catches = (_ali.is_private or _ali.is_loopback or _ali.is_link_local
+                        or _ali.is_reserved or _ali.is_multicast)
+    r.ok("C6m-self 阿里云元数据**只能靠** CGNAT 特判拦住（通用规则兜不住）",
+         (not _generic_catches) and _ali in _ipmod.ip_network("100.64.0.0/10"),
+         "若这条变红：说明 Python 已把 100.64/10 当私有段（或该地址改了）—— "
+         "特判可以删；现在的实现**依赖**这条特判才拦得住")
+    r.ok("C6m-self2 特判确实生效（_ip_is_internal 认这一段）",
+         bool(sec._ip_is_internal(_ali)),
+         "100.100.100.200 必须被判为内网，否则开关关掉也拦不住")
+
     _doc = src_safe("SECURITY_DESIGN.md")
     r.ok("C6l 文档写清了「拦本机要用 local_access，不是黑名单」",
          "local_access" in _doc and "拦不住" in _doc
