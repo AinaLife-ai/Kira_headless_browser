@@ -392,8 +392,6 @@ def run(r) -> None:
     # 真实事故：把 socket 挪进 shared.js 的 state 之后，
     # background.js 里还留着 `socket.onopen = ...` 这种裸引用 ——
     # 严格模式下直接 ReferenceError，**扩展永远连不上**。
-    import re as _re
-    bg_code = _strip_js_noise(bg_bg)
     naked = _scan_naked_state(bg_bg)
     r.ok("G1 没有裸的状态标识符（都走 state.xxx）", not naked,
          f"裸引用={naked or '无'} —— ES 模块严格模式下会 ReferenceError")

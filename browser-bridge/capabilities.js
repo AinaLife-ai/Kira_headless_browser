@@ -152,21 +152,21 @@ async function execJs(params) {
   ].join("\n");
 
   const jsPayload = [{ code: wrapped }];
-  let results;
-  try {
-    results = await chrome.userScripts.execute({
-      target: { tabId: tab.id },
-      js: jsPayload,
-      world: "USER_SCRIPT",
-      injectImmediately: true,
-    });
-  } catch (e) {
-    // 有些版本不支持 world 参数，退回默认 world
-    results = await chrome.userScripts.execute({
-      target: { tabId: tab.id },
-      js: jsPayload,
-    });
-  }
+  // ⚠️ **不要**用"先带 world 试，失败再不带 world 重试"那种 catch-and-retry。
+  //    它在**任何**失败时都会重试 —— 包括"脚本已经开始注入之后才失败"
+  //    （比如用户脚本里第一条 console 就抛错、或注入过程被中断）。
+  //    那会让用户脚本**被执行两次**，副作用重复，且不可撤销。
+  //    这和"页面操作超时不得换后端重试"是同一类危险。
+  //
+  //    是否需要 world 参数，已经在**事前**由 ensureUserScriptWorld()
+  //    探测过了（它内部会判断浏览器是否支持 configureWorld）。
+  //    所以这里直接执行一次，失败就如实往上报。
+  const results = await chrome.userScripts.execute({
+    target: { tabId: tab.id },
+    js: jsPayload,
+    world: "USER_SCRIPT",
+    injectImmediately: true,
+  });
 
   const first = (results && results[0]) || {};
   // ⚠️ CSP 拦截的错误**可能出现在两个地方**，两处都要认：

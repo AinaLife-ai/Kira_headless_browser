@@ -39,7 +39,10 @@ CALLS = {
     "type_text": {"selector": "#x", "text": "hi"},
     "scroll": {"direction": "down"},
     "wait_for": {"selector": "#x"},
-    "screenshot": {"path": "/tmp/_kira_c.png"},
+    # ⚠️ 这两个 path 会被**覆盖**成受管理 tmp 下的文件（见 _collect_*）——
+    #    不要在这里写死 /tmp/xxx：那会落在 TemporaryDirectory 之外，
+    #    每跑一次回归就在系统临时目录里留一份永不清理的残留。
+    "screenshot": {"path": ""},
     "execute_js": {"script": "1"},
     "go_back": {}, "refresh": {}, "hover": {"selector": "#x"},
     "keyboard_type": {"text": "a"},
@@ -54,7 +57,7 @@ CALLS = {
     "cookie_get": {},
     "cookie_set": {"cookies": [{"name": "n", "value": "v", "domain": ".a"}]},
     "upload_file": {"selector": "#f"},
-    "download": {"url": "https://a/f", "path": "/tmp/_kira_dl.bin"},
+    "download": {"url": "https://a/f", "path": ""},
 }
 
 FAKE_TABLE = None   # 延迟构造（需要 protocol 模块）
@@ -202,6 +205,22 @@ def _mk_fake_bridge(P):
     return FakeBridge()
 
 
+def _apply_tmp_paths(kw: dict, method: str, tmp, upfile) -> None:
+    """把所有**会真的落盘**的路径改到受管理的 tmp 下。
+
+    ⚠️ 为什么必须逐个覆盖：假 Playwright 的 `page.screenshot(path=...)`
+    与下载落盘**会真的写文件**。夹具路径写死在 /tmp 里的话，
+    每跑一次回归就留一份残留（而且并发跑会互相覆盖）。
+    放在 TemporaryDirectory 之下才会被自动清理。
+    """
+    if method == "upload_file":
+        kw["file_path"] = str(upfile)
+    elif method == "screenshot":
+        kw["path"] = str(Path(tmp) / "shot.png")
+    elif method == "download":
+        kw["path"] = str(Path(tmp) / "dl.bin")
+
+
 async def _collect_hb(mod, tmp) -> dict[str, set[str]]:
     """每个方法用**全新实例** —— 共用一个会互相污染（前一个改了页面状态）。"""
     out: dict[str, set[str]] = {}
@@ -222,8 +241,7 @@ async def _collect_hb(mod, tmp) -> dict[str, set[str]]:
             await b.close()
             continue
         kw = dict(kwargs)
-        if method == "upload_file":
-            kw["file_path"] = str(upfile)
+        _apply_tmp_paths(kw, method, tmp, upfile)
         try:
             res = await fn(**kw)
             out[method] = (set((res.data or {}).keys())
@@ -265,8 +283,7 @@ async def _collect_eb(mod, P, tmp) -> dict[str, set[str]]:
         if fn is None:
             continue
         kw = dict(kwargs)
-        if method == "upload_file":
-            kw["file_path"] = str(upfile)
+        _apply_tmp_paths(kw, method, tmp, upfile)
         try:
             res = await fn(**kw)
             out[method] = (set((res.data or {}).keys())
@@ -279,7 +296,6 @@ async def _collect_eb(mod, P, tmp) -> dict[str, set[str]]:
 
 def run(r) -> None:
     _load_pkg()
-    base = sys.modules["kirabrowser_contract.backends.base"]
     hbmod = sys.modules["kirabrowser_contract.backends.headless_backend"]
     ebmod = sys.modules["kirabrowser_contract.backends.extension_backend"]
     P = sys.modules["kirabrowser_contract.protocol"]

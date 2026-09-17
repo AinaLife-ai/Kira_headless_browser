@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 
-from ..harness import section, src, src_safe
+from ..harness import section, src_safe
 
 TITLE = "「结果不确定」链路（超时不得重复执行）"
 
@@ -127,16 +127,33 @@ def run(r) -> None:
     except SyntaxError:
         _call = None
 
+    def _is_getattr_test(test, field) -> bool:
+        """判断条件是不是 `getattr(<某对象>, "field", ...)`。
+
+        ⚠️ 不能用 `ast.dump(test)` 里找 `'field'` 字符串那种判据 ——
+        那样**任何**出现（比较的另一侧、别的调用的参数、甚至变量名里的片段）
+        都算命中，可能把完全无关的 if 当成目标分支。
+        这里只认"条件表达式里**确实有一个** getattr 调用，
+        且它的第二个参数就是该字段名"。
+        """
+        if not isinstance(test, ast.Call):
+            return False
+        if not (isinstance(test.func, ast.Name) and test.func.id == "getattr"):
+            return False
+        if len(test.args) < 2:
+            return False
+        key = test.args[1]
+        return isinstance(key, ast.Constant) and key.value == field
+
     def _branches(fn, field):
-        """返回 fn 里判断 getattr(<x>, 'field', ...) 的分支列表。"""
+        """返回 fn 里判断 `getattr(<x>, 'field', ...)` 的分支列表。"""
         out = []
         if fn is None:
             return out
         for node in ast.walk(fn):
             if not isinstance(node, ast.If):
                 continue
-            src_txt = ast.dump(node.test)
-            if f"'{field}'" not in src_txt and f'"{field}"' not in src_txt:
+            if not _is_getattr_test(node.test, field):
                 continue
             # 分支体里是否**直接 return**
             has_ret = any(isinstance(s, ast.Return) for s in node.body)

@@ -11,14 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import json
-import stat as _stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from ..harness import HERE, PLUGIN_DIR, install_stubs, section
+from ..harness import HERE, PLUGIN_DIR, install_stubs
 
 TITLE = "扩展桥端到端（真实 WebSocket）"
 

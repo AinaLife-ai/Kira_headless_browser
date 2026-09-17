@@ -17,9 +17,8 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
-from ..harness import PLUGIN_DIR, section, src, src_safe
+from ..harness import PLUGIN_DIR, section, src_safe
 
 TITLE = "KiraAI 规范符合性（交付形态）"
 
@@ -140,7 +139,7 @@ def run(r) -> None:
     r.ok("E1 扩展连接的 WS 路径 == 框架注册的路径",
          ext_path == want, f"扩展={ext_path!r} 期望={want!r}")
     r.ok("E2 插件汇报的 ws_path 与之一致",
-         f"/ws/plugin/{{PLUGIN_ID}}/bridge" in main or want in main)
+         f"/ws/plugin/{{PLUGIN_ID}}/bridge" in main or want in main)  # noqa: F541  （要的就是字面量 {PLUGIN_ID}）
 
     section("F. 随包资源")
 

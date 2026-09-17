@@ -18,7 +18,6 @@ v2.1.0 重写双后端架构时，**整段丢掉了三样东西**：
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess

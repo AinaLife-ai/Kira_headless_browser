@@ -10,11 +10,9 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
-from pathlib import Path
 
-from ..harness import HERE, JS_DIR, PLUGIN_DIR, section
+from ..harness import JS_DIR, PLUGIN_DIR
 
 TITLE = "扩展点击行为（真实 DOM）"
 

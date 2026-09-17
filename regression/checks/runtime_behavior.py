@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..harness import PLUGIN_DIR, STUBS_DIR, install_stubs, section, src
+from ..harness import PLUGIN_DIR, install_stubs, src
 
 TITLE = "运行时行为（生命周期 / 路由 / 内存）"
 

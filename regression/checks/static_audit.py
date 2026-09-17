@@ -713,74 +713,14 @@ def run(r) -> None:
          f"夹具扫描={sorted(_scan_undeclared(_fx_ok))}")
 
     _js = re.search(r'<script>([\s\S]*)</script>', web)
-    _code = _js.group(1) if _js else ""
-    _code = re.sub(r'/\*[\s\S]*?\*/', '', _code)
-    _code = re.sub(r'(?m)//[^\n]*$', '', _code)
-    # ⚠️ 模板串不能**整体**删掉：`${foo}` 里的标识符是**真实求值**的，
-    #    删了就会漏判（C16e 假绿，运行时却 ReferenceError）。
-    #    做法：先把 `${...}` 里的内容抽出来保留，再删掉其余模板文本。
-    _code = re.sub(r'`(?:[^`\\]|\\.)*`', _keep_interp_c16e, _code)
-    _code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', _code)
-    _code = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", _code)
-    _declared = set()
-    for m in re.finditer(
-            r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)', _code):
-        _declared.add(m.group(1))
-    for m in re.finditer(r'\bfunction\s+([A-Za-z_$][\w$]*)', _code):
-        _declared.add(m.group(1))
-    # 函数参数也当已声明
-    for m in re.finditer(r'\bfunction\s*[\w$]*\s*\(([^)]*)\)', _code):
-        for arg in m.group(1).split(","):
-            arg = arg.strip()
-            if arg:
-                _declared.add(arg.split("=")[0].strip())
-    # catch 参数（`catch (e)`）与箭头函数参数（`(a, b) =>`）也算已声明，
-    # 否则会疯狂误报 `e` / `el` 之类。
-    for m in re.finditer(r'\bcatch\s*\(\s*([A-Za-z_$][\w$]*)', _code):
-        _declared.add(m.group(1))
-    for m in re.finditer(r'\(([^)]*)\)\s*=>', _code):
-        for arg in m.group(1).split(","):
-            arg = arg.strip().split("=")[0].strip()
-            if arg and arg.isidentifier():
-                _declared.add(arg)
-    for m in re.finditer(r'(?<![\w.$])([A-Za-z_$][\w$]*)\s*=>', _code):
-        _declared.add(m.group(1))
-
-    _builtins = {
-        "document", "window", "chrome", "console", "Math", "JSON", "Date",
-        "Array", "Object", "String", "Number", "Boolean", "Promise", "Error",
-        "fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
-        "encodeURIComponent", "decodeURIComponent", "parseInt", "parseFloat",
-        "isNaN", "undefined", "null", "true", "false", "this", "new", "typeof",
-        "typeof", "return", "if", "else", "for", "while", "do", "function",
-        "const", "let", "var", "async", "await", "try", "catch", "finally",
-        "class", "throw", "switch", "case", "break", "continue", "delete",
-        "in", "of", "instanceof", "void", "yield", "static", "get", "set",
-        "navigator", "location", "alert", "confirm", "prompt", "Event",
-        "CustomEvent", "Map", "Set", "Symbol", "RegExp", "Infinity", "NaN",
-        "arguments", "globalThis", "requestAnimationFrame", "btoa", "atob",
-    }
-    # 只看"后面跟 . 或 [ 或 .length"的标识符 —— 这些几乎必然是变量引用，
-    # 而不是对象字面量的键或属性名。
-    _used = {}
-    for m in re.finditer(
-            r'(?<![\w.$])([a-z_$][\w$]*)(?=\s*(?:\.|\[))', _code):
-        nm = m.group(1)
-        if nm in _declared or nm in _builtins:
-            continue
-        _used.setdefault(nm, _code[:m.start()].count("\n") + 1)
-    # 再把"只作为裸标识符出现在条件/实参里"的也带上（如 `!ad.length` 的 ad
-    # 其实已被上面捕获；这里补 `if (ad)` 这类）
-    for m in re.finditer(
-            r'(?<![\w.$])([a-z_$][\w$]*)(?=\s*[)\]}])', _code):
-        nm = m.group(1)
-        if nm in _declared or nm in _builtins or nm in _used:
-            continue
-        # 排除函数参数尾部、以及 `)` 前的关键字
-        if nm in ("return", "typeof", "await", "new", "in", "of", "if",
-                  "for", "while", "catch", "switch"):
-            continue
-        _used.setdefault(nm, _code[:m.start()].count("\n") + 1)
+    _code_raw = _js.group(1) if _js else ""
+    # ⚠️ 直接用 `_scan_undeclared`（上面那个），**不要再内联一份副本** ——
+    #    之前这里把"剥注释/字符串/模板串 + 收集声明 + 排除内置名 + 两种
+    #    引用形态"整套逻辑又写了一遍，和 `_scan_undeclared` 是两份实现。
+    #    两份实现迟早漂移：夹具测的是 `_scan_undeclared`，而真正断言用的
+    #    是这份内联副本 —— **夹具守的东西和检查用的东西不是同一个**，
+    #    等于没守。现在合并成一处，夹具与检查共用同一条判据。
+    _used = _scan_undeclared(_code_raw)
     r.ok("C16e 面板脚本没有未声明的标识符（防漏改变量名）",
          not _used,
          f"疑似未声明={ {k: v for k, v in sorted(_used.items())} or '无' }")

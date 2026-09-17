@@ -30,9 +30,46 @@ dynamic code execution, such as eval and new Function**"。
 """
 from __future__ import annotations
 
+import re
+
 from ..harness import section, src_safe
 
 TITLE = "扩展执行 JS 的两道关口（CSP / 端口）"
+
+def _judge_configure_world(cap_text: str) -> bool:
+    """A1/A3 的判据：**真的调了** `chrome.userScripts.configureWorld(`，
+    且这个调用**早于**首次 `execute`。
+
+    ⚠️ 抽成函数是为了让 C 段的反向自检能**复用同一条判据** ——
+    把变形文本喂进来，看它是否真的变红。否则 C 段只能写"对同一个字符串
+    做替换"那种**重言式**断言（必然成立 = 等于没测）。
+
+    ⚠️ 判据必须盯**调用本身**（`configureWorld(`），不能只看"有个叫
+    ensureUserScriptWorld 的函数"：调用被删掉、只留一个空壳函数名时，
+    只看函数名的判据照样通过 —— 而那时 CSP 根本没被放开，
+    执行 JS 仍然静默不可用。（C1 反向自检正是因此才发现这条的。）
+    """
+    #: 真正的调用点：`configureWorld(` 前面是 `.` 或空格，后面紧跟左括号
+    if not re.search(r'configureWorld\s*\(', cap_text):
+        return False
+    if "userScripts.execute" not in cap_text:
+        return False
+    return cap_text.index("configureWorld(") < \
+        cap_text.rindex("userScripts.execute")
+
+
+def _judge_unsafe_eval(cap_text: str) -> bool:
+    """A2 的判据：CSP 里放行**独立的** `'unsafe-eval'`。
+
+    只带引号的独立关键字才算 —— `'wasm-unsafe-eval'` 里也含 `unsafe-eval`
+    这一串，用 `"unsafe-eval" in text` 会被它兜住（假通过）。
+    """
+    return "'unsafe-eval'" in cap_text
+
+
+def _judge_port_guard(proto_text: str) -> bool:
+    """B1 的判据：buildWsUrl 里有明确的端口值域校验。"""
+    return "端口无效" in proto_text
 
 
 def run(r) -> None:
@@ -42,7 +79,7 @@ def run(r) -> None:
     proto = src_safe("browser-bridge/protocol.js")
 
     r.ok("A1 调了 userScripts.configureWorld",
-         "configureWorld" in cap,
+         _judge_configure_world(cap) and re.search(r'configureWorld\s*\(', cap) is not None,
          "不调它 → eval/new Function 被默认 CSP 挡掉 → 执行 JS 静默不可用")
     # ⚠️ 判据必须**精确到独立关键字** ——
     #    `'wasm-unsafe-eval'` 里也含 `unsafe-eval` 这一串，
@@ -50,7 +87,7 @@ def run(r) -> None:
     #    也照样能过（被 wasm 那个关键字兜住了）。
     #    必须匹配**带引号的独立关键字** `'unsafe-eval'`。
     r.ok("A2 CSP 里放行了独立的 'unsafe-eval'（不是被 wasm 关键字兜住）",
-         "'unsafe-eval'" in cap,
+         _judge_unsafe_eval(cap),
          "execJs 的包装器正是用 eval / new Function 跑的；"
          "只放行 wasm-unsafe-eval 是不够的")
     # ⚠️ 两个标记**都要先判存在**再 index/rindex ——
@@ -87,7 +124,7 @@ def run(r) -> None:
     section("B. 端口值域校验")
 
     r.ok("B1 buildWsUrl 校验了端口范围",
-         "端口无效" in proto,
+         _judge_port_guard(proto),
          "否则 -1/70000/abc 会拼出非法 URL，报错只说 Invalid URL")
     # ⚠️ 同样两个标记都先判存在（与 A3 保持一致）——
     #    写成 `a < b if (x in s and y in s) else False` 虽然不抛错，
@@ -104,27 +141,28 @@ def run(r) -> None:
 
     section("C. 反向：关口被拆掉要能被发现")
 
-    # ① 把 configureWorld 整段删掉 —— A1/A3 必须报红
+    # ① 把 configureWorld 整段删掉 —— 复用 A1/A3 的**同一条判据**看它变不变红。
+    #    ⚠️ 不要写 `"configureWorld" not in stripped and "configureWorld" in cap`
+    #       —— 那是对同一字符串做替换，前半必然成立（**重言式**），等于没测。
     stripped = cap.replace("configureWorld", "REMOVED_CONFIG_WORLD")
     r.ok("C1 删掉 configureWorld 后本检查能发现",
-         "configureWorld" not in stripped and "configureWorld" in cap,
-         "判据本身有效（不是恒真断言）")
+         _judge_configure_world(stripped) is False
+         and _judge_configure_world(cap) is True,
+         "在真源码上 True、在变形文本上 False → 判据有效")
 
     # ② CSP 里把 unsafe-eval 去掉 —— 判据（A2）必须能发现。
     #    ⚠️ 不能写成 `"unsafe-eval" not in no_eval and "unsafe-eval" in cap`
     #       —— 对同一个字符串做替换，前半必然成立；那是**重言式**，恒为真，
     #       等于没测。要真正把 A2 的判据跑在变形文本上。
     no_eval = cap.replace("'unsafe-eval'", "'self'")
-
-    def _a2_judge(text: str) -> bool:
-        # 与 A2 同一条判据（精确到带引号的独立关键字）
-        return "'unsafe-eval'" in text
-
     r.ok("C2 去掉 unsafe-eval 后本检查能发现",
-         _a2_judge(no_eval) is False and _a2_judge(cap) is True,
+         _judge_unsafe_eval(no_eval) is False
+         and _judge_unsafe_eval(cap) is True,
          "在真源码上 True、在变形文本上 False → 判据有效")
 
-    # ③ 端口校验删掉 —— B1 会红
+    # ③ 端口校验删掉 —— 复用 B1 的**同一条判据**
     no_port = proto.replace("端口无效", "REMOVED")
     r.ok("C3 删掉端口校验后本检查能发现",
-         "端口无效" not in no_port and "端口无效" in proto)
+         _judge_port_guard(no_port) is False
+         and _judge_port_guard(proto) is True,
+         "在真源码上 True、在变形文本上 False → 判据有效")

@@ -16,7 +16,6 @@ bot 想"看到"页面，只能靠 VLM 把图转成描述。
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -24,7 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ..harness import PLUGIN_DIR, section, src, src_safe
+from ..harness import PLUGIN_DIR, section, src_safe
 
 TITLE = "截图 VLM 描述（bot 看图）"
 
@@ -275,6 +274,13 @@ def run(r) -> None:
         env["KIRA_FW_DIR"] = fw_dir
         p = subprocess.run([sys.executable, script], capture_output=True,
                            text=True, env=env, timeout=180)
+        # ⚠️ **先看退出码**：脚本可能已经打印了 RESULT，但在**收尾阶段**
+        #    （atexit 的临时目录清理、解释器关停）出错而非零退出。
+        #    那种情况下结果不可信 —— 只看输出会把"跑挂了"当成"跑通了"。
+        if p.returncode != 0:
+            r.ok("B0 VLM 行为探针正常退出", False,
+                 f"exit={p.returncode}；{(p.stderr or '')[-220:]}")
+            return
         line = next((ln for ln in (p.stdout or "").splitlines()
                      if ln.startswith("RESULT:")), "")
         if not line:
