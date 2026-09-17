@@ -146,3 +146,11 @@ def run(r) -> None:
 - **端到端用的是模拟扩展**：`bridge_e2e` 里对面是一个按协议实现的 Node 客户端，
   传输层是真的，但"点击有没有真的点到按钮"这类要真浏览器才能确认
   （`content_dom` 用 jsdom 补上了 DOM 层面的验证）。
+- **上传只验到 jsdom 层面，没验真浏览器**：`upload_stream.mjs` /
+  `upload_sweep.mjs` / `upload_detach.mjs` 都在 jsdom 里构造
+  `DataTransfer` + `File` 再塞给 `input[type=file]` 并**逐字节比对**，
+  这能证明"分块拼装、顺序校验、上限、会话回收"这些逻辑正确；
+  **但不能证明真实 Chrome / Edge 会接受这个合成 FileList** ——
+  真浏览器的 `input.files` 是否可写、`change` 事件是否照常触发、
+  部分站点（React 受控组件等）会不会忽略合成事件，都只有真机能确认。
+  真机验证方式：用扩展在真实页面上跑一次 `browser_interact(action="upload")`。

@@ -35,7 +35,7 @@ from typing import Optional
 from core.plugin import BasePlugin, Priority, PageMenu, PluginPage, on, register
 from core.logging_manager import get_logger
 from core.provider import LLMRequest
-from core.chat.message_elements import File, Image, Text
+from core.chat.message_elements import File, Image
 from core.chat.message_utils import MessageChain, KiraMessageBatchEvent
 
 from . import protocol as P
@@ -43,7 +43,7 @@ from . import security
 from . import setup_guide
 from . import vlm
 from .backends import BackendRouter, ExtensionBackend, HeadlessBackend
-from .bridge import BrowserBridge, BridgeError, BridgeNotConnected, BridgeTimeout
+from .bridge import BrowserBridge
 from .tokens import ensure_token, is_current_token, token_expiry
 
 logger = get_logger("browser_merged", "cyan")
@@ -360,13 +360,13 @@ class BrowserPlugin(BasePlugin):
         不做"静默降级"，否则用户会莫名其妙发现自己在看另一个浏览器。
         """
         if self.router is None:
-            return f"❌ 插件尚未初始化完成，请稍后重试。"
+            return "❌ 插件尚未初始化完成，请稍后重试。"
 
         candidates = self.router.candidates()
         if not candidates:
             return f"❌ {self.router.hint()}"
 
-        tried, last_err = [], None
+        tried = []
         for backend in candidates:
             if not backend.available and not await self._probe(backend):
                 tried.append(f"{backend.display}（不可用）")
@@ -400,7 +400,8 @@ class BrowserPlugin(BasePlugin):
                 #    这比没有确认机制更糟，因为它让人以为自己拦住了。
                 logger.info(f"[{method}] 用户拒绝了本次操作，已终止（不再尝试其它后端）")
                 return f"🚫 {res.error}。已按你的决定终止，没有改用其它方式执行。"
-            last_err = res.error
+            # ⚠️ 不要再留 `last_err = res.error` —— 它从来没被读过，
+            #    留着会让人以为"某处会用最后一次错误"，实际只用 tried 列表。
             tried.append(f"{backend.display}: {res.error}")
             logger.warning(f"[{method}] {backend.display} 失败：{res.error}")
 

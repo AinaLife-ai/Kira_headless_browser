@@ -19,7 +19,7 @@ profile，要么用临时 profile，要么用系统浏览器的独立实例 —�
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import List, Optional
 
 from core.logging_manager import get_logger
 
@@ -54,12 +54,14 @@ class BackendRouter:
       ``headless``     —— 只用无头。
     """
 
-    def __init__(self, strategy: str = "auto",
-                 on_fallback: Optional[Callable[[str, str], None]] = None):
+    def __init__(self, strategy: str = "auto"):
+        # ⚠️ 曾经有个 `on_fallback` 参数 + `self._on_fallback` 赋值，
+        #    但**全仓没有任何地方用它**（没人传、也没人读）——
+        #    留着会让人以为"降级时会有回调"，实际不会。
+        #    要么真接上，要么删掉；这里选删掉（没有这个需求）。
         self.strategy = (strategy or "auto").lower()
         self._ext: Optional[Backend] = None
         self._headless: Optional[Backend] = None
-        self._on_fallback = on_fallback
 
     def register(self, backend: Backend) -> None:
         if backend.is_user_browser:

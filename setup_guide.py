@@ -59,7 +59,6 @@ def detect_os() -> str:
 
 def known_chromium_browsers() -> List[Dict[str, str]]:
     """列出这台机器上可能存在的 Chromium 系浏览器（用于给用户点名）。"""
-    home = Path.home()
     osname = detect_os()
     # ⚠️ Windows 的安装位置有多个，且**都不在 PATH 上** ——
     #    只查一个环境变量会漏掉大多数用户：

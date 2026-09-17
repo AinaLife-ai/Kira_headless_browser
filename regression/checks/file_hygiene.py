@@ -271,13 +271,18 @@ def run(r) -> None:
     #    而不是放开。目前白名单里只有 SECURITY_DESIGN.md：
     #    它写的是"哪些看似可疑的行为是有意设计"（给自动审查看的），
     #    放在 README 里会淹没正文，独立成篇才是合适的。
+    # ⚠️ 白名单比的是**仓库相对路径**，不是文件名 ——
+    #    只比 `f.name` 的话，`browser-bridge/README.md`、
+    #    `regression/README.md` 这些**子目录里的** README
+    #    会被当成"根级白名单里的 README.md"直接放行，
+    #    而规则的本意是"插件本体（根目录）只允许这两篇"。
     ALLOWED_MD = {"README.md", "SECURITY_DESIGN.md"}
     # ⚠️ 同样用 **commit_files**（不是裸 files）—— D1~D3 已经改了，
     #    这里漏了的话，一个被 .gitignore 忽略的 .md 会报 D4 失败，
     #    尽管 git 根本提交不了它。（同类问题已经在 D1/D2/D3/D4 上
     #    来回漏过三次：**判「该不该提交」的地方必须统一用同一个清单**。）
     stray_md = [f for f in commit_files
-                if f.suffix == ".md" and f.name not in ALLOWED_MD]
+                if f.suffix == ".md" and str(f) not in ALLOWED_MD]
     r.ok("D4 插件本体除 README/白名单外没有游离的 md",
          not stray_md, f"发现={stray_md or '无'}")
 

@@ -358,6 +358,31 @@ def run(r) -> None:
          _scan(_clean) == [],
          f"夹具扫描结果={_scan(_clean)}（期望 []）")
 
+    # ── F1b 写命令清单：两侧必须逐字一致 ──────────────────────────
+    #  ⚠️ 这两份清单**各自写着"必须与对方保持同步"**，但一直没人验。
+    #    它们决定"开了『写操作需确认』时，哪些命令要弹确认框"：
+    #    一边漏了，那条命令就会**静默放行**（AI 能在用户没批准的情况下
+    #    切标签页 / 关标签页 / 模拟鼠标）。
+    #    历史上已经漏过一次（activate_tab/close_tab/mouse_move），
+    #    所以这里把它变成机器可判定的约束。
+    _py_writes = set(re.findall(
+        r'WRITE_CMDS\s*=\s*\{([^}]*)\}', src("backends/extension_backend.py"),
+        re.S)[0].split('"')) if re.search(
+        r'WRITE_CMDS\s*=\s*\{', src("backends/extension_backend.py")) else set()
+    _py_writes = {w for w in _py_writes if w and w.strip().isidentifier()
+                  or (w and w.replace("_", "").isalnum())}
+    _js_writes = set(re.findall(
+        r'"([a-z_]+)"', re.search(
+            r'PRIVILEGED_COMMANDS\s*=\s*new Set\(\[([^\]]*)\]',
+            src("browser-bridge/shared.js"), re.S).group(1))) \
+        if re.search(r'PRIVILEGED_COMMANDS\s*=\s*new Set\(\[',
+                     src("browser-bridge/shared.js")) else set()
+    _diff = sorted(_py_writes ^ _js_writes)
+    r.ok("F1b 写命令清单两侧一致（Python WRITE_CMDS ⟷ 扩展 PRIVILEGED_COMMANDS）",
+         bool(_py_writes) and bool(_js_writes) and not _diff,
+         f"仅一侧有={_diff or '无'}（会让那条命令静默绕过确认框）；"
+         f"共 {len(_py_writes)} 条")
+
     r.ok("F2 生命周期回调走了 safeRun 包装",
          "safeRun" in bg_bg and "bootstrap" in bg_bg)
 

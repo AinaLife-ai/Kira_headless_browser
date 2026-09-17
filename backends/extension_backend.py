@@ -15,7 +15,7 @@ from typing import Optional
 
 from core.logging_manager import get_logger
 
-from .base import OpResult, TabInfo
+from .base import OpResult
 from .router import Backend
 
 logger = get_logger("browser_merged", "cyan")

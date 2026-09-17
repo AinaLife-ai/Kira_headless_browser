@@ -259,7 +259,16 @@ def run(r) -> None:
         # 断线感知 + 重连
         proc.terminate()
         proc.wait(timeout=5)
-        await asyncio.sleep(0.4)
+        # ⚠️ 不要写死 `sleep(0.4)` 就断言"已断开" —— 进程死了之后，
+        #    socket 关闭要经事件循环投递到 bridge 那边，
+        #    机器负载高时 400ms 可能不够 → 偶发假失败（flaky）。
+        #    改成**轮询到超时**：尽快通过，慢的机器也给足时间。
+        t_off = time.time()
+        for _ in range(60):          # 最多 3 秒
+            if not bridge.connected:
+                break
+            await asyncio.sleep(0.05)
+        results["offline_ms"] = round((time.time() - t_off) * 1000)
         results["offline_detected"] = not bridge.connected
 
         proc2 = subprocess.Popen(["node", str(client_path), str(port)],

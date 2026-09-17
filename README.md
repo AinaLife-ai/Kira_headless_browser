@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.36
+# 浏览器插件 (Browser Plugin) 2.1.37
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,68 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.37（2026-09-17）
+
+**按 CodeRabbit 第三十八轮审查修复 6 项**（3 actionable + 2 nitpick +
+1 条它自己说"不需要改"但值得加防护的）。
+
+#### 🟡 ① 断线检测用固定 `sleep(0.4)`
+
+`bridge_e2e` 的"断开感知"测试是"杀掉进程 → 睡 400ms → 断言已断开"。
+但进程死后 socket 关闭要经事件循环投递到 bridge，**机器负载高时 400ms 不够**
+→ 偶发假失败。
+
+→ 改成**轮询到超时**（最多 3 秒，每 50ms 查一次）：快机器立刻过，慢机器给足时间。
+
+#### 🟡 ② D4 比的是文件名，不是相对路径
+
+`f.name not in ALLOWED_MD` 只比**文件名** —— 于是
+`browser-bridge/README.md`、`regression/README.md` 这些**子目录里的** README
+会被当成"根级白名单里的 README.md"直接放行。
+而规则的本意是"**插件本体（根目录）**只允许这两篇"。
+
+→ 改成比**仓库相对路径**。**实测**：在 `browser-bridge/` 下塞一个 README →
+现在会被抓到（修前放行）。
+
+#### 🟡 ③ 回归文档没有说明"上传只验到 jsdom"
+
+`upload_stream/sweep/detach` 都在 jsdom 里构造 `DataTransfer` + `File`，
+能证明"分块拼装、顺序校验、上限、会话回收"这些**逻辑**正确，
+但**不能**证明真实 Chrome / Edge 会接受这个合成 FileList。
+文档里没写清楚，容易让人以为上传已经在真机验证过。
+
+→ 补进"已知限制"，并写明真机验证方式。
+
+#### 🟡 ④ 写命令清单两侧没有一致性检查
+
+`extension_backend.py` 的 `WRITE_CMDS` 与扩展 `shared.js` 的
+`PRIVILEGED_COMMANDS` **各自写着"必须与对方保持同步"**，但一直没人验。
+它们决定"开了『写操作需确认』时哪些命令弹确认框"——
+一边漏了，那条命令就会**静默放行**（历史上已经漏过一次：
+`activate_tab`/`close_tab`/`mouse_move`）。
+
+→ 新增检查 **F1b**：两侧清单必须逐字一致。
+**实测**：Python 侧漏一条 / 扩展侧漏一条 / 扩展侧多加一条 → 三种都能抓到。
+（CR 说"当前没问题、不必改"—— 对，现在是一致的；但**没有东西保证它一直一致**。）
+
+#### 🟡 ⑤ 清理未使用的参数与死代码
+
+- **`BackendRouter.__init__` 的 `on_fallback`** ——
+  全仓**没有任何地方**传它或读 `self._on_fallback`，留着会让人以为
+  "降级时会有回调"。→ 删掉（连带死掉的 `Callable` 导入）。
+- 顺带跑了一遍 `pyflakes`，清掉几处**死导入/未使用变量**
+  （`Text`、`BridgeError`/`BridgeNotConnected`/`BridgeTimeout`、
+  `TabInfo`、`Dict`、`setup_guide` 里没用到的 `home`、`main.py` 里
+  从没被读过的 `last_err`）与一处无占位符的 f-string。
+  **现在 `pyflakes` 全净**（只剩 `security.py` 里那处**有意的**
+  `publicsuffix2` 探测导入 —— 那是"先试可用性、再用"，不是冗余）。
+
+#### 结果
+
+`regression/run_all.py` → **299/299，16 组全绿**
+（1 个 WARN 是"工作副本非 git 仓库"时的预期降级提示）。
+版本 2.1.36 → 2.1.37。
 
 ### v2.1.36（2026-09-17）
 
