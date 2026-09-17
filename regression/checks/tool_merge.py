@@ -283,8 +283,15 @@ def run(r) -> None:
     #    还在，断言照样通过。
     #    必须**限定在 downloadViaSession 内**，并且要求凭据表达式
     #    **带 HTTPS 条件 + 有 omit 分支**。
-    _dl = cap.split("async function downloadViaSession(")[-1][:2000] \
-        if "async function downloadViaSession(" in cap else ""
+    # ⚠️ 不要用**定长切片**（原来是 `[:2000]`）—— 函数一变长，
+    #    后半段（含 `sendChunk`）就被切掉，检查无缘无故报红
+    #    （"函数实现没了"的假象）。这里切到**下一个顶层 async function** 为止。
+    _dl = ""
+    if "async function downloadViaSession(" in cap:
+        _dl = cap.split("async function downloadViaSession(")[-1]
+        _nxt = _dl.find("\nasync function ")
+        if _nxt > 0:
+            _dl = _dl[:_nxt]
     _creds = re.search(r'credentials\s*:\s*([^,\n]+)', _dl)
     _expr = (_creds.group(1) if _creds else "")
     _cond_ok = (":" in _expr) and ('"include"' in _expr) and ('"omit"' in _expr)

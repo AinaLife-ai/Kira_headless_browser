@@ -158,15 +158,23 @@ def run(r) -> None:
         p = subprocess.run([node_bin, str(runner)], cwd=str(JS_DIR),
                            capture_output=True, text=True, env=env, timeout=120)
 
+        # ⚠️ 这两处失败**不要 return** —— 下面的 U1~U5（分块上传）用的是
+        #    **另外三个脚本**（upload_stream / upload_sweep / upload_detach），
+        #    与"点击行为脚本能不能跑"互相独立。
+        #    return 会让那几项**静默不执行**，报告上只看到 D0 红，
+        #    误以为"只有点击检查有问题"。
+        _clicks_ok = True
         if p.returncode != 0:
             r.ok("D0 DOM 检查可运行", False, (p.stderr or "")[:200])
-            return
+            _clicks_ok = False
 
-        try:
-            data = json.loads(p.stdout.strip().splitlines()[-1])
-        except Exception:
-            r.ok("D0 解析 DOM 检查输出", False, (p.stdout or "")[:200])
-            return
+        data = []
+        if _clicks_ok:
+            try:
+                data = json.loads(p.stdout.strip().splitlines()[-1])
+            except Exception:
+                r.ok("D0 解析 DOM 检查输出", False, (p.stdout or "")[:200])
+                _clicks_ok = False
 
         for item in data:
             r.ok(f"D {item['name']}", item["ok"], item.get("detail", ""))

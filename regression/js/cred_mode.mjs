@@ -31,8 +31,15 @@ if (!seg) {
 } else {
   // ① 抽出 isHttps 的**真实定义行**（生产代码那一行）
   const mHttps = seg.match(/const\s+isHttps\s*=\s*([^;]+);/);
+  // ⚠️ 生产代码现在**逐跳**重新判断协议（手动跟随重定向），
+  //    所以 credentials 用的是 `hopIsHttps`。两处都要能识别：
+  //    判据的本质是"凭据由**该跳的 URL**推导"，名字随实现变。
+  const mHop = seg.match(/const\s+hopIsHttps\s*=\s*([^;]+);/);
   // ② 抽出 credentials 表达式
   const mCred = seg.match(/credentials\s*:\s*([^,\n]+)/);
+  // ③ 用于替换的变量名：生产用哪个，就注入哪个
+  const credVar = mCred && mCred[1].includes("hopIsHttps") ? "hopIsHttps"
+                : mCred && mCred[1].includes("isHttps") ? "isHttps" : "";
 
   if (!mHttps || !mCred) {
     results.push({ name: "可提取 isHttps 与 credentials", ok: false,
@@ -43,16 +50,24 @@ if (!seg) {
 
     results.push({
       name: "凭据表达式引用了由 URL 推导出的 isHttps",
-      ok: credExpr.includes("isHttps"),
-      detail: `isHttps = ${httpsExpr}; credentials: ${credExpr}`,
+      // ⚠️ 认 `hopIsHttps`（逐跳版）与 `isHttps` 两种 —— 判据的本质是
+      //    "凭据条件引用了**由 URL 推出来的**那个布尔"，名字随实现变。
+      ok: credExpr.includes("hopIsHttps") || credExpr.includes("isHttps"),
+      detail: `isHttps = ${httpsExpr};`
+              + (mHop ? ` hopIsHttps = ${mHop[1]};` : "")
+              + ` credentials: ${credExpr}`,
     });
 
     // ③ 用真实 URL 跑一遍**生产的推导 + 凭据选择**
     const decide = (url) => {
       try {
+        // ⚠️ 注入的变量名要跟生产一致（逐跳版注入 hopIsHttps）；
+        //    逐跳版的推导表达式里引用的是 currentUrl，这里用 url 代替它
+        //    （单跳场景下 currentUrl === url，语义一致）。
+        const _expr = (mHop ? mHop[1] : httpsExpr).replace(/currentUrl/g, "url");
         // eslint-disable-next-line no-new-func
         const f = new Function("url",
-          `const isHttps = ${httpsExpr};\nreturn (${credExpr});`);
+          `const ${credVar || "isHttps"} = ${_expr};\nreturn (${credExpr});`);
         return f(url);
       } catch (e) {
         return "__ERR__" + e.message;

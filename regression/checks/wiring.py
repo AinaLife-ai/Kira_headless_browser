@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from ..harness import section, src
+from ..harness import section, src, strip_js_noise
 
 TITLE = "接线完整性（配置接通 / 数据透传）"
 
@@ -35,118 +35,6 @@ def _keep_interp(m):
     return " " + " ".join(inner) + " "
 
 
-def _strip_js_noise(src_text: str) -> str:
-    """剥掉 JS 的注释，保留字符串与模板串中 `${...}` 的真实代码。
-
-    ⚠️ **不能用"先剥行注释再剥字符串"的正则顺序** —— `//` 出现在
-    字符串里极其常见（`"https://..."`、`"ws://127.0.0.1:5267/ws"`），
-    那种顺序会把**从 `//` 起的整行**都当注释吃掉：
-    真实代码被吞掉，后续的"裸标识符"检测就失真了（可能漏报）。
-
-    块注释 `/* */` 同理：字符串里的 `/*` 也会被误当注释起点。
-
-    所以改成**一次扫描的状态机**：按字符走，维护"当前在什么里"，
-    注释只在**代码态**才是注释。这也正是 CR 建议的 state-aware scanner。
-
-    保留语义：模板串里的 `${...}` 内容原样留下（那是真实求值的代码），
-    其余字符串内容清空（运行时才存在的文本，不是变量引用）。
-    """
-    out = []
-    i = 0
-    n = len(src_text)
-    # 状态：code / line_comment / block_comment / str(' or ") / tmpl(`)
-    state = "code"
-    quote = ""
-    depth = 0          # 模板串里 `${...}` 的嵌套深度
-
-    while i < n:
-        ch = src_text[i]
-        nxt = src_text[i + 1] if i + 1 < n else ""
-
-        if state == "code":
-            if ch == "/" and nxt == "/":
-                state = "line_comment"
-                i += 2
-                continue
-            if ch == "/" and nxt == "*":
-                state = "block_comment"
-                i += 2
-                continue
-            if ch in ("'", '"'):
-                state = "str"
-                quote = ch
-                i += 1
-                continue
-            if ch == "`":
-                state = "tmpl"
-                i += 1
-                continue
-            out.append(ch)
-            i += 1
-            continue
-
-        if state == "line_comment":
-            if ch == "\n":
-                state = "code"
-                out.append(ch)          # 换行保留，避免把两行粘一起
-            i += 1
-            continue
-
-        if state == "block_comment":
-            if ch == "*" and nxt == "/":
-                state = "code"
-                i += 2
-                # 用空格顶替，避免把前后 token 粘成一个
-                out.append(" ")
-                continue
-            if ch == "\n":
-                out.append(ch)
-            i += 1
-            continue
-
-        if state == "str":
-            if ch == "\\":              # 转义：跳过下一个字符
-                i += 2
-                continue
-            if ch == quote:
-                state = "code"
-                out.append(quote)       # 保留空引号对，占位
-            i += 1
-            continue
-
-        if state == "tmpl":
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == "`":
-                state = "code"
-                out.append("`")
-                i += 1
-                continue
-            if ch == "$" and nxt == "{":
-                # `${...}` 内部是**真实代码** —— 原样保留并嵌套计数
-                out.append("${")
-                i += 2
-                depth = 1
-                while i < n and depth > 0:
-                    c2 = src_text[i]
-                    if c2 == "{":
-                        depth += 1
-                    elif c2 == "}":
-                        depth -= 1
-                        if depth == 0:
-                            out.append("}")
-                            i += 1
-                            break
-                    out.append(c2)
-                    i += 1
-                continue
-            i += 1
-            continue
-
-    return "".join(out)
-
-
 def _scan_naked_state(src_text: str):
     """扫描裸的状态标识符，返回去重排序后的名字列表。
 
@@ -154,7 +42,7 @@ def _scan_naked_state(src_text: str):
     结果两边各自演化（夹具用 `code[m.end():...]`、真逻辑改成了局部变量
     `after`），副本已与真逻辑不同步：自检永远绿，真检查坏了也发现不了。
     """
-    code = _strip_js_noise(src_text)
+    code = strip_js_noise(src_text)
     found = []
     for m in re.finditer(r'(?<![\w.$])\b(' + NAKED_STATE_NAMES + r')\b', code):
         # 排除"对象字面量的键"（`socket: "OPEN"`）—— 那不是引用

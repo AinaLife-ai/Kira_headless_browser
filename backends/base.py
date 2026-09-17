@@ -58,6 +58,3 @@ class OpResult:
         调用方据此**禁止**换后端重试 —— 重复执行的伤害比失败更大。
         """
         return cls(ok=False, error=error, backend=backend, indeterminate=True)
-
-    def as_text(self, text: str) -> str:
-        return text

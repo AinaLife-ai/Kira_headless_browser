@@ -92,13 +92,17 @@ const IDLE = 10 * 60 * 1000;   // 与 content.js 的 _UP_IDLE_MS 一致
 
 // ── ③ abort 立即生效 ────────────────────────────────────────────────
 {
-  await call("upload_begin", { upload_id: "ab", selector: "#f", name: "a.bin", size: 1e9 });
-  await call("upload_abort", { upload_id: "ab" });
+  // ⚠️ 必须**同时**确认前两步成功 —— 只看最后那个 rejected(r) 的话，
+  //    如果 upload_begin 或 upload_abort 自己就失败了，
+  //    最后那次 chunk 也会"被拒绝"，测试照样绿（**假通过**）：
+  //    它验证的是"会话不存在"，而不是"abort 让会话失效"。
+  const begun = await call("upload_begin", { upload_id: "ab", selector: "#f", name: "a.bin", size: 1e9 });
+  const aborted = await call("upload_abort", { upload_id: "ab" });
   const r = await call("upload_chunk", { upload_id: "ab", index: 0, data: "AAAA" });
   out.push({
     name: "abort 后会话立即失效",
-    ok: rejected(r),
-    detail: JSON.stringify(r),
+    ok: begun.ok === true && aborted.ok === true && rejected(r),
+    detail: `begin=${JSON.stringify(begun)} abort=${JSON.stringify(aborted)} chunk=${JSON.stringify(r)}`,
   });
 }
 

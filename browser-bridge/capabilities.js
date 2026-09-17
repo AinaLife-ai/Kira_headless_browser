@@ -330,14 +330,44 @@ async function downloadViaSession(params, cmdId) {
 
   // 在扩展自己的上下文里 fetch —— 会带上浏览器已存的 Cookie（同源）
   // ⚠️ 凭据只能走 HTTPS。
-  //    明文 HTTP 或在重定向里跳到 HTTP，都会把非 Secure 的 Cookie
-  //    暴露在网络上（CWE-319）。这里直接用 redirect:"error" ——
-  //    与其"跟随后再检查"（已经发出去了），不如根本不让它跳。
+  //    明文 HTTP 会把非 Secure 的 Cookie 暴露在网络上（CWE-319）。
+  //
+  // ⚠️ 关于重定向：**手动跟随**，而不是 `redirect: "error"`。
+  //    · `redirect:"error"` 最保守，但**很多正常下载会直接失败** ——
+  //      CDN / 短链 / 对象存储几乎都用 302 跳到真实地址。
+  //    · 用 `redirect:"follow"` 又不行：浏览器会**自动带着凭据**跳到
+  //      下一跳，跨协议（HTTPS→HTTP）时 Cookie 已经发出去了，
+  //      "跟随后再检查"来不及。
+  //    → 所以取中间：`redirect:"manual"` 自己跟，
+  //      **每一跳都重新按该跳的 URL 决定要不要带凭据** ——
+  //      跳到 HTTP 时 credentials 变成 omit，非 Secure 的 Cookie 就不会发。
+  //      限制跳数（防重定向环），缺 Location 时明确报错。
   const isHttps = url.toLowerCase().startsWith("https://");
-  const resp = await fetch(url, {
-    credentials: isHttps ? "include" : "omit",
-    redirect: "error",           // 不跟随重定向，杜绝跨协议泄漏
-  });
+  const MAX_REDIRECTS = 5;
+  let currentUrl = url;
+  let resp;
+  for (let hop = 0; ; hop++) {
+    // ⚠️ 每一跳都重新判断协议 —— 这是"跨协议不泄漏"的关键。
+    const hopIsHttps = currentUrl.toLowerCase().startsWith("https://");
+    resp = await fetch(currentUrl, {
+      credentials: hopIsHttps ? "include" : "omit",
+      redirect: "manual",
+    });
+    // 3xx 才算重定向（opaqueredirect 时 status 是 0，也当重定向处理）
+    const isRedirect = (resp.status >= 300 && resp.status < 400)
+      || (resp.type === "opaqueredirect" || resp.status === 0);
+    if (!isRedirect) break;
+    if (hop >= MAX_REDIRECTS) {
+      throw new Error(`重定向次数过多（超过 ${MAX_REDIRECTS} 次），已中止`);
+    }
+    const loc = resp.headers.get("Location");
+    if (!loc) {
+      throw new Error(
+        `遇到重定向但没有 Location 头（HTTP ${resp.status}），无法继续`);
+    }
+    // 相对 Location 要按当前 URL 解析成绝对地址
+    currentUrl = new URL(loc, currentUrl).href;
+  }
   if (!resp.ok) throw new Error(`下载失败，HTTP ${resp.status}`);
 
   const declared = Number(resp.headers.get("Content-Length") || 0);

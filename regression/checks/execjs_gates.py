@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 
-from ..harness import section, src_safe
+from ..harness import section, src_safe, strip_js_noise
 
 TITLE = "扩展执行 JS 的两道关口（CSP / 端口）"
 
@@ -49,13 +49,19 @@ def _judge_configure_world(cap_text: str) -> bool:
     只看函数名的判据照样通过 —— 而那时 CSP 根本没被放开，
     执行 JS 仍然静默不可用。（C1 反向自检正是因此才发现这条的。）
     """
-    #: 真正的调用点：`configureWorld(` 前面是 `.` 或空格，后面紧跟左括号
-    if not re.search(r'configureWorld\s*\(', cap_text):
+    # ⚠️ 先**剥掉注释与字符串**再判 —— 否则注释里写一句
+    #    "官方文档：userScripts.configureWorld() 可以配置 CSP"
+    #    就能满足判据（那不是**调用**，是说明文字）。
+    #    同理 `'unsafe-eval'` 出现在注释里也不该算数。
+    #    strip_js_noise 是状态机（见 harness），能正确区分
+    #    "代码态"与"注释/字符串态"，也不会被字符串里的 `//` 骗到。
+    code = strip_js_noise(cap_text)
+    if not re.search(r'configureWorld\s*\(', code):
         return False
-    if "userScripts.execute" not in cap_text:
+    if "userScripts.execute" not in code:
         return False
-    return cap_text.index("configureWorld(") < \
-        cap_text.rindex("userScripts.execute")
+    return code.index("configureWorld(") < \
+        code.rindex("userScripts.execute")
 
 
 def _judge_unsafe_eval(cap_text: str) -> bool:
@@ -63,13 +69,83 @@ def _judge_unsafe_eval(cap_text: str) -> bool:
 
     只带引号的独立关键字才算 —— `'wasm-unsafe-eval'` 里也含 `unsafe-eval`
     这一串，用 `"unsafe-eval" in text` 会被它兜住（假通过）。
+
+    ⚠️ 只看 **CSP 字符串字面量**（正则抠 `csp: "..."` 的引号内内容），
+    不是全文找关键字 —— 注释里写一句 "不含 unsafe-eval" 就能满足
+    全文匹配（那是说明，不是配置）。
     """
-    return "'unsafe-eval'" in cap_text
+    # ⚠️ 顺序：**先剥注释**（否则注释里那句 `csp: "...unsafe-eval..."`
+    #    会被正则抠出来当配置 —— 那就等于被说明文字骗了），
+    #    再从剩下的**代码**里抠 `csp:` 的字符串字面量。
+    #    注意这时候字符串本身还在（strip_js_noise 只清模板串内容、
+    #    清普通字符串**内容**为空串）—— 所以不能直接对它抠引号内容。
+    #    做法：在**剥注释后的原文**上抠（保留字符串原样）。
+    code_no_comments = _strip_comments_only(cap_text)
+    m = re.search(r'csp:\s*"([^"]*)"', code_no_comments) or \
+        re.search(r"csp:\s*'([^']*)'", code_no_comments)
+    if not m:
+        return False
+    return "'unsafe-eval'" in m.group(1)
+
+
+def _strip_comments_only(src_text: str) -> str:
+    """只剥注释、**保留字符串字面量原样**。
+
+    与 harness 的 `strip_js_noise` 不同：那个会把字符串内容清空
+    （用于"找标识符引用"），而这里要**读配置字符串的值**。
+    """
+    out = []
+    i = 0
+    n = len(src_text)
+    state = "code"
+    delim = ""
+    while i < n:
+        c = src_text[i]
+        nxt = src_text[i + 1] if i + 1 < n else ""
+        if state == "code":
+            if c == "/" and nxt == "/":
+                state = "line_comment"; i += 2; continue
+            if c == "/" and nxt == "*":
+                state = "block_comment"; i += 2; continue
+            if c in "\"'`":
+                state = "str"; delim = c
+                out.append(c); i += 1; continue
+            out.append(c); i += 1
+        elif state == "line_comment":
+            if c == "\n":
+                state = "code"; out.append(c)
+            i += 1
+        elif state == "block_comment":
+            if c == "*" and nxt == "/":
+                state = "code"; i += 2; continue
+            i += 1
+        else:  # str
+            out.append(c)
+            if c == "\\" and nxt:
+                out.append(nxt); i += 2; continue
+            if c == delim:
+                state = "code"
+            i += 1
+    return "".join(out)
 
 
 def _judge_port_guard(proto_text: str) -> bool:
-    """B1 的判据：buildWsUrl 里有明确的端口值域校验。"""
-    return "端口无效" in proto_text
+    """B1 的判据：buildWsUrl 里有明确的端口值域校验 **代码**。
+
+    ⚠️ 判据要盯**校验表达式本身**（范围比较 / 数字正则），不能盯
+    "端口无效" 这种**错误消息文本** —— 消息在字符串字面量里，
+    一旦按"只认代码态"剥离就找不到了（那是**改过头**的自我误报）。
+    反过来，只盯消息文本也不行：注释里写一句"端口无效"就能满足。
+    正确做法是：剥掉注释（排除说明文字）后，在**代码**里找那个
+    范围判断。
+    """
+    code = strip_js_noise(proto_text)
+    # 形态：`Number(p) < 1 || Number(p) > 65535`（可能带括号/空白差异）
+    has_lo = re.search(r'<\s*1\b', code) is not None
+    has_hi = re.search(r'>\s*65535\b', code) is not None
+    # 还要确认这两个比较出现在**同一行/邻近**（防止别处恰好有 <1）
+    nearby = re.search(r'<\s*1\b[^\n]{0,80}>\s*65535\b', code) is not None
+    return has_lo and has_hi and nearby
 
 
 def run(r) -> None:
@@ -160,8 +236,11 @@ def run(r) -> None:
          and _judge_unsafe_eval(cap) is True,
          "在真源码上 True、在变形文本上 False → 判据有效")
 
-    # ③ 端口校验删掉 —— 复用 B1 的**同一条判据**
-    no_port = proto.replace("端口无效", "REMOVED")
+    # ③ 端口校验删掉 —— 复用 B1 的**同一条判据**。
+    #    ⚠️ 变形要改**判据盯的那个东西**（校验表达式），不是错误消息 ——
+    #    改消息文本的话，判据看不到（它已不看消息），C3 会假红。
+    no_port = proto.replace("Number(p) < 1 || Number(p) > 65535",
+                            "false")
     r.ok("C3 删掉端口校验后本检查能发现",
          _judge_port_guard(no_port) is False
          and _judge_port_guard(proto) is True,

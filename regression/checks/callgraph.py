@@ -32,11 +32,20 @@ INHERITED_OK = {
     "logger", "get_logger",
 }
 
-#: 允许"定义了但没被调用"的：框架回调（框架按名字调用）
+#: 允许"定义了但没被调用"的：框架回调（框架按名字调用）。
+#  ⚠️ 除了这里列的名字，**带框架装饰器的方法一律豁免**（见 E1 的实现）——
+#     装饰器本身就是"框架会调它"的证据，比手写名单更可靠。
 FRAMEWORK_CALLED = {
     "initialize", "terminate",            # BasePlugin 生命周期
     "_apply_config",
 }
+
+#: 这些装饰器 = 框架按名字调用（不该算死代码）
+FRAMEWORK_DECORATORS = (
+    "register.tool", "register.api", "register.page", "register.ws",
+    "register.adapter", "register.provider",
+    "on.", "hook.", "listen.",
+)
 
 
 def _iter_py():
@@ -228,3 +237,58 @@ def run(r) -> None:
          not wrong,
          f"可疑={wrong or '无'}（event.session 是 Session 对象，"
          f"str() 得到的是 repr，适配器解析不了）")
+
+    section("E. 死代码（定义了但没人调用）")
+    # ⚠️ 这条检查原来**只写在 TITLE 里**（"调用图完整性（未定义方法 / 死代码）"），
+    #    实现从来没有 —— `FRAMEWORK_CALLED` 常量定义了却**从没被读过**，
+    #    就是那段没写完的痕迹。文档声称有、代码没有，比不写更糟。
+    #
+    #    判据（保守，宁可漏报不误报）：
+    #      · 只看**函数/方法定义**，且**没有**框架装饰器；
+    #      · 引用形态要覆盖三种：`name(` / `.name` / `"name"`（字符串派发）
+    #        —— 只查 `name(` 会把 `self.x()` 和 `store.call("x")` 全判成死代码，
+    #        那样会一次性误报上百个，检查立刻变成噪音；
+    #      · `__xxx__` 魔术方法、以及 FRAMEWORK_CALLED 名单里的名字豁免。
+    _refs = set()
+    _defs = []          # (name, rel, lineno, cls, has_framework_dec)
+    for f in _iter_py():
+        try:
+            _t = ast.parse(f.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        _rel = f.relative_to(PLUGIN_DIR)
+        # 收集"被引用到的名字"：属性访问 + 裸名 + 字符串常量
+        for _n in ast.walk(_t):
+            if isinstance(_n, ast.Attribute):
+                _refs.add(_n.attr)
+            elif isinstance(_n, ast.Name):
+                _refs.add(_n.id)
+            elif isinstance(_n, ast.Constant) and isinstance(_n.value, str):
+                _refs.add(_n.value)
+        # 收集定义
+        for _cls in ast.walk(_t):
+            if not isinstance(_cls, ast.ClassDef):
+                continue
+            for _m in _cls.body:
+                if not isinstance(_m, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                _dec = []
+                for _d in _m.decorator_list:
+                    _dec.append(ast.unparse(_d))
+                _fw = any(any(k in _dd for k in FRAMEWORK_DECORATORS)
+                          for _dd in _dec)
+                _defs.append((_m.name, str(_rel), _m.lineno, _cls.name, _fw))
+
+    _dead = []
+    for _name, _rel, _ln, _cls, _fw in _defs:
+        if _fw or _name.startswith("__"):
+            continue
+        if _name in FRAMEWORK_CALLED or _name in INHERITED_OK:
+            continue
+        if _name not in _refs:
+            _dead.append(f"{_rel}:{_ln} {_cls}.{_name}")
+    r.ok("E1 没有「定义了但从未被引用」的方法（死代码）",
+         not _dead,
+         f"零引用={_dead or '无'}（可能是重构后忘了删，或名字改了没跟着改）")
+    for _d in _dead:
+        r.note(f"   💀 {_d}")
