@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 
-from ..harness import section, src_safe, strip_js_noise
+from ..harness import section, src_safe, strip_comments_only, strip_js_noise
 
 TITLE = "扩展执行 JS 的两道关口（CSP / 端口）"
 
@@ -80,53 +80,12 @@ def _judge_unsafe_eval(cap_text: str) -> bool:
     #    注意这时候字符串本身还在（strip_js_noise 只清模板串内容、
     #    清普通字符串**内容**为空串）—— 所以不能直接对它抠引号内容。
     #    做法：在**剥注释后的原文**上抠（保留字符串原样）。
-    code_no_comments = _strip_comments_only(cap_text)
+    code_no_comments = strip_comments_only(cap_text)
     m = re.search(r'csp:\s*"([^"]*)"', code_no_comments) or \
         re.search(r"csp:\s*'([^']*)'", code_no_comments)
     if not m:
         return False
     return "'unsafe-eval'" in m.group(1)
-
-
-def _strip_comments_only(src_text: str) -> str:
-    """只剥注释、**保留字符串字面量原样**。
-
-    与 harness 的 `strip_js_noise` 不同：那个会把字符串内容清空
-    （用于"找标识符引用"），而这里要**读配置字符串的值**。
-    """
-    out = []
-    i = 0
-    n = len(src_text)
-    state = "code"
-    delim = ""
-    while i < n:
-        c = src_text[i]
-        nxt = src_text[i + 1] if i + 1 < n else ""
-        if state == "code":
-            if c == "/" and nxt == "/":
-                state = "line_comment"; i += 2; continue
-            if c == "/" and nxt == "*":
-                state = "block_comment"; i += 2; continue
-            if c in "\"'`":
-                state = "str"; delim = c
-                out.append(c); i += 1; continue
-            out.append(c); i += 1
-        elif state == "line_comment":
-            if c == "\n":
-                state = "code"; out.append(c)
-            i += 1
-        elif state == "block_comment":
-            if c == "*" and nxt == "/":
-                state = "code"; i += 2; continue
-            i += 1
-        else:  # str
-            out.append(c)
-            if c == "\\" and nxt:
-                out.append(nxt); i += 2; continue
-            if c == delim:
-                state = "code"
-            i += 1
-    return "".join(out)
 
 
 def _judge_port_guard(proto_text: str) -> bool:

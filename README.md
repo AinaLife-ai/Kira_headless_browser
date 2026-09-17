@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.40
+# 浏览器插件 (Browser Plugin) 2.1.41
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,74 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.41（2026-09-17）
+
+**按 CodeRabbit 第四十二轮审查修复 3 项**（3 actionable）。
+
+#### 🔴 ① 我上一轮的重定向改法**在浏览器里根本走不通**
+
+上一轮我把下载改成 `redirect: "manual"` 自己跟重定向 —— 思路是
+"每跳都重新判断协议"，看起来更安全。
+
+**但它跑不起来**：`manual` 在浏览器里返回的是 **opaqueredirect** 响应 ——
+`status` 是 0、**所有响应头都读不到**（包括 `Location`）。
+（Fetch 规范如此。StackOverflow 上"Response headers not available for
+fetch request with redirect: manual"的回答很直接：
+*"No, it's not possible. The requirements in the Fetch spec prevent it."*）
+
+所以我的代码**必然**走到"没有 Location 头"那个分支抛错 ——
+等于把"重定向全失败"换了个写法。
+
+→ 改用 `redirect: "follow"` 让浏览器跟随。这是**安全的**，因为浏览器在
+**每一跳**会自己重算要发哪些 Cookie：Secure cookie 绝不会出现在 HTTP
+请求上、域不匹配的不会发给别的站点；跳数上限也由浏览器保证。
+跟随完成后**再检查最终 URL**：起始是 HTTPS 却落在 HTTP 上就中止。
+
+> 教训：**看起来更保守的实现，可能因为平台限制而完全失效**。
+> 我上一轮改完还做了"每跳凭据决策"的推演验证 —— 但那是验证**我的模型**，
+> 不是验证**浏览器实际会怎么做**。涉及平台 API 语义时，先查规范/文档。
+
+#### 🟡 ② Playwright 桩的 cookie 是空实现（往返测不到）
+
+`FakeContext.add_cookies()` 直接 `return None`、`cookies()` 永远返回 `[]` ——
+于是"加了 cookie 再读回来"这条链路**在测试里是空转**：
+插件里任何依赖"写完确认"的逻辑（cookie 导入、导出→导入往返）都测不到。
+
+→ 真的存进来（`_cookies`），`cookies()` 返回**副本**（不暴露内部列表）、
+支持按 url 做同域/子域过滤。**实测**：往返成功、外部改动不影响内部、
+同域/子域/异域过滤都正确。
+
+#### 🟡 ③ VLM 描述链路可能一直走的是"空转"路径
+
+`vlm_describe` 的探针脚本里，`describe_image` 会
+`from core.utils.common_utils import desc_img` —— 如果导不到就
+**静默走 except 返回空串**，而那几条断言（"返回了预期文本"）在空转路径上
+**也可能成立**。
+
+→ 在探针里加计数器：假客户端真的被调用时 +1，并断言
+**B0b「描述链路真的走到了框架 desc_img」**。
+**实测**：缺 `common_utils` 的框架目录下明确报红（不假绿）。
+
+#### 连带的判据同步
+
+改 ① 时两个旧检查报红，都是"实现改了、判据还在盯旧形态"：
+
+- **B2.5** 原来断言 `redirect: "error"` —— 那是更早一版的写法。
+  判据要盯**真正要保证的语义**（"会不会跨协议泄漏凭据"），
+  而不是某个具体选项：现在守两条（不用读不到 Location 的 manual +
+  有最终 URL 协议检查）。
+- `tool_merge` 的 **C8c**（本轮新增）专门防退回 `manual`，
+  判据要**剥注释**再查（注释里正解释"为什么不用 manual"，裸文本会自指）。
+
+顺带把"只剥注释"的 `strip_comments_only` 提到 `harness.py` 与
+`execjs_gates` 共用（原先两处各一份）。
+
+#### 结果
+
+`regression/run_all.py` → **302/302，16 组全绿**
+（1 个 WARN 是"工作副本非 git 仓库"时的预期降级提示）。
+版本 2.1.40 → 2.1.41。
 
 ### v2.1.40（2026-09-17）
 

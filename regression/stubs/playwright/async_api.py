@@ -250,6 +250,9 @@ class FakeContext:
         self._browser = browser
         self._closed = False
         self._handlers = {}
+        #: 存进来的 cookie（add_cookies 写、cookies() 读）。
+        #  ⚠️ 必须真的存 —— 空实现会让"加 cookie 再读回来"的链路测不到。
+        self._cookies = []
         #: 保住 _fire() 派发出去的异步回调，避免被 GC（见 _fire）
         self._bg_tasks = set()
         STATS["contexts_created"] += 1
@@ -280,10 +283,35 @@ class FakeContext:
         return p
 
     async def add_cookies(self, cookies):
+        """把 cookie 存进 context —— **要真的存**。
+
+        ⚠️ 原来这里 `return None`、`cookies()` 永远返回 `[]`，
+        于是"加了 cookie 再读回来"这条链路**测不到**：
+        插件里任何依赖"读完确认写入成功"的逻辑（比如 cookie 导入、
+        导出后再导入的往返）在测试里都是空转，全绿但没验证。
+        这里存一份副本，`cookies()` 返回**副本**（不暴露内部列表）。
+        """
+        self._cookies.extend(list(cookies or []))
         return None
 
     async def cookies(self, url=None):
-        return []
+        """返回已存 cookie 的**副本**（外部改动不影响内部状态）。
+
+        `url` 参数按"同域或子域"过滤（够用的简化实现）：
+        不传就返回全部。
+        """
+        if not url:
+            return [dict(c) for c in self._cookies]
+        try:
+            host = url.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
+        except Exception:
+            return [dict(c) for c in self._cookies]
+        out = []
+        for c in self._cookies:
+            dom = str(c.get("domain") or "").lstrip(".")
+            if dom and (host == dom or host.endswith("." + dom)):
+                out.append(dict(c))
+        return out
 
     async def close(self):
         if self._closed:

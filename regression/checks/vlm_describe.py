@@ -73,6 +73,9 @@ class Model:
         self.model_type = "llm"
 
 
+CHAT_CALLS = 0
+
+
 class Client:
     def __init__(self, mid):
         self.model = Model(mid)
@@ -84,6 +87,12 @@ class Client:
         #    带上标识后，才能断言"用的就是我配的那个"。
         class R:
             text_response = "【假VLM:" + self.model.model_id + "】页面是登录表单"
+        # ⚠️ 记一笔"假客户端真的被调用了" —— desc_img 最终就是调 client.chat()。
+        #    这是**链路真跑通**的证据：如果 core.utils.common_utils 导不到
+        #    （缺桩/框架不在），describe_image 会静默走 except 返回空串，
+        #    那条路径下这个计数器是 0。
+        global CHAT_CALLS
+        CHAT_CALLS += 1
         return R()
 
 
@@ -156,6 +165,10 @@ async def main():
         out["missing_file_returns_empty"] = False
 
     # ⑥ 只排除明确的非视觉模型
+    # 探针自检：至少有一次描述是**真的走了框架链路**（假 client 被调用）。
+    # 全 0 的话说明每次都静默走了 except 分支 —— 那些断言就是空转。
+    out["desc_img_path_exercised"] = CHAT_CALLS > 0
+
     out["vision_filter"] = (
         vlm.is_vision_model(Client("gpt-4o")) is True
         and vlm.is_vision_model(Client("text-embedding-3")) is False
@@ -289,6 +302,10 @@ def run(r) -> None:
             return
         data = json.loads(line[len("RESULT:"):])
         cases = [
+            # ⚠️ 先验"链路真的跑到了框架的 desc_img" —— 否则下面的断言
+            #    可能全是在"静默返回空串"的路径上成立的（空转）。
+            ("B0b 描述链路真的走到了框架 desc_img（不是走了 except 空转）",
+             "desc_img_path_exercised"),
             ("B1 配置留空时用**框架默认 VLM**", "default_vlm_used"),
             ("B2 配置了模型时优先用配置的", "configured_preferred"),
             ("B3 没有可用 VLM 时返回空串且不抛异常", "none_returns_empty"),

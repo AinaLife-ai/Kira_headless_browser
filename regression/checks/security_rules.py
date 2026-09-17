@@ -99,7 +99,8 @@ import subprocess as _sp
 import tempfile as _tf
 from pathlib import Path
 
-from ..harness import PLUGIN_DIR, load_module, section, src
+from ..harness import (PLUGIN_DIR, load_module, section, src,
+                       strip_comments_only)
 
 TITLE = "安全规则（域名 / 本机地址）"
 
@@ -192,15 +193,31 @@ def run(r) -> None:
     r.ok("B2.4 支持用户在地址里写 ws:// / wss:// / http://",
          "wss?" in pjs and "https?" in pjs,
          "地址栏允许 ws/wss 以及误填的 http/https")
-    # 扩展下载不允许跟随重定向（跨协议会带出 cookie）
-    # ⚠️ 只在下**载处理器内部**找这个选项 —— 全文搜会命中注释或别处，
+    # 扩展下载：跨协议不能带出 cookie。
+    # ⚠️ 只在下**载处理器内部**找选项 —— 全文搜会命中注释或别处，
     #    下载里删掉了也照样通过。
+    # ⚠️ 判据是"**会不会跨协议泄漏凭据**"，不是"用不用某个具体选项"：
+    #    · 最初用 `redirect:"error"`（完全不跟随）—— 最保守，但 CDN/短链
+    #      的正常重定向会让**下载直接失败**；
+    #    · 试过 `redirect:"manual"` 自己跟 —— **在浏览器里走不通**：
+    #      manual 返回 opaqueredirect（status=0、响应头全空），
+    #      **读不到 Location**，等于换个写法失败；
+    #    · 现在用 `redirect:"follow"` 让浏览器跟（它每一跳会自己重算
+    #      Cookie：Secure cookie 绝不上 HTTP，域不匹配的不发），
+    #      **事后检查最终 URL**：起始是 HTTPS 却落在 HTTP 上就中止。
+    #    所以这里守两条：凭据按协议条件 + 有"最终落在 HTTP 就中止"的检查。
     cap = src("browser-bridge/capabilities.js")
     _dl = cap.split("async function downloadViaSession(")[-1].split("// ───")[0] \
         if "async function downloadViaSession(" in cap else ""
-    r.ok("B2.5 下载不跟随重定向（杜绝跨协议带 cookie）",
-         'redirect: "error"' in _dl,
-         "必须出现在 downloadViaSession 里")
+    # 只剥注释（保留字符串，判据要看选项字面量）
+    _dl_code = strip_comments_only(_dl)
+    _no_manual = 'redirect: "manual"' not in _dl_code
+    _guards_final = ("resp.url" in _dl_code
+                     and "finalIsHttps" in _dl_code)
+    r.ok("B2.5 下载不会跨协议泄漏凭据（不用读不到 Location 的 manual）",
+         _no_manual and _guards_final,
+         f"manual 未用={_no_manual}；有最终 URL 协议检查={_guards_final}"
+         f"（manual 返回 opaqueredirect：status=0、响应头全空）")
     # [12] 不把本机绝对路径回传给服务。
     # ⚠️ 别用"子串在不在一起"这种脆弱判据 —— 格式化一下就能绕过。
     #    改成提取 listFiles 里的 map 对象字面量，检查它的**键**里有没有 path。

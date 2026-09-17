@@ -299,6 +299,26 @@ def run(r) -> None:
          bool(_dl) and _cond_ok and "sendChunk" in _dl,
          "凭据必须是按协议条件的表达式（HTTPS->include, 否则 omit），"
          f"且 sendChunk 在 downloadViaSession 内；实际 credentials={_expr!r}")
+    # ⚠️ 反向陷阱：`redirect:"manual"` 在浏览器里**读不到 Location**
+    #    （manual 返回 opaqueredirect：status=0、响应头全空），
+    #    所以"自己跟重定向"的思路根本走不通 —— 会变成"重定向全失败"。
+    #    曾经这么写过一版，属于**看着更安全、实际是坏的**。
+    #    这里明确守住：不许退回 manual。
+    #    ⚠️ 判据要**剥掉注释**再查：注释里正 解释 "为什么不用 manual"，
+    #       裸文本匹配会被自己的说明文字命中（自我误报）。
+    #    ⚠️ 要用 **strip_comments_only**（只剥注释、**保留**字符串字面量）——
+    #       `strip_js_noise` 会把字符串内容清空（它是为"找标识符"设计的），
+    #       `"follow"` 会被清成 `""` 从而匹配不到（我刚这么错过一次）。
+    try:
+        from ..harness import strip_comments_only as _sco
+        _dl_code = _sco(_dl)
+    except Exception:
+        _dl_code = _dl
+    r.ok("C8c 下载用浏览器跟随重定向（不用读不到 Location 的 manual）",
+         'redirect: "follow"' in _dl_code
+         and 'redirect: "manual"' not in _dl_code,
+         "manual 返回 opaqueredirect（status=0、无响应头）—— 自己跟根本读不到下一跳")
+
     # ── 凭据模式的**行为**验证（HTTP/HTTPS 各跑一次）──────────────
     # 语法检查只能证明"表达式里有 include 和 omit"；把条件写反
     # （HTTPS→omit、HTTP→include）或者条件恒真，语法检查照样通过，
