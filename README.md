@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.44
+# 浏览器插件 (Browser Plugin) 2.1.45
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,61 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.45（2026-09-17）
+
+**CodeRabbit 第四十五轮：3 条全部为真**，全部属于"**检查本身有洞**"。
+
+#### ① `local_access` 转发检测漏了 keyword-only 参数
+
+C6g 用 `fn.args.args` 找参数，而 `ast.arguments.args` **只含"位置或关键字"
+参数**。写成 `def fetch(url, *, local_access=True)` 的包装器转发完全正确，
+却会被判成"没这个参数" → **误报**（套件退出码变成 1）。
+→ 改成同时看 `posonlyargs` / `args` / `kwonlyargs`，并加 **C6g2** 自检：
+用**合成的 AST** 验四种参数形态都能认出来（不依赖仓库里现有代码恰好长什么样）。
+
+#### ② 删文件矩阵的**假绿**（我自己的工具）
+
+`crashed` 只看 `"未抛异常"`。可如果 `run_all.py` 在打印汇总**之前**就退出了
+（导入失败 / 删掉的就是运行器本身），`tot` 是 `None`，而 `crashed` 仍是
+`False` → 矩阵打出一个 ✓，后面跟着 `PASS ? / FAIL ?` ——
+**什么都没验，却看着通过了**。
+→ 判据补上 `tot is None`，并把两种情形**分开标**：
+`未跑完`（套件没产出汇总）vs `整段中断`（有汇总但某段抛异常）。
+
+实测：删 `regression/harness.py` 现在标 `未跑完`（修前是 ✓）；
+删 `regression/checks/file_hygiene.py` 同样。
+
+#### ③ "期望失败"的用例会**空转通过**
+
+`upload_detach.mjs` 的 B 场景（元素被删除 → 上传必须失败）只断言
+`rb.ok !== true`。可如果 setup（`upload_begin` / `upload_chunk`）自己就挂了，
+`upload_finish` 也会因为**没有有效会话**而失败 → 断言照样成立，
+**而它想验的"目标被移除时不得假报成功"根本没被验到**。
+（"期望失败"的用例天生有这个陷阱：它和"什么都没做成"长得一样。）
+
+→ 补上 `setupB = begunB.ok === true && chunkB.ok === true`，
+断言变成 `setupB && rb.ok !== true`，detail 里也把 setup 结果打出来。
+
+**实测反向验证**（把 B 的选择器改成不存在的 `#nope`，逼 setup 失败）：
+
+| | 旧版 | 新版 |
+|---|---|---|
+| 断言结果 | ✅ **通过（空转）** | ❌ 失败（正确抓出） |
+| detail | `{"__error":"上传会话不存在或已过期"}` | `setup=false …` |
+
+#### 同类自查
+
+按 ③ 的模式扫了 `regression/js/*.mjs` 里所有"期望失败"型断言
+（`ok: … !== true` / `ok: !…`）—— **只有这一处**，已修。
+Python 侧核对了 C 段：C1/C2/C4/C5 虽然只断言"被拒"，但同段有
+**正对照**（C3 读操作放行、C6 默认放行本机、C6d 收紧后公网仍放行），
+所以"机制整体坏成一律拒绝"这种失效模式会被挡住。
+
+#### 结果
+
+`regression/run_all.py` → **337/337，16 组全绿**；`pyflakes` 干净。
+版本 2.1.44 → 2.1.45。
 
 ### v2.1.44（2026-09-17）
 

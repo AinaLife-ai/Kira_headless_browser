@@ -364,7 +364,14 @@ def run(r) -> None:
             if not _calls:
                 continue          # 不封装 check_url，管不着
             _checked_names.append(fn.name)
-            _has_param = any(a.arg == "local_access" for a in fn.args.args)
+            # ⚠️ 参数要**三类都看**：`args` 只含"位置或关键字"参数。
+            #    写成 `def fetch(url, *, local_access=True)` 的包装器
+            #    转发得没问题，但只查 `args` 会判成"没这个参数" → 误报。
+            #    （`posonlyargs` 是 3.8+ 才有，用 getattr 兜住旧版本。）
+            _all_args = (list(getattr(fn.args, "posonlyargs", []))
+                         + list(fn.args.args)
+                         + list(fn.args.kwonlyargs))
+            _has_param = any(a.arg == "local_access" for a in _all_args)
             # 每个 check_url 调用都必须显式传 local_access=local_access
             _fwd = all(any(kw.arg == "local_access"
                            and getattr(kw.value, "id", None) == "local_access"
@@ -376,6 +383,29 @@ def run(r) -> None:
          not _pass_bad,
          f"未转发={_pass_bad or '无'}（会让开关在那条路径上失效）；"
          f"共检查 {len(_checked_names)} 个封装：{_checked_names}")
+
+    # C6g2 自检：三种参数形态都要认出来 —— 只有"位置或关键字"那种是真的
+    #   会漏（CR 指出）。这里用一个**合成的 AST** 验参数收集本身，
+    #   不依赖仓库里现有代码恰好长什么样。
+    def _collect_params(src_text):
+        _n = next(n for n in _ast.walk(_ast.parse(src_text))
+                  if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)))
+        return [x.arg for x in (list(getattr(_n.args, "posonlyargs", []))
+                                + list(_n.args.args)
+                                + list(_n.args.kwonlyargs))]
+
+    _forms = [
+        ("def f(url, local_access=True): pass", True),
+        ("def f(url, *, local_access=True): pass", True),
+        ("def f(local_access, url): pass", True),
+        ("def f(url, /, local_access=True): pass", True),
+        ("def f(url, timeout=1): pass", False),
+    ]
+    _form_bad = [t for t, want in _forms
+                 if ("local_access" in _collect_params(t)) != want]
+    r.ok("C6g2 自检：位置/关键字/仅关键字/仅位置 参数都能认出来",
+         not _form_bad,
+         f"判错={_form_bad or '无'}（漏掉 kwonlyargs 会把正确转发误报成缺陷）")
 
     # ── SSRF：内网地址必须拦（不只是回环）────────────────────────────
     #  ⚠️ 过去只判 is_loopback / is_unspecified，于是下面这些都放行：

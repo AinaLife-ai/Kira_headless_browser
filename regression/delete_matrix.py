@@ -64,12 +64,21 @@ def run_one(rel):
                            cwd=str(work), capture_output=True, text=True,
                            env=env, timeout=600)
         out = (r.stdout or "") + (r.stderr or "")
-        # ⚠️ 用 harness 自己的标记判"某段中断" —— 全文搜 "Traceback" 会
-        #    把**探针子进程**的报错文本也算进来（那些是以"原因"形式展示的
-        #    正常失败，不是崩溃）。
-        crashed = "未抛异常" in out
+        # ⚠️ 两个判据**缺一不可**：
+        #    ① "未抛异常" = harness 自己的"某段中断"标记。
+        #       （全文搜 "Traceback" 不行 —— 探针**子进程**的报错文本会以
+        #        "原因"的形式正常展示，那不是崩溃。）
+        #    ② **连"合计"都没有** = 套件根本没跑完（导入就炸 / 被删的就是
+        #       运行器自己）。只看 ① 的话这种会算成 ✓，打印出
+        #       "PASS ? / FAIL ?" —— 一个**假绿**：什么都没验，却看着通过了。
         tot = re.search(r"合计 PASS (\d+) / FAIL (\d+)", out)
-        return (rel, crashed, tot.group(1) if tot else "?",
+        if tot is None:
+            kind = "未跑完"        # 套件没产出汇总 —— 连"验了多少条"都不知道
+        elif "未抛异常" in out:
+            kind = "整段中断"      # 有汇总，但某段抛异常、后面的检查没跑
+        else:
+            kind = ""
+        return (rel, kind, tot.group(1) if tot else "?",
                 tot.group(2) if tot else "?", out)
     except subprocess.TimeoutExpired:
         return (rel, True, "?", "?", "TIMEOUT")
@@ -83,21 +92,25 @@ def main():
     print(f"候选 {len(cands)} 个（自动从读取器推导）\n")
     bad = []
     with cf.ThreadPoolExecutor(max_workers=jobs) as ex:
-        for rel, crashed, p, f, out in ex.map(run_one, cands):
-            mark = "✗ 崩溃" if crashed else "✓"
-            print(f"  {mark:8} 删 {rel:46} PASS {p} / FAIL {f}", flush=True)
-            if crashed:
-                bad.append((rel, out))
+        for rel, kind, p, f, out in ex.map(run_one, cands):
+            mark = f"✗ {kind}" if kind else "✓"
+            print(f"  {mark:10} 删 {rel:44} PASS {p} / FAIL {f}", flush=True)
+            if kind:
+                bad.append((rel, kind, out))
     print()
     if not bad:
         print("✅ 全部 %d 个：0 处崩溃（各段照跑、各自报错）" % len(cands))
     else:
-        print("❌ %d 处崩溃：" % len(bad))
-        for rel, out in bad:
-            print(f"\n──── {rel} ────")
+        print("❌ %d 处有问题：" % len(bad))
+        for rel, kind, out in bad:
+            print(f"\n──── {rel}  [{kind}] ────")
             for ln in out.splitlines():
-                if "Traceback" in ln or "Error" in ln or ".py\"" in ln:
+                if "Traceback" in ln or "Error" in ln or "未抛异常" in ln \
+                        or ".py\"" in ln:
                     print("   " + ln.strip()[:140])
+            if kind == "未跑完":
+                print("   （套件没打印汇总 —— 要么导入就炸，要么删掉的就是"
+                      "运行器自己；两种情况都不算「通过」）")
 
 
 if __name__ == "__main__":

@@ -75,14 +75,24 @@ out.push({
 });
 
 // ── B 元素被彻底删除 ─────────────────────────────────────────────────
-await call("upload_begin", { upload_id: "b", selector: "#f", name: "b.bin", size: 3 });
+// ⚠️ 这一段的**期望结果是"失败"** —— 所以必须**单独断言 setup 成功**。
+//    否则 upload_begin / upload_chunk 一旦挂掉（比如选择器写错、元素被
+//    提前摘掉），upload_finish 也会因为"没有有效会话"而失败，
+//    `rb.ok !== true` 照样成立 → 测试**空转通过**，而它想验的
+//    "目标被移除时不得假报成功"根本没被验到。
+//    （"期望失败"的用例天生有这个陷阱：它和"什么都没做成"长得一样。）
+const begunB = await call("upload_begin",
+  { upload_id: "b", selector: "#f", name: "b.bin", size: 3 });
 window.document.querySelector("#w").innerHTML = "<p>没有输入框了</p>";
-await call("upload_chunk", { upload_id: "b", index: 0, data: "AAAA" });
+const chunkB = await call("upload_chunk",
+  { upload_id: "b", index: 0, data: "AAAA" });
 const rb = await call("upload_finish", { upload_id: "b" });
+const setupB = begunB.ok === true && chunkB.ok === true;
 out.push({
   name: "目标被移除时必须失败（不得假报成功）",
-  ok: rb.ok !== true,
-  detail: JSON.stringify(rb),
+  ok: setupB && rb.ok !== true,
+  detail: `setup=${setupB}（begin/chunk 都必须成功，否则本用例空转）`
+          + ` finish=${JSON.stringify(rb)}`,
 });
 
 console.log(JSON.stringify(out));
