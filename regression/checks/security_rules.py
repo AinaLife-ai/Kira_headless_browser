@@ -24,6 +24,12 @@ const cases = [
   ["localhost:5267",   "ws:",  "localhost:5267"],
   ["example.com",      "wss:", "example.com:5267"],
   ["https://example.com", "wss:", "example.com:5267"],
+  // ⚠️ 显式的 **wss://** 输入：用户会直接粘完整地址，这条路径
+  //    与"裸主机名"不同（scheme 是**显式**给的，不靠回环判定推导），
+  //    必须也走通并保留 wss。
+  ["wss://example.com", "wss:", "example.com:5267"],
+  ["wss://example.com:9443", "wss:", "example.com:9443"],
+  ["ws://127.0.0.1:5267", "ws:", "127.0.0.1:5267"],
 ];
 let bad = [];
 for (const [h, wantScheme, wantHost] of cases) {
@@ -299,24 +305,52 @@ def run(r) -> None:
     # ⚠️ 要同时认 `def` 与 `async def` —— 只写 `def` 的话，
     #    封装函数改成异步之后就**扫不到**了，这条"开关必须一路传到底"
     #    的检查会静默失效（变成空集合 → 永远通过，假绿）。
-    _wrappers = re.findall(
-        r'(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)\s*(?:->[^:]*)?:\s*[\s\S]{0,600}?'
-        r'check_url\(',
-        _sec_src)
+    # ⚠️ 用 **AST** 逐个函数检查，不要用"从函数开头切 2000 字符"那种宽段 ——
+    #    切太宽时，**后面那个函数**里的 `local_access=local_access`
+    #    会给前面这个漏转发的封装"背书"（假通过）。
+    #    这里用 AST 拿到每个函数体里**它自己**的 check_url 调用，只看那些调用的关键字。
+    import ast as _ast
     _pass_bad = []
-    for _fn, _args in _wrappers:
-        if _fn == "check_url":
-            continue
-        _i = _sec_src.find(f"def {_fn}(")
-        if _i < 0:
-            _i = _sec_src.find(f"async def {_fn}(")
-        _call_seg = _sec_src[max(_i, 0):]
-        _call_seg = _call_seg[:2000]
-        if "local_access" not in _args or "local_access=local_access" not in _call_seg:
-            _pass_bad.append(_fn)
+    _checked_names = []
+    try:
+        _tree = _ast.parse(_sec_src)
+    except SyntaxError as e:
+        _tree = None
+        r.ok("C6g security.py 可解析", False, f"SyntaxError: {e}")
+
+    def _visits(node):
+        """遍历函数体，但**不进入嵌套函数**（它们的调用不算这个函数的）。"""
+        for child in _ast.iter_child_nodes(node):
+            if isinstance(child, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                  _ast.ClassDef)):
+                continue
+            yield child
+            yield from _visits(child)
+
+    if _tree is not None:
+        for fn in _ast.walk(_tree):
+            if not isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            if fn.name == "check_url":
+                continue
+            _calls = [c for c in _visits(fn)
+                      if isinstance(c, _ast.Call)
+                      and getattr(c.func, "id", None) == "check_url"]
+            if not _calls:
+                continue          # 不封装 check_url，管不着
+            _checked_names.append(fn.name)
+            _has_param = any(a.arg == "local_access" for a in fn.args.args)
+            # 每个 check_url 调用都必须显式传 local_access=local_access
+            _fwd = all(any(kw.arg == "local_access"
+                           and getattr(kw.value, "id", None) == "local_access"
+                           for kw in c.keywords)
+                       for c in _calls)
+            if not (_has_param and _fwd):
+                _pass_bad.append(fn.name)
     r.ok("C6g 所有封装 check_url 的函数都显式转发 local_access",
          not _pass_bad,
-         f"未转发={_pass_bad or '无'}（会让开关在那条路径上失效）")
+         f"未转发={_pass_bad or '无'}（会让开关在那条路径上失效）；"
+         f"共检查 {len(_checked_names)} 个封装：{_checked_names}")
 
     # ── SSRF：内网地址必须拦（不只是回环）────────────────────────────
     #  ⚠️ 过去只判 is_loopback / is_unspecified，于是下面这些都放行：

@@ -222,9 +222,14 @@ def run(r) -> None:
     # ── 配置项 ───────────────────────────────────────────────────────
     try:
         sch = json.loads(src_safe("schema.json"))
+        if not isinstance(sch, dict):
+            raise ValueError(f"schema 顶层不是对象（{type(sch).__name__}）")
     except Exception as e:
         r.ok("A7 schema 可解析", False, f"{type(e).__name__}: {e}")
-        return
+        # ⚠️ **不要 return** —— 下面 A7~A12 与 B 段（真跑探针）与
+        #    "schema 能否解析"**互相独立**，早退会让它们的结果完全看不见
+        #    （报告上只剩一条 A7 失败）。赋空对象继续走，各自报各自的结果。
+        sch = {}
     miss = [k for k in REQUIRED_SCHEMA_KEYS if k not in sch]
     r.ok("A7 schema 里的 VLM 配置项齐全", not miss, f"缺={miss or '无'}")
     r.ok("A8 auto_describe_screenshot 默认开启",

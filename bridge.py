@@ -342,6 +342,17 @@ class BrowserBridge:
             sink = self._sinks.get(cid)
             if not (cid and data and sink):
                 return
+            # ⚠️ 关于"同步写盘会不会阻塞事件循环 / 会不会与 _abort_sink 竞态"：
+            #    · **竞态：没有**。从 `self._sinks.get(cid)` 取到 sink 引用、
+            #      到 `handle.write()` 之间**没有任何 await** —— 在事件循环里
+            #      这一段是原子的，_abort_sink()（另一个 task）插不进来，
+            #      所以不会出现"写已经关掉的句柄"。
+            #    · **阻塞：量很小**。分块是 32KB（扩展侧 step=0x8000），
+            #      写普通文件是微秒级。慢盘/网络挂载上会有短暂阻塞，
+            #      但这是单文件顺序写，排队不会改善。
+            #    曾考虑过 per-sink 队列 + to_thread 彻底移出事件循环，
+            #    但那样要额外维护"写入/abort/close 三者的生命周期协调"，
+            #    为一个微秒级操作引入并发复杂度不划算 —— 保持现状。
             try:
                 import base64 as _b64
                 raw = _b64.b64decode(data)

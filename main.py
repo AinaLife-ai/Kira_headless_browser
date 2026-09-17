@@ -79,9 +79,11 @@ CONFIRM_WAIT_SECONDS = 45
 #      browser_script   —— 执行任意 JS（能做任何事）
 #      browser_cookie   —— 写 cookie（import 动作）
 #      browser_file     —— 上传/下载（会改变页面与本地状态）
+#      browser_test_visible —— 内部会 navigate 打开测试页（**确实改状态**），
+#                              只读模式下不摘掉的话，用户开了只读仍会被导航走
 WRITE_TOOL_NAMES = (
     "browser_interact", "browser_navigate", "browser_script",
-    "browser_cookie", "browser_file",
+    "browser_cookie", "browser_file", "browser_test_visible",
 )
 
 

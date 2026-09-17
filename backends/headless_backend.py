@@ -676,7 +676,13 @@ class HeadlessBackend(Backend):
                 setattr(self, attr, None)
         self._own_page = None
         self._creating_pages = set()
-        self._creating = 0
+        # ⚠️ **不要**把 _creating 清零 —— 它由 `_new_page()` 的 finally 负责递减。
+        #    如果此刻有 `_new_page()` 正卡在 `await context.new_page()` 上，
+        #    这里清零之后，它的 finally 再 `-= 1` 就把它变成**负数** ——
+        #    而 `_on_new_page()` 靠 `_creating > 0` 判断"有页面正在创建、
+        #    别回收它"，负数值会让这个保护**永久失效**（后续弹窗回收逻辑错乱）。
+        #    这里只保证属性存在（供后续读取），让它自己归零。
+        self._creating = max(getattr(self, "_creating", 0), 0)
         if self._playwright:
             try:
                 await self._playwright.stop()

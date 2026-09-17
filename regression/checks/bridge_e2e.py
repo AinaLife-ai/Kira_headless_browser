@@ -201,6 +201,11 @@ def run(r) -> None:
             await asyncio.sleep(0.05)
         results["handshake_ms"] = round((time.time() - t0) * 1000)
         results["connected"] = bridge.connected
+        # ⚠️ 光有 connected 不够 —— 上面那个等待循环是
+        #    "connected **且** 收到 hello"才 break 的，
+        #    断言里只查 connected 的话，"连上了但从没握手成功"
+        #    （协议字段全空、扩展版本报不出来）会照样通过。
+        results["hello_received"] = getattr(bridge, "_hello", None) is not None
 
         # 命令往返
         lat = []
@@ -307,8 +312,11 @@ def run(r) -> None:
         except OSError:
             pass
 
-    r.ok("E1 真实握手完成", results.get("connected"),
-         f"耗时 {results.get('handshake_ms')}ms")
+    r.ok("E1 真实握手完成（连接 + hello 都到位）",
+         results.get("connected") and results.get("hello_received"),
+         f"耗时 {results.get('handshake_ms')}ms；"
+         f"connected={results.get('connected')}、"
+         f"hello={results.get('hello_received')}")
     r.ok("E2 命令往返正常", results.get("cmd_p50", 9999) < 500,
          f"P50={results.get('cmd_p50')}ms")
     r.ok("E3 10 条并发命令 id 配对正确", results.get("fan_ok"),
