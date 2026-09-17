@@ -97,6 +97,7 @@ def _judge_port_guard(proto_text: str) -> bool:
     反过来，只盯消息文本也不行：注释里写一句"端口无效"就能满足。
     正确做法是：剥掉注释（排除说明文字）后，在**代码**里找那个
     范围判断。
+    另外：范围判断**单独不成立**（NaN 让两个比较都为假）—— 见下面 has_fmt。
     """
     code = strip_js_noise(proto_text)
     # 形态：`Number(p) < 1 || Number(p) > 65535`（可能带括号/空白差异）
@@ -104,7 +105,16 @@ def _judge_port_guard(proto_text: str) -> bool:
     has_hi = re.search(r'>\s*65535\b', code) is not None
     # 还要确认这两个比较出现在**同一行/邻近**（防止别处恰好有 <1）
     nearby = re.search(r'<\s*1\b[^\n]{0,80}>\s*65535\b', code) is not None
-    return has_lo and has_hi and nearby
+    # ⚠️ 光有范围比较**不够**：`Number("abc")` 是 NaN，而 `NaN < 1` 与
+    #    `NaN > 65535` **都是 false** —— 只判范围的话，把"非数字"那半
+    #    守卫删掉，判据**照样通过**（CR 点出）。所以还要另外要求
+    #    "非数字被拒绝"的证据：数字格式正则 / Number.isXxx / isNaN。
+    has_fmt = (
+        re.search(r'/\^(?:\\d|\[0-9\])\+\$/', code) is not None   # /^\d+$/
+        or re.search(r'Number\.(?:isInteger|isFinite|isNaN)\s*\(', code) is not None
+        or re.search(r'(?<![\w.$])isNaN\s*\(', code) is not None
+    )
+    return has_lo and has_hi and nearby and has_fmt
 
 
 def run(r) -> None:
@@ -204,3 +214,11 @@ def run(r) -> None:
          _judge_port_guard(no_port) is False
          and _judge_port_guard(proto) is True,
          "在真源码上 True、在变形文本上 False → 判据有效")
+    # ⚠️ C4：只删"非数字"那半（保留范围比较）—— 这正是 CR 说的漏网情形。
+    #    判据必须也变红，否则 FMT 那项等于没加。
+    no_fmt = proto.replace("!/^\\d+$/.test(p) || ", "")
+    r.ok("C4 只删非数字守卫、保留范围比较时本检查能发现",
+         no_fmt != proto
+         and _judge_port_guard(no_fmt) is False
+         and _judge_port_guard(proto) is True,
+         "范围比较在、格式守卫没了 → 必须报红（NaN 会让两个比较都为 false）")

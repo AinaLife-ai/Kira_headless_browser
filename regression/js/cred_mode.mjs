@@ -64,7 +64,15 @@ if (!seg) {
         // ⚠️ 注入的变量名要跟生产一致（逐跳版注入 hopIsHttps）；
         //    逐跳版的推导表达式里引用的是 currentUrl，这里用 url 代替它
         //    （单跳场景下 currentUrl === url，语义一致）。
-        const _expr = (mHop ? mHop[1] : httpsExpr).replace(/currentUrl/g, "url");
+        // ⚠️ 选哪个表达式要**看 credentials 引用的是谁**：
+        //    `credentials` 里写 `hopIsHttps` 才该用逐跳表达式；
+        //    写的是 `isHttps`（初始请求那套）就必须用 httpsExpr。
+        //    原来写成 `mHop ? mHop[1] : httpsExpr` —— 两个声明都在时
+        //    永远走前者，于是**重定向表达式正确就能掩盖初始请求表达式坏掉**，
+        //    真正的回归从检查里溜走。
+        const protocolExpr =
+          credVar === "hopIsHttps" && mHop ? mHop[1] : httpsExpr;
+        const _expr = protocolExpr.replace(/currentUrl/g, "url");
         // eslint-disable-next-line no-new-func
         const f = new Function("url",
           `const ${credVar || "isHttps"} = ${_expr};\nreturn (${credExpr});`);

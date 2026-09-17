@@ -373,6 +373,53 @@ def run(r) -> None:
         except Exception as e:
             r.ok("C8b 凭据模式行为验证", False, f"{type(e).__name__}: {e}"[:140])
 
+    # ── C8b2：凭据探测**自身**要能被证明有效（反向自检）──────────────
+    #  ⚠️ 补一个"两个声明共存"的陷阱：`const isHttps = true`（坏的，恒真）
+    #     + `const hopIsHttps = <正确>` + `credentials` 用 **isHttps**。
+    #     探测脚本若按 `mHop ? mHop[1] : httpsExpr` 选表达式，就会拿**正确的
+    #     hop 表达式**去喂 `isHttps`，把坏掉的那个**掩盖**过去 —— 全绿。
+    #    实测：旧写法在该夹具上 5/5 全绿（被骗），改成"按 credentials 引用的
+    #    变量名选"后正确报出 2 条红。这条检查保证它**一直**能报出来。
+    if _cred_js.is_file() and _node:
+        try:
+            import tempfile as _tf
+            _fixt = _tf.mkdtemp(prefix="kira_cred_selfcheck_")
+            try:
+                _bd = _os.path.join(_fixt, "browser-bridge")
+                _os.makedirs(_bd, exist_ok=True)
+                with open(_os.path.join(_bd, "capabilities.js"), "w",
+                          encoding="utf-8") as _f:
+                    _f.write(
+                        'const MAX_DOWNLOAD_BYTES = 1024;\n'
+                        'async function downloadViaSession(params, cmdId) {\n'
+                        '  const { url, max_bytes } = params;\n'
+                        '  // 坏：恒为真（HTTP 也会带凭据）\n'
+                        '  const isHttps = true;\n'
+                        '  // 好：逐跳判断\n'
+                        '  const hopIsHttps ='
+                        ' new URL(url).protocol === "https:";\n'
+                        '  const resp = await fetch(url, {\n'
+                        '    credentials: isHttps ? "include" : "omit",\n'
+                        '  });\n'
+                        '  return resp;\n'
+                        '}\n')
+                _e6 = {"PATH": _os.environ.get("PATH", "") + ":/usr/bin:/bin",
+                       "KIRA_PLUGIN_DIR": _fixt}
+                _cp6 = _subprocess.run([_node, str(_cred_js)], cwd=str(JS_DIR),
+                                       capture_output=True, text=True, env=_e6,
+                                       timeout=60)
+                _d6 = json.loads((_cp6.stdout or "[]").strip().splitlines()[-1])
+                _caught = [x for x in _d6 if not x.get("ok")]
+                r.ok("C8b2 凭据探测能识破「hop 表达式掩盖坏 isHttps」",
+                     len(_caught) >= 1,
+                     "夹具里 isHttps 恒真、hopIsHttps 正确、credentials 用 "
+                     "isHttps；探测必须报红，否则它会被正确的那条骗过"
+                     f"（实际报红 {len(_caught)} 条）")
+            finally:
+                _shutil.rmtree(_fixt, ignore_errors=True)
+        except Exception as e:
+            r.ok("C8b2 凭据探测自检", False, f"{type(e).__name__}: {e}"[:140])
+
     # ── 重定向流程的**行为**验证（真实 302 服务器）──────────────────
     #  ⚠️ 这条补的是"选项选对了没有"——上一版用 `redirect:"manual"`
     #     自己跟，看起来更保守，**在浏览器里却根本读不到 Location**

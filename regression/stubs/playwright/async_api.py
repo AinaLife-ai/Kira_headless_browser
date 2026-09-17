@@ -9,6 +9,8 @@ Models the parts that matter for leak analysis:
 Everything is counted in STATS so the test can assert on it.
 """
 
+from urllib.parse import urlsplit
+
 STATS = {
     "pages_created": 0,
     "pages_closed": 0,
@@ -302,9 +304,14 @@ class FakeContext:
         """
         if not url:
             return [dict(c) for c in self._cookies]
+        # ⚠️ 不能手切：`http://[::1]:8080/` 按 `:` 切会得到 `[`，
+        #    于是"[::1] 的 cookie"永远匹配不上，桩就悄悄返回了错的集合。
+        #    ⚠️ 这里**不能**用 `except Exception` 兜底 —— 那样一来函数名写错
+        #    （如 urlsplit 忘了导入）会伪装成"过滤失败 → 返回全部"，
+        #    比不过滤更糟，而且套件照样绿。只认"根本不是字符串"这一种。
         try:
-            host = url.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
-        except Exception:
+            host = urlsplit(url).hostname or ""
+        except (TypeError, ValueError):
             return [dict(c) for c in self._cookies]
         out = []
         for c in self._cookies:

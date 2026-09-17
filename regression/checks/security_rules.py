@@ -152,10 +152,18 @@ LOCAL_CASES = [
 
 
 def run(r) -> None:
+    # ⚠️ 结构性前提：`security.py` 不在就**整段无从谈起**。
+    #    不先判存在的话，`load_module` 抛 FileNotFoundError → 本段所有检查
+    #    一条都不跑，报告上只剩一句笼统的"未抛异常"（看不出缺的是什么）。
+    #    （"逐个删文件跑全套"矩阵抓出来的第二处。）
+    section("A. 域名规则匹配")
+    if not (PLUGIN_DIR / "security.py").is_file():
+        r.ok("security.py 存在（本组检查的前提）", False,
+             "缺少 security.py —— 域名/本机地址规则、check_url 行为全部无法检查")
+        return
     sec = load_module("security", PLUGIN_DIR / "security.py",
                       "kirabrowser_sec", PLUGIN_DIR)
 
-    section("A. 域名规则匹配")
     bad = []
     for host, pat, expect in MATCH_CASES:
         got = sec._matches(host, sec._normalize_pattern(pat))
@@ -439,6 +447,7 @@ def run(r) -> None:
     r.ok("B2.12 主机名解析到内网会被拦（不只比较字符串）",
          _resolved_ok, _resolved_detail)
 
+    # ── C. check_url 整体行为
     section("C. check_url 整体行为")
     # 黑名单优先
     ok, _ = sec.check_url("https://bankofamerica.com/x", blocked=["*.bank*"])
@@ -511,3 +520,40 @@ def run(r) -> None:
             _end_to_end.append(_u)
     r.ok("C6f 用默认配置端到端：本机地址确实可访问",
          not _end_to_end, f"仍被拦={_end_to_end or '无'}")
+
+    # ── C6g 文档断言 ↔ 实际行为（把"说法"钉在可跑的判据上）────────────
+    #  ⚠️ 文档里曾写着"想拦本机的用户在黑名单里写 127.0.0.1 就够了" ——
+    #    这是**错的**：黑名单是按主机名**文本**匹配的（`_matches`），
+    #    不做地址等价解析，写 `127.0.0.1` 只拦得住这一种写法。
+    #    实测 7 种等价写法只拦住 1 种，**包括云元数据端点都放过**。
+    #    这条检查把"文档的说法"和"代码的行为"绑在一起：
+    #    哪天有人给黑名单加了归一化，这条会红，逼着同步改文档
+    #    （而不是留着一句越看越错的说明）。
+    # 值 = **是否放行**（check_url 返回 ok）：
+    #   写了黑名单 127.0.0.1 → 只有它自己被拦，其余 6 种都放行。
+    _equiv = {
+        "http://127.0.0.1/": False,    # 字面命中 → 拦住
+        "http://127.1/": True,         # ↓ 以下都**绕过**（文档那张表）
+        "http://localhost/": True,
+        "http://[::1]/": True,
+        "http://2130706433/": True,
+        "http://0.0.0.0/": True,
+        "http://169.254.169.254/latest/meta-data/": True,
+    }
+    _blk = {u: sec.check_url(u, blocked=["127.0.0.1"])[0] for u in _equiv}
+    _mismatch = [u for u, want in _equiv.items() if _blk[u] != want]
+    r.ok("C6j 黑名单不做地址归一化（写 127.0.0.1 只拦它自己）",
+         not _mismatch,
+         f"与文档不符={_mismatch or '无'}（若这里通了，SECURITY_DESIGN 那张表也要改）")
+
+    _local = {u: sec.check_url(u, local_access=False)[0] for u in _equiv}
+    _leak = [u for u, ok in _local.items() if ok]
+    r.ok("C6k local_access=False 把上表 7 种**全部**拦住",
+         not _leak,
+         f"仍放过={_leak or '无'}（这才是「拦住本机」的正确开关）")
+
+    _doc = src_safe("SECURITY_DESIGN.md")
+    r.ok("C6l 文档写清了「拦本机要用 local_access，不是黑名单」",
+         "local_access" in _doc and "拦不住" in _doc
+         and "就够了" not in _doc,
+         "黑名单拦不住等价写法；文档必须点明用 local_access=False")

@@ -380,10 +380,20 @@ function tokenFingerprint(tok) {
   return tok.slice(-10);
 }
 
+// ⚠️ 每次令牌请求带一个**递增序号**，只认"最后一次发出"的那条的响应。
+//    原因：定期轮询 `loadToken(false)` 和用户点「重新生成」触发的
+//    `loadToken(true)` 是**并发**的，而 fetch 不保证先发先回。
+//    `/token` 处理器可能在强制请求轮换**之前**就把旧令牌给了轮询那条，
+//    它再晚一点返回 —— 面板上于是又显示回那枚**已经作废**的旧令牌，
+//    用户看到的像是"重新生成没生效"，甚至复制到一枚连不上的令牌。
+let _tokenSeq = 0;
+
 // 返回 true 表示这次确实换了一枚新令牌
 async function loadToken(force) {
+  const seq = ++_tokenSeq;
   try {
     const r = await api("/token" + (force ? "?force=true" : "?force=false"), { method: "POST" });
+    if (seq !== _tokenSeq) return false;   // 已有更新的请求 → 丢弃这次的结果
     if (!r.ok) {
       $("token").value = "生成失败：" + (r.error || "未知错误");
       $("fingerprint").textContent = "";
@@ -399,6 +409,7 @@ async function loadToken(force) {
       : ("有效期至 " + r.expires);
     return !!r.changed;
   } catch (e) {
+    if (seq !== _tokenSeq) return false;
     $("token").value = "读取失败：" + e.message;
     $("fingerprint").textContent = "";
     return false;

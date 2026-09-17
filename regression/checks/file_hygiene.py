@@ -142,7 +142,11 @@ def run(r) -> None:
     # ── B. JS 引用关系 ──────────────────────────────────────────────
     section("B. JS 文件引用关系")
     exm = ext_manifest()
-    sw = exm["background"]["service_worker"]
+    # ⚠️ `ext_manifest()` 在文件缺失 / JSON 坏掉时返回 `{}` —— 裸嵌套索引
+    #    会抛 KeyError，把 B~E 段全部带走（后面那些本该报出来的问题就都看不到了）。
+    #    这里逐层取默认值，让"缺 manifest"只影响它自己那几条断言。
+    _bg = exm.get("background") if isinstance(exm, dict) else None
+    sw = _bg.get("service_worker", "") if isinstance(_bg, dict) else ""
     content_scripts = set()
     for v in exm.get("content_scripts", []):
         content_scripts |= set(v.get("js", []))

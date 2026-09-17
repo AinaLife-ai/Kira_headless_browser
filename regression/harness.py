@@ -79,6 +79,130 @@ def src_safe(rel: str) -> str:
         return ""
 
 
+def _copy_interp_body(text: str, i: int, out: list) -> int:
+    """把模板插值体（`${` 之后到配对 `}`）原样抄进 *out*，返回闭合 `}` 之后的下标。
+
+    ⚠️ 插值体里是**真实 JS**，所以 `}` 不一定是插值的结束 —— 它可能出现在：
+
+      · **字符串字面量**里：`` `${"}"; socket.readyState}` ``
+      · 转义之后：`` `${"\\"}` ``
+      · **注释**里：`` `${/* } */ x}` ``
+      · **更深的嵌套模板**里：`` `${`${a}`}` ``
+
+    只按 `{`/`}` 计数的话，`` `${"}"; socket.readyState}` `` 会在字符串里
+    那个 `}` 处**提前收尾**，剩下的 `"; socket.readyState}` 被当成模板文本
+    丢掉 —— 于是 `socket.readyState` 这个（真会抛 `ReferenceError` 的）
+    裸引用**漏检**。这正是"检查器自己数错"的类型：不报错，只是悄悄少看一段。
+
+    已知边界：**正则字面量**靠"前一个有效字符"的经典启发式区分
+    （``/`` 紧跟 `(,=:[!&|?{};+-*%~^<>` 或位于表达式开头 → 正则），
+    不解析 `in` / `of` / `return` 之类的关键字上下文 ——
+    对"扫裸引用"这个用途足够，但不宣称是完整 JS 词法分析器。
+    """
+    depth = 1
+    n = len(text)
+    #: 前一个**有效字符**（跳过空白），用来判断 `/` 是正则还是除号。
+    #: 插值体开头视为"表达式起点" → `/` 按正则处理。
+    last_sig = ""
+    while i < n and depth > 0:
+        c = text[i]
+
+        # ① 字符串 / 模板字面量：整段照抄，里面的括号不参与计数
+        if c in "\"'`":
+            out.append(c)
+            i += 1
+            while i < n:
+                c2 = text[i]
+                if c2 == "\\":                  # 转义：连下一个字符一起抄
+                    out.append(c2)
+                    i += 1
+                    if i < n:
+                        out.append(text[i])
+                        i += 1
+                    continue
+                if c == "`" and c2 == "$" and i + 1 < n and text[i + 1] == "{":
+                    # 嵌套模板里的插值：递归处理（多层嵌套也不会数错）
+                    out.append("${")
+                    i = _copy_interp_body(text, i + 2, out)
+                    continue
+                out.append(c2)
+                i += 1
+                if c2 == c:
+                    break
+            last_sig = c
+            continue
+
+        # ② 注释：里面的括号同样不算
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                out.append(text[i])
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            out.append("/*")
+            i += 2
+            while i < n:
+                if text[i] == "*" and i + 1 < n and text[i + 1] == "/":
+                    out.append("*/")
+                    i += 2
+                    break
+                out.append(text[i])
+                i += 1
+            continue
+
+        # ③ 正则字面量：`/}/` 里的 `}` 也不是插值结束
+        if c == "/" and (last_sig == "" or last_sig in "(,=:[!&|?{};+-*%~^<>"):
+            out.append(c)
+            i += 1
+            in_class = False
+            while i < n:
+                c2 = text[i]
+                if c2 == "\\":
+                    out.append(c2)
+                    i += 1
+                    if i < n:
+                        out.append(text[i])
+                        i += 1
+                    continue
+                if c2 == "[":
+                    in_class = True
+                elif c2 == "]":
+                    in_class = False
+                elif c2 == "/" and not in_class:
+                    out.append(c2)
+                    i += 1
+                    break
+                elif c2 == "\n":                # 未闭合 → 当作除号，回退
+                    break
+                out.append(c2)
+                i += 1
+            last_sig = "/"
+            continue
+
+        # ④ 括号计数
+        if c == "{":
+            depth += 1
+            out.append(c)
+            i += 1
+            last_sig = "{"
+            continue
+        if c == "}":
+            depth -= 1
+            out.append(c)
+            i += 1
+            if depth == 0:
+                return i
+            last_sig = "}"
+            continue
+
+        out.append(c)
+        if not c.isspace():
+            last_sig = c
+        i += 1
+
+    return i
+
+
 def strip_js_noise(src_text: str) -> str:
     """剥掉 JS 的注释，保留字符串与模板串中 `${...}` 的真实代码。
 
@@ -99,9 +223,10 @@ def strip_js_noise(src_text: str) -> str:
     i = 0
     n = len(src_text)
     # 状态：code / line_comment / block_comment / str(' or ") / tmpl(`)
+    #  ⚠️ 模板串里的 `${...}` **不在这里处理** —— 插值体是真实 JS，
+    #     要按词法逐个跳过字符串/注释/嵌套模板（见 `_copy_interp_body`）。
     state = "code"
     quote = ""
-    depth = 0          # 模板串里 `${...}` 的嵌套深度
 
     while i < n:
         ch = src_text[i]
@@ -170,20 +295,7 @@ def strip_js_noise(src_text: str) -> str:
             if ch == "$" and nxt == "{":
                 # `${...}` 内部是**真实代码** —— 原样保留并嵌套计数
                 out.append("${")
-                i += 2
-                depth = 1
-                while i < n and depth > 0:
-                    c2 = src_text[i]
-                    if c2 == "{":
-                        depth += 1
-                    elif c2 == "}":
-                        depth -= 1
-                        if depth == 0:
-                            out.append("}")
-                            i += 1
-                            break
-                    out.append(c2)
-                    i += 1
+                i = _copy_interp_body(src_text, i + 2, out)
                 continue
             i += 1
             continue

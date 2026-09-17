@@ -278,6 +278,30 @@ def run(r) -> None:
          _scan(_clean) == [],
          f"夹具扫描结果={_scan(_clean)}（期望 []）")
 
+    # ── G1 自检夹具（二）：插值里的**词法陷阱** ─────────────────────
+    #  CR 指出：插值体里 `}` 不一定是插值的结束 —— 它可能在字符串 /
+    #  注释 / 嵌套模板里。只按 `{`/`}` 计数会在那里**提前收尾**，
+    #  剩下的代码被当模板文本丢掉 → 真会抛 ReferenceError 的裸引用**漏检**。
+    #  这几条夹具把每种陷阱都钉住（都调用同一个 `_scan`，不写副本）。
+    _lex = [
+        ("字符串里的 }",
+         'const s = `${"}"; socket.readyState}`;'),
+        ("转义之后的 }",
+         'const s = `${"\\"}" + socket.readyState}`;'),
+        ("块注释里的 }",
+         'const s = `${/* } */ socket.readyState}`;'),
+        ("行注释里的 }",
+         'const s = `${ // }\n socket.readyState}`;'),
+        ("嵌套模板里的 }",
+         'const s = `${`${"}"}` + socket.readyState}`;'),
+        ("正则字面量里的 }",
+         'const s = `${/}/.test(x) ? socket.readyState : 0}`;'),
+    ]
+    _missed = [n for n, src in _lex if _scan(src) != ["socket"]]
+    r.ok("G1 自检夹具：插值里的词法陷阱不得让裸引用漏检",
+         not _missed,
+         f"漏检={_missed or '无'}（这些都是真会抛 ReferenceError 的引用）")
+
     # ── F1b 写命令清单：两侧必须逐字一致 ──────────────────────────
     #  ⚠️ 这两份清单**各自写着"必须与对方保持同步"**，但一直没人验。
     #    它们决定"开了『写操作需确认』时，哪些命令要弹确认框"：

@@ -16,7 +16,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..harness import PLUGIN_DIR, install_stubs, src_safe
+from ..harness import (PLUGIN_DIR, ext_manifest, install_stubs,
+                       src_safe)
 
 TITLE = "运行时行为（生命周期 / 路由 / 内存）"
 
@@ -88,7 +89,15 @@ def run(r) -> None:
         r.ok("能加载插件后端模块（否则运行时检查无从谈起）", False,
              f"{type(e).__name__}: {e}")
         return
-    import playwright.async_api as pw
+    # ⚠️ 桩缺失要**明确报因**再停 —— 否则 ModuleNotFoundError 会让本段
+    #    后面的生命周期 / 路由 / 内存检查一条都不跑，报告上只有一句
+    #    "未抛异常"（矩阵抓出来的第一处）。
+    try:
+        import playwright.async_api as pw
+    except Exception as e:
+        r.ok("Playwright 桩可用（本组检查的前提）", False,
+             f"{type(e).__name__}: {e} —— 缺少 regression/stubs/playwright/")
+        return
     STATS = pw.STATS
 
     def reset():
@@ -279,8 +288,7 @@ def run(r) -> None:
             return "无头浏览器"
 
     # ── R9 页面操作串行化 ───────────────────────────────────────────
-    hbsrc = open(PLUGIN_DIR / "backends" / "headless_backend.py",
-                 encoding="utf-8").read()
+    hbsrc = src_safe("backends/headless_backend.py")
     r.ok("R9 页面操作有独立互斥锁（并发工具调用不会互相踩）",
          "_op_lock" in hbsrc and "async with self._op_lock" in hbsrc,
          "模型一轮里并发调 navigate+click 时，共用同一张页面")
@@ -295,11 +303,11 @@ def run(r) -> None:
     # ⚠️ 只看 `compatibility_report()` 里那句**兼容性声明** ——
     #    setup_guide 里另有一处 "Chrome 138+（userScripts 开关默认关闭）"
     #    讲的是另一件事，不能拿来跟 manifest 比。
-    import json as _json
-    _ext_mf = _json.loads(
-        open(PLUGIN_DIR / "browser-bridge" / "manifest.json",
-             encoding="utf-8").read())
-    _min_chrome = str(_ext_mf.get("minimum_chrome_version") or "").strip()
+    # ⚠️ 用 ext_manifest()（内部走 load_json_safe）——
+    #    裸 open() 在 `browser-bridge/manifest.json` 缺失时抛
+    #    FileNotFoundError，会**中断整组**（矩阵抓出来的第四处）。
+    _ext_mf = ext_manifest()
+    _min_chrome = str((_ext_mf or {}).get("minimum_chrome_version") or "").strip()
     _sg_src = src_safe("setup_guide.py")
     _cr = ""
     if "def compatibility_report(" in _sg_src:
@@ -316,8 +324,11 @@ def run(r) -> None:
          f"compatibility_report 里写的={_sg_ver or '没写'}")
 
     # ── R10 扩展 scroll 用瞬时行为 ──────────────────────────────────
-    cjs = open(PLUGIN_DIR / "browser-bridge" / "content.js",
-               encoding="utf-8").read()
+    # ⚠️ 用 src_safe 而不是裸 open() —— 缺文件时抛 FileNotFoundError 会
+    #    **中断整组**，R8/R9/R11 这些本该跑的检查一条都不执行，
+    #    报告上只剩一句笼统的"未抛异常"。
+    #    （"逐个删文件跑全套"矩阵抓出来的第三处。）
+    cjs = src_safe("browser-bridge/content.js")
     # ⚠️ 先判断分隔符在不在 —— 处理器被删/改名时 split 会 IndexError，
     #    那会直接中断整组检查、把后面的断言全跳过（假绿）。
     if "scroll(payload) {" not in cjs:
