@@ -235,32 +235,61 @@ export const NEEDS_CONFIRM_COMMANDS = new Set([
 
 /** 生成给用户看的确认文案 */
 export function confirmPromptFor(name, params) {
+  // ⚠️ 通知文案**不能带命令载荷里的敏感值** —— 通知会出现在锁屏、
+  //    通知中心，以及任何能看屏幕的人眼前，而载荷里可能是：
+  //      · 完整 URL（query 里常带 token / 会话 id）
+  //      · 用户要 AI 输入的文字（可能是密码等私密内容）
+  //      · 要执行的 JS 源码
+  //      · 上传/下载的文件名
+  //    所以**只给"动作 + 目标 + 载荷规模"**，不给实际取值。
+  //    要看细节请打开扩展面板（那是用户主动的动作）。
+  const _len = (v) => {
+    if (v == null) return 0;
+    if (typeof v === "string") return v.length;
+    if (Array.isArray(v)) return v.length;
+    try { return JSON.stringify(v).length; } catch (_) { return 0; }
+  };
+  const _host = (u) => {
+    // 只取主机名，丢掉路径与 query（那里常有 token）
+    try { return new URL(String(u)).host || "（未知站点）"; }
+    catch (_) { return "（未知站点）"; }
+  };
+  const _short = (v, n = 40) => {
+    const t = String(v == null ? "" : v);
+    return t.length > n ? t.slice(0, n) + "…" : t;
+  };
   switch (name) {
     case "navigate":
-      return ["跳转页面", `AI 想让浏览器打开：\n${params.url}`];
+      return ["跳转页面", `AI 想让浏览器打开站点：${_host(params.url)}`];
     case "cookie_get":
       return ["导出 Cookie",
-              `AI 想读取并导出当前站点（${params.url || "当前页"}）的 Cookie。\n`
+              `AI 想读取并导出站点 ${_host(params.url)} 的 Cookie。\n`
               + "这等于把登录态交给 AI，请确认是否允许。"];
     case "click":
       return ["点击元素",
-        `AI 想点击页面上的：${params.selector || params.text || `第 ${params.index} 个元素`}`];
+        `AI 想点击页面上的元素：`
+        + `${_short(params.selector || params.text) || "（未指定）"}`];
     case "type":
-      return ["输入内容", `AI 想在 ${params.selector} 输入：\n${params.text}`];
+      return ["输入内容",
+        `AI 想在 ${_short(params.selector)} 输入内容`
+        + `（${_len(params.text)} 个字符，内容不在此显示）`];
     case "exec_js":
       return ["执行 JavaScript",
-        `AI 想在当前页面执行这段代码：\n${String(params.script || "").slice(0, 300)}`];
+        `AI 想在当前页面执行一段 JavaScript`
+        + `（${_len(params.script)} 个字符，源码不在此显示）。`];
     case "upload":
       return ["上传文件",
-        `AI 想把文件「${params.name}」上传到 ${params.selector}`];
+        `AI 想上传一个文件到 ${_short(params.selector)}`
+        + `（文件名与内容不在此显示）`];
     case "download":
-      return ["下载文件", `AI 想用你的浏览器会话下载：\n${params.url}`];
+      return ["下载文件",
+        `AI 想用你的浏览器会话从 ${_host(params.url)} 下载文件`
+        + `（路径不在此显示）`];
     case "cookie_set":
       return ["写入 Cookie",
-        `AI 想向浏览器写入 ${(params.cookies || []).length} 条 cookie`];
+        `AI 想向浏览器写入 ${_len(params.cookies)} 条 cookie`];
     case "mouse_drag":
-      return ["鼠标拖拽",
-        `AI 想从 (${params.start_x},${params.start_y}) 拖到 (${params.end_x},${params.end_y})`];
+      return ["鼠标拖拽", `AI 想执行一次鼠标拖拽操作（坐标不在此显示）`];
     default:
       return [`执行 ${name}`, `AI 想执行浏览器操作：${name}`];
   }

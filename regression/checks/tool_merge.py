@@ -36,7 +36,11 @@ LEGACY = {
     "browser_test_visible": ("browser_test_visible", None),
     "browser_debug": ("browser_debug", None),
     # send_file 是「把本地已有文件发给用户」，两个用途分别由
-    # screenshot(send) 与 file(download) 覆盖 —— 有意合并，非遗漏
+    # screenshot(send) 与 file(download) 覆盖 —— 有意合并，非遗漏。
+    # ⚠️ 但**不能直接写 None**（那会被当成"有意合并"直接跳过校验）：
+    #    两个替代出口哪天被删掉/改名，能力就真丢了却查不出来。
+    #    这里登记成"必须存在的出口清单"，由 C1 逐项验证（见下）。
+    # （登记为下面的 SEND_FILE_EXITS 单独校验 —— 它有两个出口，不是一个）
     "browser_send_file": None,
     "browser_keyboard_type": ("browser_interact", "key_type"),
     "browser_keyboard_press": ("browser_interact", "key_press"),
@@ -113,6 +117,19 @@ LEGACY_PARAMS = {
     "browser_wait_for": ("selector", "text", "timeout"),
 }
 
+#: `browser_send_file`（把本地已有文件发给用户）的**两个**替代出口。
+#  ⚠️ 它被合并进两个工具而不是一个，所以不能用 LEGACY 的单出口格式表达 ——
+#    但那**不等于"不需要校验"**：任一出口被删/改名，能力就真丢了。
+#    这里显式列出，由 C1b 逐项验证"工具在 **且** 出口参数/动作在"。
+SEND_FILE_EXITS = (
+    # (工具名, 判定方式, 关键字, 说明)
+    ("browser_screenshot", "param", "send",
+     "截图后把图片发给用户（send 参数）"),
+    ("browser_file", "action", "download",
+     "下载并发给用户（mode=download）"),
+)
+
+
 NEED_ACTIONS = {
     "click", "fill", "type", "hover", "scroll", "upload",
     "go_back", "refresh",
@@ -180,6 +197,24 @@ def run(r) -> None:
     r.ok("C1 每个旧工具都有新出口（零能力丢失）", not missing,
          f"缺失={missing or '无'}；有意合并={len(intentional)} 个；"
          f"{len(LEGACY)} 个旧工具 → {len(now)} 个新工具名")
+
+    # ── C1b：browser_send_file 的两个出口都要在 ────────────────────
+    _sfe_bad = []
+    for _tn, _kind, _key, _desc in SEND_FILE_EXITS:
+        _seg = _tool_segment(main, _tn)
+        if not _seg:
+            _sfe_bad.append(f"{_tn}（工具不存在）")
+            continue
+        if _kind == "param":
+            if f'"{_key}"' not in _seg:
+                _sfe_bad.append(f"{_tn}（缺参数 {_key}）")
+        else:
+            if _key not in _tool_enum(main, _tn):
+                _sfe_bad.append(f"{_tn}（缺动作 {_key}）")
+    r.ok("C1b browser_send_file 的两个替代出口都存在",
+         not _sfe_bad,
+         f"缺失={_sfe_bad or '无'}；出口="
+         + "；".join(f"{t}.{k}（{d}）" for t, _, k, d in SEND_FILE_EXITS))
 
     # 交互动作齐全
     # ⚠️ 用 _tool_enum() 而不是全仓正则：后者会命中**别的工具**里的 enum，

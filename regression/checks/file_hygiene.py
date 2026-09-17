@@ -272,10 +272,36 @@ def run(r) -> None:
     #    它写的是"哪些看似可疑的行为是有意设计"（给自动审查看的），
     #    放在 README 里会淹没正文，独立成篇才是合适的。
     ALLOWED_MD = {"README.md", "SECURITY_DESIGN.md"}
-    stray_md = [f for f in files
+    # ⚠️ 同样用 **commit_files**（不是裸 files）—— D1~D3 已经改了，
+    #    这里漏了的话，一个被 .gitignore 忽略的 .md 会报 D4 失败，
+    #    尽管 git 根本提交不了它。（同类问题已经在 D1/D2/D3/D4 上
+    #    来回漏过三次：**判「该不该提交」的地方必须统一用同一个清单**。）
+    stray_md = [f for f in commit_files
                 if f.suffix == ".md" and f.name not in ALLOWED_MD]
     r.ok("D4 插件本体除 README/白名单外没有游离的 md",
          not stray_md, f"发现={stray_md or '无'}")
+
+    # ⚠️ 守卫：D 段（"不该提交的东西"）**必须**统一用 commit_files。
+    #    这个 bug 在 D1/D2/D3/D4 上各漏过一次（改了这条忘了那条），
+    #    所以在这里写一条**自检**：D 段的判据里不允许再出现裸 `files`。
+    _dsec = src("regression/checks/file_hygiene.py")
+    _dd = _dsec[_dsec.index("section(\"D. 不该出现在提交里的东西\")"):
+                _dsec.index("section(\"E. .gitignore\")")]
+    #    判据要精确：`commit_files = [f for f in files if not _is_ignored(...)]`
+    #    是**正确用法**（那正是"从裸清单算出提交清单"的降级路径），
+    #    只有"**直接用** files 做断言"才算违规。
+    #    所以：先去掉守卫自身那段（它的正则字面量会自指），
+    #    再匹配**不在 commit_files 赋值行**里的 `in files`。
+    _dd_wo_guard = _dd.split("# ⚠️ 守卫：D 段")[0]
+    _bare = []
+    for _ln in _dd_wo_guard.splitlines():
+        if "commit_files" in _ln:          # 算出提交清单的那两行
+            continue
+        if re.search(r"for\s+\w+\s+in\s+files\b", _ln):
+            _bare.append(_ln.strip()[:70])
+    r.ok("D-guard D 段的判据统一使用 commit_files（不再用裸 files）",
+         not _bare,
+         f"发现裸 files 用法 {len(_bare)} 处 —— 会让『被 gitignore 的文件』误报")
 
     # ── E. .gitignore ───────────────────────────────────────────────
     section("E. .gitignore")

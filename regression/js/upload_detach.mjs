@@ -48,8 +48,13 @@ const nfiles = (sel) => {
 
 const out = [];
 
+// ⚠️ 下面每处 `size` 都写 **3**：`"AAAA"` 这段 base64 解码后正好是 3 字节。
+//    声明值必须与实际内容一致 —— 虽然当前 size 只用于"上限预检"
+//    （不参与完成判断），但声明 100 却只传 3 字节会让测试数据本身误导人，
+//    也容易掩盖"size 预检坏了"这类问题。
+
 // ── C 正常 ────────────────────────────────────────────────────────────
-await call("upload_begin", { upload_id: "c", selector: "#f", name: "c.bin", size: 100 });
+await call("upload_begin", { upload_id: "c", selector: "#f", name: "c.bin", size: 3 });
 await call("upload_chunk", { upload_id: "c", index: 0, data: "AAAA" });
 const rc = await call("upload_finish", { upload_id: "c" });
 out.push({
@@ -59,7 +64,7 @@ out.push({
 });
 
 // ── A 重渲染，元素仍匹配同一选择器 ───────────────────────────────────
-await call("upload_begin", { upload_id: "a", selector: "#f", name: "a.bin", size: 100 });
+await call("upload_begin", { upload_id: "a", selector: "#f", name: "a.bin", size: 3 });
 window.document.querySelector("#w").innerHTML = '<input id="f" type="file">';
 await call("upload_chunk", { upload_id: "a", index: 0, data: "AAAA" });
 const ra = await call("upload_finish", { upload_id: "a" });
@@ -70,7 +75,7 @@ out.push({
 });
 
 // ── B 元素被彻底删除 ─────────────────────────────────────────────────
-await call("upload_begin", { upload_id: "b", selector: "#f", name: "b.bin", size: 100 });
+await call("upload_begin", { upload_id: "b", selector: "#f", name: "b.bin", size: 3 });
 window.document.querySelector("#w").innerHTML = "<p>没有输入框了</p>";
 await call("upload_chunk", { upload_id: "b", index: 0, data: "AAAA" });
 const rb = await call("upload_finish", { upload_id: "b" });

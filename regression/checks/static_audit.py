@@ -108,6 +108,24 @@ def run(r) -> None:
          any("127.0.0.1" in h for h in _hosts)
          and "<all_urls>" in _hosts,
          f"host_permissions={'有' if _hosts else '缺失/为空'}")
+    # ⚠️ `<all_urls>` 是**有意的设计**（不是疏漏），依据写在
+    #    SECURITY_DESIGN.md 的「5. 扩展申请全站 host 权限」：
+    #    content_scripts 的静态声明本身就需要它；改逐站授权要跨文件重构
+    #    注入链路；而真正的安全边界在插件侧（域名黑白名单 +
+    #    写操作逐次确认 + assertInjectable）。
+    #    这条断言的用途：如果哪天有人把 host 权限挪成 optional，
+    #    这里会红 —— 提醒他**同时**去改 content_scripts 与 SECURITY_DESIGN.md，
+    #    而不是只改一半（那会让扩展注入失败）。
+    _sec = src("SECURITY_DESIGN.md") if exists("SECURITY_DESIGN.md") else ""
+    # ⚠️ 判据要**容忍 markdown 标记**：标题里写的是 `**全站** host 权限`，
+    #    直接找 "全站 host 权限" 会因为中间的 `**` 匹配不上（自我误报）。
+    #    但**不能**把 `_` 也当标记剥掉 —— `<all_urls>` 里就有下划线，
+    #    剥了以后 `<allurls>` 反而匹配不上（我刚这么错过一次）。
+    #    只剥星号与反引号即可。
+    _sec_plain = re.sub(r'[*`]', '', _sec)
+    r.ok("A10b 全站 host 权限的取舍已记录在 SECURITY_DESIGN.md",
+         "全站 host 权限" in _sec_plain and "<all_urls>" in _sec_plain,
+         "省得每轮自动审查都把它当新缺陷报一遍")
 
     # A11 工具名不重复
     names = re.findall(r'name="(browser_[a-z_]+)"', main)

@@ -603,18 +603,38 @@
       const { start_x, start_y, end_x, end_y, button, steps } = payload;
       const sx = Number(start_x), sy = Number(start_y);
       const ex = Number(end_x), ey = Number(end_y);
-      const el = document.elementFromPoint(sx, sy);
-      if (!el) return fail(`起点 (${sx}, ${sy}) 处没有元素`);
-      flash(el);
-      el.dispatchEvent(new MouseEvent("mousedown", mouseInit(sx, sy, button)));
+      const startEl = document.elementFromPoint(sx, sy);
+      if (!startEl) return fail(`起点 (${sx}, ${sy}) 处没有元素`);
+      flash(startEl);
+      startEl.dispatchEvent(new MouseEvent("mousedown", mouseInit(sx, sy, button)));
       const n = Math.max(2, Number(steps) || 10);
       for (let i = 1; i <= n; i++) {
         const t = i / n;
-        el.dispatchEvent(new MouseEvent("mousemove",
-          mouseInit(sx + (ex - sx) * t, sy + (ey - sy) * t, button)));
+        const px = sx + (ex - sx) * t;
+        const py = sy + (ey - sy) * t;
+        // ⚠️ 每个中间点要发给**该点当前所在的元素**，不是一直发给起点元素。
+        //    真实拖拽里鼠标下方的元素会随位置变化（比如拖过不同列表项），
+        //    全发给起点元素的话，监听方（拖拽库、滑块、画布）收不到
+        //    对应元素上的事件，表现出来就是"拖拽没反应"。
+        const target = (i === n ? null : document.elementFromPoint(px, py))
+                       || startEl;
+        target.dispatchEvent(
+          new MouseEvent("mousemove", mouseInit(px, py, button)));
       }
-      el.dispatchEvent(new MouseEvent("mouseup", mouseInit(ex, ey, button)));
-      return { ok: true, match: `drag (${sx},${sy})→(${ex},${ey})` };
+      // 终点事件发给终点元素（拿不到就退回起点元素）
+      const endEl = document.elementFromPoint(ex, ey) || startEl;
+      endEl.dispatchEvent(new MouseEvent("mouseup", mouseInit(ex, ey, button)));
+      // ⚠️ 如实报告：这些是**合成的 MouseEvent**，**不会**触发 HTML5 原生
+      //    拖放（dragstart / dragover / drop）—— 那条路径需要真实拖拽数据。
+      //    不写清楚的话，调用方会以为"拖放完成了"，而目标页面的
+      //    ondragstart/ondrop 根本没跑（比如把文件拖进上传区会静默失败）。
+      return {
+        ok: true,
+        match: `drag (${sx},${sy})→(${ex},${ey})`,
+        note: "合成鼠标事件（mousedown/mousemove/mouseup），"
+              + "**不触发 HTML5 原生拖放**（dragstart/dragover/drop）",
+        native_dnd: false,
+      };
     },
 
     scroll(payload) {
