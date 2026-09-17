@@ -107,8 +107,16 @@ def run(r) -> None:
         return mod
 
     import core.logging_manager  # noqa: F401  (stub)
-    P = load("protocol", PLUGIN_DIR / "protocol.py")
-    B = load("bridge", PLUGIN_DIR / "bridge.py")
+    # ⚠️ 这两个模块是端到端检查的**结构性前提**（没有 bridge 就没有
+    #    WebSocket 客户端可测）。加载失败要**明确报出来**，
+    #    而不是抛裸 FileNotFoundError（那读起来像 harness 的 bug）。
+    try:
+        P = load("protocol", PLUGIN_DIR / "protocol.py")
+        B = load("bridge", PLUGIN_DIR / "bridge.py")
+    except Exception as e:
+        r.ok("能加载 protocol.py / bridge.py（端到端的前提）", False,
+             f"{type(e).__name__}: {e}")
+        return
 
     # 需要 node 才能跑假扩展客户端；没有就跳过（不算失败）
     import shutil as _sh

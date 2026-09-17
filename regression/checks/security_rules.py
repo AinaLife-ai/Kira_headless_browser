@@ -99,7 +99,7 @@ import subprocess as _sp
 import tempfile as _tf
 from pathlib import Path
 
-from ..harness import (PLUGIN_DIR, load_module, section, src,
+from ..harness import (PLUGIN_DIR, load_module, section, src_safe,
                        strip_comments_only)
 
 TITLE = "安全规则（域名 / 本机地址）"
@@ -175,7 +175,7 @@ def run(r) -> None:
 
     section("B2. 扩展的 WS 地址：非本机必须 wss")
     # 令牌放在 query string 里，明文 ws:// 到远程主机会把它暴露在网络上
-    pjs = src("browser-bridge/protocol.js")
+    pjs = src_safe("browser-bridge/protocol.js")
     r.ok("B2.1 有回环判定函数", "isLoopbackHost" in pjs)
     # 默认：本机 ws、其它主机 wss（远程能正常连，且令牌加密）
     r.ok("B2.2 非回环主机默认用 wss（令牌在 query 里必须加密）",
@@ -206,7 +206,7 @@ def run(r) -> None:
     #      Cookie：Secure cookie 绝不上 HTTP，域不匹配的不发），
     #      **事后检查最终 URL**：起始是 HTTPS 却落在 HTTP 上就中止。
     #    所以这里守两条：凭据按协议条件 + 有"最终落在 HTTP 就中止"的检查。
-    cap = src("browser-bridge/capabilities.js")
+    cap = src_safe("browser-bridge/capabilities.js")
     _dl = cap.split("async function downloadViaSession(")[-1].split("// ───")[0] \
         if "async function downloadViaSession(" in cap else ""
     # 只剥注释（保留字符串，判据要看选项字面量）
@@ -221,7 +221,7 @@ def run(r) -> None:
     # [12] 不把本机绝对路径回传给服务。
     # ⚠️ 别用"子串在不在一起"这种脆弱判据 —— 格式化一下就能绕过。
     #    改成提取 listFiles 里的 map 对象字面量，检查它的**键**里有没有 path。
-    cmds = src("browser-bridge/commands.js")
+    cmds = src_safe("browser-bridge/commands.js")
     fn = cmds.find("async function listFiles(")
     seg = cmds[fn:fn + 1600] if fn > 0 else ""
     # 取出 map((d) => ({ ... })) 里的返回字段。
@@ -318,7 +318,7 @@ def run(r) -> None:
     #     任何**封装了 check_url** 的函数如果不显式接收并转发这个参数，
     #     就会静默地用默认值 —— 用户把配置关掉了，那条路径照样放行。
     #     这正是"加了开关但开关没生效"的经典形态。
-    _sec_src = src("security.py")
+    _sec_src = src_safe("security.py")
     # ⚠️ 要同时认 `def` 与 `async def` —— 只写 `def` 的话，
     #    封装函数改成异步之后就**扫不到**了，这条"开关必须一路传到底"
     #    的检查会静默失效（变成空集合 → 永远通过，假绿）。
@@ -491,7 +491,12 @@ def run(r) -> None:
     #    用户明明开着开关，本机地址还是被黑名单拦掉。
     #    本机是否允许，统一由 local_access 决定。
     import json as _json
-    _sch = _json.loads(src("schema.json"))
+    # ⚠️ 用 try 包住：schema.json 缺失时 src_safe 返回空串，
+    #    json.loads("") 会抛 JSONDecodeError → 中断整组。
+    try:
+        _sch = _json.loads(src_safe("schema.json"))
+    except Exception:
+        _sch = {}
     _dflt_blocked = (_sch.get("blocked_domains") or {}).get("default") or []
     _conflict = [x for x in _dflt_blocked
                  if x.strip().lower() in ("127.0.0.1", "localhost", "::1",

@@ -179,12 +179,24 @@ def run(r) -> None:
         for item in data:
             r.ok(f"D {item['name']}", item["ok"], item.get("detail", ""))
 
+        # ⚠️ 空结果会让上面的循环**一次都不执行** —— 报告上什么都不显示，
+        #    但那是"**没检查**"，不是"检查通过"。必须显式报失败。
+        if _clicks_ok and not data:
+            r.ok("D0 点击行为探针有结果", False,
+                 "解析结果为空 —— 逐项检查被静默跳过（脚本没输出用例？）")
+
         # ── 分块流式上传：真实 DOM 下逐字节校验 ──────────────────────
         #  ⚠️ 只做静态检查是不够的：这段链路的正确性取决于
         #     "base64 → Uint8Array → Blob → File → input.files"
         #     每一步的字节是否无损，以及分块顺序/上限是否真的生效。
         #     这里用 jsdom 真跑一遍，把塞进 input.files 的内容读回来比对。
         up = JS_DIR / "upload_stream.mjs"
+        # ⚠️ 探测脚本是**仓库文件**，缺了就是回归不完整 ——
+        #    静默跳过会让人以为"上传链路已经验证过了"。
+        if not up.is_file():
+            r.ok("U 上传探测脚本存在（upload_stream.mjs）", False,
+                 "缺少 " + str(JS_DIR / "upload_stream.mjs") +
+                 " —— 这条链路将没有任何行为验证")
         if up.is_file():
             env2 = dict(env)
             # ⚠️ 必须把当前插件的根目录传下去，否则脚本会去测**默认目录**，
@@ -231,6 +243,12 @@ def run(r) -> None:
 
         # ── 上传会话的回收行为 ──────────────────────────────────────
         sweep = JS_DIR / "upload_sweep.mjs"
+        # ⚠️ 探测脚本是**仓库文件**，缺了就是回归不完整 ——
+        #    静默跳过会让人以为"上传链路已经验证过了"。
+        if not sweep.is_file():
+            r.ok("U 上传探测脚本存在（upload_sweep.mjs）", False,
+                 "缺少 " + str(JS_DIR / "upload_sweep.mjs") +
+                 " —— 这条链路将没有任何行为验证")
         if sweep.is_file():
             try:
                 _e3 = dict(env)
@@ -257,6 +275,11 @@ def run(r) -> None:
 
         # ── 上传过程中页面变化时，收尾不得假报成功 ──────────────────
         det = JS_DIR / "upload_detach.mjs"
+        # ⚠️ 同上：缺脚本要让检查报出来，不能静默跳过。
+        if not det.is_file():
+            r.ok("U 上传探测脚本存在（upload_detach.mjs）", False,
+                 "缺少 " + str(JS_DIR / "upload_detach.mjs") +
+                 " —— 这条链路将没有任何行为验证")
         if det.is_file():
             try:
                 _e4 = dict(env)

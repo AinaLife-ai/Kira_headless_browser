@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.41
+# 浏览器插件 (Browser Plugin) 2.1.42
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,72 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.42（2026-09-17）
+
+**按 CodeRabbit 第四十三轮审查修复 6 项** + **一轮主动自查**（发现问题比
+审查报的多）。
+
+#### 🔴 ① `harness.py` 里混进了检查代码（我上次提取函数时的损伤）
+
+上一轮把 `strip_comments_only` 提取到 `harness.py` 时，**误把
+`execjs_gates` 的 `_judge_port_guard` 和整个 `run()` 也带了过去** ——
+harness 里于是多了一份"永远不会被调用"的重复实现。它不报错（没人在
+harness 里调它），但会让人以为检查在那里跑。
+
+→ 删除（-118 行），并加守卫 **G2**（用 AST 判，不看注释里的示例文字）。
+
+#### 🟠 ② 下载：`resp.body` 可能是 `null`
+
+204 / 304 等响应本来就没有正文，直接 `.getReader()` 会抛
+`TypeError: Cannot read properties of null` —— 而那句话对用户毫无意义。
+→ 按"零字节文件"处理，返回与正常路径**同一个结构**（`{ok, url, mime, bytes:0}`）。
+
+#### 🟠 ③ content_dom 的两处"静默跳过"
+
+- **结果为空**：`for item in data` 一次都不执行，报告上什么都不显示 ——
+  但那是"**没检查**"，不是"检查通过"。→ 显式报失败。
+- **三个上传探测脚本缺失**：`if X.is_file():` 直接跳过，
+  会让人以为"上传链路已验证过"。→ 缺了就报失败。
+
+#### 🟡 ④⑤ 两处"根本没有行为验证"的补强
+
+- **重定向流程**：新增 `redirect_flow.mjs` —— 起一个**真实的 302 服务器**
+  跑两跳，验证"跟得到底、`resp.url` 指向最终地址、经过了两次重定向"，
+  并对"最终 URL 协议守卫"做真值表验证（起 HTTPS 落 HTTP → 拒绝）。
+  接成检查 **C8d**。
+- **tokens.py 的注释与实现矛盾**：注释说 `tv` 绑定"access_token + 代际号"，
+  但 `_fingerprint_input()` **原样返回 access_token**（代际号那套早废弃了，
+  掺进去会连新令牌一起被服务端拒）。作废走的是 `is_current_token()` 的
+  **jti 闸门**。→ 改正注释。
+
+#### 🔍 主动自查（比审查报的多）
+
+审查只点了 `static_audit` 的**前置读取**会中断整组。我按同一模式自查，
+写了"**逐个删文件跑全套**"的矩阵，结果抓出 **7 处同类问题**、横跨 5 个模块：
+
+| 缺哪个文件 | 修前 | 修后 |
+|---|---|---|
+| main.py / extension_backend / headless_backend / schema.json / manifest.json / protocol.js / shared.js / bridge.py / protocol.py / cred_mode.mjs | **7 处崩溃**（`未抛异常`） | **0 处崩溃** |
+
+现在删任何文件都是"**各段照跑、各自报错**"（几十条 FAIL，但报告完整、
+知道缺的是什么）。做法：
+
+- `harness` 的读取便捷函数全部改走 `*_safe`（`main_src`/`schema`/
+  `manifest`/`ext_manifest`/`ext_file`…）——**一处修，所有检查受益**；
+- 检查模块里的裸 `src()` 全部换成 `src_safe()`；
+- `json.loads(空串)` 会抛 `JSONDecodeError` → 包 try；
+- "结构性前提"（如 `bridge.py`/`protocol.py` 加载不了就无从测试）
+  **明确报出原因**再停，而不是抛裸 `FileNotFoundError`。
+
+**新增常驻守卫 G3a/G3b**：harness 的读取函数必须走 safe 变体、
+检查模块不许出现裸 `src(` —— 防这类问题再回来。
+
+#### 结果
+
+`regression/run_all.py` → **313/313，16 组全绿**；`pyflakes` 只剩 3 处
+**有意保留**（两个带 `# noqa` 的桩导入、一个要保留字面 `{PLUGIN_ID}` 的 f-string）。
+版本 2.1.41 → 2.1.42。
 
 ### v2.1.41（2026-09-17）
 

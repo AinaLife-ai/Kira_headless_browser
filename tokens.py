@@ -281,8 +281,14 @@ def issue_token(days: Optional[int] = DEFAULT_TOKEN_DAYS,
     payload = {
         "sub": "admin",
         "auth_mode": auth_mode,
-        # 绑定「access_token + 当前令牌世代号」：access_token 轮换，
-        # 或者用户在面板点「重新生成」，旧令牌都会立刻失效。
+        # ⚠️ `tv` 只绑定 **access_token 本身**，不掺任何"世代号"。
+        #    （`_fingerprint_input()` 原样返回 access_token —— 原因见它的
+        #      docstring：服务端 verify_session_token 校验的就是
+        #      `tv == sha256(app.state.access_token)[:16]`，
+        #      我们掺了别的东西会连**新令牌**一起被判不匹配。）
+        #    所以"用户在面板点重新生成 → 旧令牌立即失效"**不是**靠这里，
+        #    而是靠 `is_current_token()` 里的 **jti 闸门**：
+        #    新令牌有新的 jti，旧令牌的 jti 对不上就被拒。
         "tv": _access_token_fingerprint(_fingerprint_input(access_token, data_dir)),
         # 自定义标记，便于排查是谁签的
         "src": "browser_bridge",

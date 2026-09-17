@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..harness import EXT_DIR, PLUGIN_DIR, ext_manifest, section, src, src_safe
+from ..harness import EXT_DIR, PLUGIN_DIR, ext_manifest, section, src_safe
 
 TITLE = "文件冗余/缺失清点"
 
@@ -148,7 +148,7 @@ def run(r) -> None:
         content_scripts |= set(v.get("js", []))
     all_js = "\n".join((EXT_DIR / f.name).read_text(encoding="utf-8")
                        for f in js if f.parent.name == "browser-bridge")
-    popup_html = src("browser-bridge/popup.html")
+    popup_html = src_safe("browser-bridge/popup.html")
     popup_js = set(re.findall(r'src="([\w.]+)"', popup_html))
 
     for f in js:
@@ -171,7 +171,11 @@ def run(r) -> None:
             r'["\']\.?/?([\w./-]+\.(?:js|mjs|html|png|css))["\']', s_))
     man_refs = set()
     import json
-    man_refs.add(json.loads(src("manifest.json")).get("icon", ""))
+    # ⚠️ 同样要容错：manifest.json 缺失时空串会让 json.loads 抛错。
+    try:
+        man_refs.add(json.loads(src_safe("manifest.json")).get("icon", ""))
+    except Exception:
+        man_refs.add("")
     for v in exm.get("icons", {}).values():
         man_refs.add("browser-bridge/" + v)
     for v in exm.get("action", {}).get("default_icon", {}).values():
@@ -327,7 +331,7 @@ def run(r) -> None:
 
     # ── E. .gitignore ───────────────────────────────────────────────
     section("E. .gitignore")
-    gi = src(".gitignore") if (PLUGIN_DIR / ".gitignore").is_file() else ""
+    gi = src_safe(".gitignore") if (PLUGIN_DIR / ".gitignore").is_file() else ""
     need = ["__pycache__", "*.py[cod]", "data/files/cookie", "browser_profile"]
     miss = [k for k in need if k not in gi]
     r.ok("E1 .gitignore 覆盖缓存与运行时数据", not miss, f"缺={miss or '无'}")

@@ -25,7 +25,7 @@ import tempfile
 import types
 from pathlib import Path
 
-from ..harness import PLUGIN_DIR, STUBS_DIR, section
+from ..harness import PLUGIN_DIR, STUBS_DIR, section, src_safe
 
 TITLE = "两后端返回契约一致性"
 
@@ -98,7 +98,8 @@ def _load_pkg():
 def _render_fields() -> dict[str, set[str]]:
     """静态抽 _render() 里每个分支读的 d.get("x")"""
     import ast
-    src = (PLUGIN_DIR / "main.py").read_text(encoding="utf-8")
+    # ⚠️ 用 src_safe：main.py 缺失时不该让整组中断（各段自己报错）。
+    src = src_safe("main.py")
     tree = ast.parse(src)
     out: dict[str, set[str]] = {}
     for node in ast.walk(tree):
@@ -253,7 +254,7 @@ async def _collect_hb(mod, tmp) -> dict[str, set[str]]:
 
     # download 需要真网络，沙箱跑不了 → 源码字段兜底
     if not out.get("download"):
-        body = (PLUGIN_DIR / "backends" / "headless_backend.py").read_text(encoding="utf-8")
+        body = src_safe("backends/headless_backend.py")
         i = body.find("async def download(")
         if i > 0:
             # ⚠️ 要允许跨行 —— 返回字典常写成多行，
@@ -295,10 +296,19 @@ async def _collect_eb(mod, P, tmp) -> dict[str, set[str]]:
 
 
 def run(r) -> None:
-    _load_pkg()
-    hbmod = sys.modules["kirabrowser_contract.backends.headless_backend"]
-    ebmod = sys.modules["kirabrowser_contract.backends.extension_backend"]
-    P = sys.modules["kirabrowser_contract.protocol"]
+    # ⚠️ 加载失败要**明确报出来**并停在这里 —— 两个后端模块是"比对契约"
+    #    的**结构性前提**（少一个就没有可比的对象），继续跑只会连环报错。
+    #    重点是把原因说清楚，而不是抛一句裸 FileNotFoundError
+    #    （那读起来像 harness 自己的 bug）。
+    try:
+        _load_pkg()
+        hbmod = sys.modules["kirabrowser_contract.backends.headless_backend"]
+        ebmod = sys.modules["kirabrowser_contract.backends.extension_backend"]
+        P = sys.modules["kirabrowser_contract.protocol"]
+    except Exception as e:
+        r.ok("能加载两个后端模块（否则无从比对契约）", False,
+             f"{type(e).__name__}: {e}")
+        return
 
     rf = _render_fields()
     if not rf:

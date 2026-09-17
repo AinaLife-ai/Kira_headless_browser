@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..harness import PLUGIN_DIR, install_stubs, src
+from ..harness import PLUGIN_DIR, install_stubs, src_safe
 
 TITLE = "运行时行为（生命周期 / 路由 / 内存）"
 
@@ -79,7 +79,15 @@ def _mk(mod, tmp, **cfg):
 
 
 def run(r) -> None:
-    hbmod = _load_plugin()
+    # ⚠️ 插件模块加载失败时**明确报出来**并停在这里：运行时行为检查
+    #    全都建立在"能把插件 import 起来"之上（结构性前提）。
+    #    重点是给出清楚的原因，而不是抛裸 ModuleNotFoundError。
+    try:
+        hbmod = _load_plugin()
+    except Exception as e:
+        r.ok("能加载插件后端模块（否则运行时检查无从谈起）", False,
+             f"{type(e).__name__}: {e}")
+        return
     import playwright.async_api as pw
     STATS = pw.STATS
 
@@ -292,7 +300,7 @@ def run(r) -> None:
         open(PLUGIN_DIR / "browser-bridge" / "manifest.json",
              encoding="utf-8").read())
     _min_chrome = str(_ext_mf.get("minimum_chrome_version") or "").strip()
-    _sg_src = src("setup_guide.py")
+    _sg_src = src_safe("setup_guide.py")
     _cr = ""
     if "def compatibility_report(" in _sg_src:
         _cr = _sg_src.split("def compatibility_report(")[1]

@@ -12,10 +12,7 @@ import re
 from pathlib import Path
 
 from ..harness import (
-    EXT_DIR, PLUGIN_DIR, backend_methods, called_backend_methods,
-    ext_file, ext_manifest, exists, headless_src, extension_src,
-    bridge_src, main_src, manifest, schema, section, src, src_safe,
-    tool_names,
+    EXT_DIR, PLUGIN_DIR, backend_methods, called_backend_methods, ext_file, ext_manifest, exists, headless_src, extension_src, bridge_src, main_src, manifest, schema, section, src_safe, tool_names,
 )
 
 TITLE = "静态一致性审计"
@@ -36,7 +33,7 @@ def run(r) -> None:
     sch = schema()
     man = manifest()
     exm = ext_manifest()
-    proto_py = src("protocol.py")
+    proto_py = src_safe("protocol.py")
     proto_js = ext_file("protocol.js")
     ext_names = tool_names(main)
 
@@ -116,7 +113,7 @@ def run(r) -> None:
     #    这条断言的用途：如果哪天有人把 host 权限挪成 optional，
     #    这里会红 —— 提醒他**同时**去改 content_scripts 与 SECURITY_DESIGN.md，
     #    而不是只改一半（那会让扩展注入失败）。
-    _sec = src("SECURITY_DESIGN.md") if exists("SECURITY_DESIGN.md") else ""
+    _sec = src_safe("SECURITY_DESIGN.md")
     # ⚠️ 判据要**容忍 markdown 标记**：标题里写的是 `**全站** host 权限`，
     #    直接找 "全站 host 权限" 会因为中间的 `**` 匹配不上（自我误报）。
     #    但**不能**把 `_` 也当标记剥掉 —— `<all_urls>` 里就有下划线，
@@ -292,7 +289,7 @@ def run(r) -> None:
     for rel in ("web/index.html", "browser-bridge/protocol.js"):
         if not exists(rel):
             continue
-        body = src(rel)
+        body = src_safe(rel)
         for i, ln in enumerate(body.splitlines(), 1):
             if "/api/plugin/" in ln or "/ws/plugin/" in ln:
                 # 该行必须含正确的 plugin_id，或者是动态拼接
@@ -310,7 +307,7 @@ def run(r) -> None:
     if not exists("README.md"):
         r.warn("README.md 不存在")
     else:
-        readme = src("README.md")
+        readme = src_safe("README.md")
         # 只认**工具名**：browser_ 前缀且后面是工具命名风格。
         # 别把文件名（browser_bridge.py）或配置项（browser_channel）算进来 ——
         # 这里额外排除已知不是工具的标识。
@@ -524,7 +521,7 @@ def run(r) -> None:
     #    真实发生过：cookie_get 里 `_check_tab_id(tab_id)` 连着写了三遍
     #    （删过一次，后来重写那段时又带回来了）。它不影响功能，
     #    但会让人以为"这里有额外的校验逻辑"，也白跑两遍。
-    _hb_code2 = re.sub(r'#.*$', '', src("backends/headless_backend.py"), flags=re.M)
+    _hb_code2 = re.sub(r'#.*$', '', src_safe("backends/headless_backend.py"), flags=re.M)
     # ⚠️ 按**函数体**统计，而不是匹配固定的空白形态 ——
     #    正则匹配缩进/换行很脆（我刚写的版本就没能在反向验证里报红）。
     #    判据：同一个方法里，同一句校验最多出现一次。
@@ -548,7 +545,7 @@ def run(r) -> None:
     #    看起来在做 cookie 导入，其实什么都没做。
     #    这种代码会**一直躺在里面**：它不报错、不影响功能，只是白跑一轮，
     #    但会让人以为"这里处理了 cookie"（我删过一次，改别处时又带回来了）。
-    _hb_cookie = src("backends/headless_backend.py")
+    _hb_cookie = src_safe("backends/headless_backend.py")
     # ⚠️ 先剥注释：我在这段旁边加了说明，注释里也写着 update_cookies({}, ...)，
     #    不剥掉的话**自己的注释会让检查永远为红**（假红）。
     _hb_code = re.sub(r'#.*$', '', _hb_cookie, flags=re.M)
@@ -562,7 +559,7 @@ def run(r) -> None:
     #    1009 并**关闭整个连接** —— 一次超大上传会把连接打断，
     #    连带后面所有命令一起崩，而不只是这一条失败。
     #    任何"把整份文件塞进一条消息"的做法都会踩这个坑。
-    _eb_code = src("backends/extension_backend.py")
+    _eb_code = src_safe("backends/extension_backend.py")
     r.ok("C16f 上传不把整份文件塞进单条 WS 消息（16MiB 帧上限）",
          "CMD_UPLOAD_CHUNK" in _eb_code
          and "chunks\": chunks" not in _eb_code
@@ -600,7 +597,7 @@ def run(r) -> None:
 
     # ⚠️ 判定必须用「写操作 ∪ 只读敏感」的**并集**，而且 cookie_get
     #    必须在确认集合里 —— 否则导出登录态会被静默放行。
-    shared = src("browser-bridge/shared.js")
+    shared = src_safe("browser-bridge/shared.js")
     r.ok("C16 二次确认集中在 runCommand（高危命令不绕过）",
          "NEEDS_CONFIRM_COMMANDS" in bg
          and "NEEDS_CONFIRM_COMMANDS.has(name)" in bg
@@ -731,8 +728,8 @@ def run(r) -> None:
     # ══════════════════════════════════════════════════════════════
     section("D. 运行时坑")
     # ══════════════════════════════════════════════════════════════
-    # ⚠️ 用 src_safe 而不是 src()：这些文件里任何一个被删/改名，
-    #    直接 src() 会抛 FileNotFoundError，**整个 D 段就此中断** ——
+    # ⚠️ 用 src_safe 而不是 src_safe()：这些文件里任何一个被删/改名，
+    #    直接 src_safe() 会抛 FileNotFoundError，**整个 D 段就此中断** ——
     #    后面 D2/D3/编译检查全都不执行，报告上只剩一条笼统异常，
     #    看不出到底缺了哪个文件。
     for name in ("main.py", "backends/headless_backend.py",

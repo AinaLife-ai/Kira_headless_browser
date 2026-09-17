@@ -372,6 +372,15 @@ async function downloadViaSession(params, cmdId) {
   }
 
   const mime = resp.headers.get("Content-Type") || "application/octet-stream";
+  // ⚠️ `resp.body` 可能是 **null** —— 有些响应本来就没有正文
+  //    （204 No Content、304 Not Modified、HEAD 请求的响应等）。
+  //    直接 `.getReader()` 会抛 `TypeError: Cannot read properties of null`，
+  //    而那句话对用户毫无意义。这里按"零字节文件"处理：
+  //    返回与正常路径**同一个结构**（ok/url/mime/bytes），bytes=0，
+  //    调用方不必为这种情况写特例。
+  if (!resp.body) {
+    return { ok: true, url, mime, bytes: 0 };
+  }
   const reader = resp.body.getReader();
   const CHUNK = 256 * 1024;          // 每块 256KB
   let total = 0;

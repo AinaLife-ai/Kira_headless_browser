@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from ..harness import section, src, strip_js_noise
+from ..harness import section, src_safe, strip_js_noise
 
 TITLE = "接线完整性（配置接通 / 数据透传）"
 
@@ -60,9 +60,9 @@ def _write_commands_from_protocol() -> set:
     取真实值（而不是正则扫字面量）才能覆盖"派生形式"，
     也才能验证"protocol 加了新命令时确实会自动生效"。
     """
-    # ⚠️ 不要在这里写 `src = src("protocol.py")` —— 那会在本函数内
-    #    遮蔽模块级导入的 `src`，之后再调 `src(...)` 就 UnboundLocalError。
-    _proto_src = src("protocol.py")
+    # ⚠️ 不要在这里写 `src = src_safe("protocol.py")` —— 那会在本函数内
+    #    遮蔽模块级导入的 `src`，之后再调 `src_safe(...)` 就 UnboundLocalError。
+    _proto_src = src_safe("protocol.py")
     m = re.search(r'WRITE_COMMANDS\s*=\s*frozenset\(\{(.*?)\}\)', _proto_src, re.S)
     if not m:
         return set()
@@ -77,12 +77,13 @@ def _write_commands_from_protocol() -> set:
 
 
 def run(r) -> None:
-    main = src("main.py")
-    eb = src("backends/extension_backend.py")
+    # ⚠️ 前置读取用 src_safe —— 缺文件时各段自己报错，不中断整组。
+    main = src_safe("main.py")
+    eb = src_safe("backends/extension_backend.py")
     # 注意：共享状态与常量的定义在 shared.js（不是 background.js）——
     # 这正是之前那次「模块作用域」事故的产物，检查里也要跟上。
-    bg = src("browser-bridge/background.js") + src("browser-bridge/shared.js")
-    bg_bg = src("browser-bridge/background.js")
+    bg = src_safe("browser-bridge/background.js") + src_safe("browser-bridge/shared.js")
+    bg_bg = src_safe("browser-bridge/background.js")
 
     # ══════════════════════════════════════════════════════════════
     section("A. 后端返回的数据，渲染层（_render）真的用上了吗")
@@ -155,7 +156,7 @@ def run(r) -> None:
     sch = schema()
     read = set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"', main))
     read |= set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"',
-                           src("backends/headless_backend.py")))
+                           src_safe("backends/headless_backend.py")))
     orphan = sorted(set(sch) - read)
     r.ok("C1 没有「schema 里有但没人读」的配置项",
          not orphan, f"孤儿={orphan or '无'}（共 {len(sch)} 项）")
@@ -186,7 +187,7 @@ def run(r) -> None:
     #    那里写错默认值同样不会被发现。
     config_sources = [("main.py", main),
                       ("backends/headless_backend.py",
-                       src("backends/headless_backend.py"))]
+                       src_safe("backends/headless_backend.py"))]
     mismatch = []
     for key, item in sch.items():
         if isinstance(item.get("default"), bool):
@@ -217,7 +218,7 @@ def run(r) -> None:
     # ══════════════════════════════════════════════════════════════
     section("D. 两后端的「确认」行为一致性")
     # ══════════════════════════════════════════════════════════════
-    hb = src("backends/headless_backend.py")
+    hb = src_safe("backends/headless_backend.py")
     r.ok("D1 无头后端不做二次确认（它没有通知通道）",
          "require_confirm" not in hb,
          "确认只在扩展桥有意义；无头侧由只读/白名单把关")
@@ -229,7 +230,7 @@ def run(r) -> None:
     # ══════════════════════════════════════════════════════════════
     # 这是个安全语义问题：如果「拒绝」被当成普通失败，路由会换到下一个后端
     # 把同一件事做了 —— 用户以为自己拦住了，其实没有。
-    base = src("backends/base.py")
+    base = src_safe("backends/base.py")
     r.ok("E1 OpResult 区分「被拒绝」与「失败」",
          "declined" in base and "declined_by_user" in base)
     r.ok("E2 扩展后端用 declined 标记用户拒绝",
@@ -286,7 +287,7 @@ def run(r) -> None:
     #    所以这里把它变成机器可判定的约束。
     # ⚠️ 与 B2 用**同一个解析入口**：Python 侧现在是"从 protocol 派生"，
     #    不再是字面量集合。判据要认两种形态，否则一改定义方式就误报。
-    _eb_src = src("backends/extension_backend.py")
+    _eb_src = src_safe("backends/extension_backend.py")
     _lit = re.search(r'WRITE_CMDS\s*=\s*\{(.*?)\}', _eb_src, re.S)
     if _lit:
         _py_writes = set(re.findall(r'"([a-z_]+)"', _lit.group(1)))
@@ -295,9 +296,9 @@ def run(r) -> None:
     _js_writes = set(re.findall(
         r'"([a-z_]+)"', re.search(
             r'PRIVILEGED_COMMANDS\s*=\s*new Set\(\[([^\]]*)\]',
-            src("browser-bridge/shared.js"), re.S).group(1))) \
+            src_safe("browser-bridge/shared.js"), re.S).group(1))) \
         if re.search(r'PRIVILEGED_COMMANDS\s*=\s*new Set\(\[',
-                     src("browser-bridge/shared.js")) else set()
+                     src_safe("browser-bridge/shared.js")) else set()
     _diff = sorted(_py_writes ^ _js_writes)
     r.ok("F1b 写命令清单两侧一致（Python WRITE_CMDS ⟷ 扩展 PRIVILEGED_COMMANDS）",
          bool(_py_writes) and bool(_js_writes) and not _diff,

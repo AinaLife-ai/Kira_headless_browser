@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from ..harness import PLUGIN_DIR, section, src
+from ..harness import PLUGIN_DIR, section, src_safe
 
 TITLE = "声称 ↔ 实际（写了但没改）"
 
@@ -72,12 +72,16 @@ def _check_upload_defaults(r):
     bad = []
     ceiling = 256 * 1024 * 1024
 
-    sch = json.loads((PLUGIN_DIR / "schema.json").read_text(encoding="utf-8"))
+    # ⚠️ 前置读取用 safe 版：缺文件时各段自己报错，不中断整组。
+    try:
+        sch = json.loads(src_safe("schema.json"))
+    except Exception:
+        sch = {}
     d = (sch.get("upload_max_bytes") or {}).get("default")
     if d != ceiling:
         bad.append(f"schema.json default={d}（期望 {ceiling}）")
 
-    main = src("main.py")
+    main = src_safe("main.py")
     m = re.search(r'cfg\.get\("upload_max_bytes",\s*([^)]+)', main)
     if not m:
         bad.append("main.py 里找不到 upload_max_bytes 的兜底值")
@@ -90,11 +94,11 @@ def _check_upload_defaults(r):
         if val != ceiling:
             bad.append(f"main.py 兜底={expr}（期望 {ceiling}）")
 
-    rm = src("README.md")
+    rm = src_safe("README.md")
     if str(ceiling) not in rm:
         bad.append(f"README.md 里没写 {ceiling}")
 
-    eb = src("backends/extension_backend.py")
+    eb = src_safe("backends/extension_backend.py")
     mc = re.search(r"MAX_UPLOAD_BYTES = ([0-9]+ \* 1024 \* 1024)", eb)
     if not mc:
         bad.append("extension_backend.py 找不到 MAX_UPLOAD_BYTES")
@@ -131,7 +135,7 @@ def run(r):
         if not p.is_file():
             bad.append(f"{claim}（文件不存在：{rel}）")
             continue
-        body = src(rel)
+        body = src_safe(rel)
         if not re.search(pat, body):
             bad.append(f"{claim}（{rel} 里找不到 {pat}）")
 

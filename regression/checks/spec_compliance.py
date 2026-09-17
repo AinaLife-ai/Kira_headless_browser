@@ -181,3 +181,75 @@ def run(r) -> None:
         r.ok("G1 regression/README.md 的 checks 清单覆盖所有已登记模块",
              not _missing,
              f"README 里缺={_missing or '无'}（已登记 {len(_registered)} 个）")
+
+    # ── G2 harness 只放"共享夹具"，不放检查 ──────────────────────
+    #  ⚠️ 补一次自己犯的错：把函数从某个 check 模块提取到 harness 时，
+    #    误把**该模块的检查代码**（`_judge_*` / `run()`）也带了过去 ——
+    #    harness 里于是多了一份"永远不会被调用"的重复实现。
+    #    它不会报错（没人 import 它），但会让人以为检查在那里跑。
+    #    ⚠️ 判据必须排除**注释/文档字符串** —— harness 的说明里就写着
+    #       "def run(r) -> None:   # r 是 Report 实例" 这样的示例，
+    #       裸文本匹配会把它当成真的检查实现（自我误报）。
+    #       用 AST 只看**真实的函数定义**。
+    import ast as _ast2
+    _bad = []
+    try:
+        _tree = _ast2.parse(src_safe("regression/harness.py") or "")
+        for _n in _ast2.walk(_tree):
+            if isinstance(_n, (_ast2.FunctionDef, _ast2.AsyncFunctionDef)):
+                if _n.name == "run" or _n.name.startswith("_judge_"):
+                    _bad.append(f"{_n.name} (line {_n.lineno})")
+    except SyntaxError:
+        _bad = ["<harness.py 语法错误，无法解析>"]
+    r.ok("G2 harness.py 只放共享夹具（不含检查实现）",
+         not _bad,
+         f"发现检查代码={_bad or '无'}（提取函数时误带过来的？）")
+
+    # ── G3 前置读取必须走 safe 变体（缺文件不中断整组）──────────────
+    #  ⚠️ 补一类反复出现的问题：检查模块读文件时用裸 `src()`，
+    #    文件缺失就抛异常 → **整个检查组中断**，报告上只剩一条笼统失败，
+    #    看不出真正缺了什么、也看不到后面本该跑的检查。
+    #    （CR 就 static_audit 点过一次；我用"逐个删文件跑全套"的矩阵
+    #      自查时又抓出 7 处，横跨 5 个模块。）
+    #  判据两条：
+    #    ① harness 的读取便捷函数内部必须用 *_safe；
+    #    ② 检查模块里不许出现**裸 src(**（要用 src_safe）。
+    import ast as _ast3
+    _hs2 = src_safe("regression/harness.py")
+    _hs_bad = []
+    try:
+        _t3 = _ast3.parse(_hs2 or "")
+        _READERS = {"main_src", "headless_src", "extension_src", "bridge_src",
+                    "schema", "manifest", "ext_manifest", "ext_file",
+                    "load_json_safe"}
+        for _n in _ast3.walk(_t3):
+            if isinstance(_n, (_ast3.FunctionDef, _ast3.AsyncFunctionDef)) \
+                    and _n.name in _READERS:
+                _seg = _ast3.get_source_segment(_hs2, _n) or ""
+                # 允许 safe 名（src_safe / load_json_safe）——
+                # 用负向断言避免把 src_safe 当成裸 src
+                if re.search(r'(?<![_\w])src\(', _seg) or \
+                        re.search(r'(?<![_\w])load_json\(', _seg):
+                    _hs_bad.append(_n.name)
+    except SyntaxError:
+        _hs_bad = ["<解析失败>"]
+    r.ok("G3a harness 的读取便捷函数都走 safe 变体",
+         not _hs_bad,
+         f"仍用裸读取={_hs_bad or '无'}（缺文件会中断整组检查）")
+
+    # ② 检查模块里不许有裸 src(
+    _mods_bad = {}
+    for _f in sorted((PLUGIN_DIR / "regression" / "checks").glob("*.py")):
+        # ⚠️ 跳过本文件自己：G3b 的**报错文案**里就写着 "src()"
+        #    （"检查模块不用裸 src()"），不排除的话它会命中自己（自指）。
+        if _f.name in ("__init__.py", "spec_compliance.py"):
+            continue
+        _txt = _f.read_text(encoding="utf-8")
+        _hits = [i + 1 for i, _ln in enumerate(_txt.splitlines())
+                 if re.search(r'(?<![_\w])src\(', _ln)
+                 and not _ln.strip().startswith("#")]
+        if _hits:
+            _mods_bad[_f.name] = _hits
+    r.ok("G3b 检查模块不用裸 src()（一律 src_safe）",
+         not _mods_bad,
+         f"裸 src() 位置={_mods_bad or '无'}（缺文件时会中断整组）")

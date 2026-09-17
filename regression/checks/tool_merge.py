@@ -12,7 +12,7 @@ import os as _os
 import shutil as _shutil
 import subprocess as _subprocess
 
-from ..harness import JS_DIR, PLUGIN_DIR, section, src, tool_names
+from ..harness import JS_DIR, PLUGIN_DIR, section, src_safe, tool_names
 
 TITLE = "工具合并零丢失"
 
@@ -140,13 +140,17 @@ NEED_ACTIONS = {
 
 
 def run(r) -> None:
-    main = src("main.py")
+    # ⚠️ 前置读取一律用 **src_safe**，且**不要 return** ——
+    #    main.py 缺失时 `return` 会把本组**全部**检查（20+ 条）一起跳过，
+    #    报告上只剩一条"读取失败"，完全看不出后面还有什么问题。
+    #    空值让各段自己判空并报各自的失败。
+    main = src_safe("main.py")
     if not main:
-        r.ok("读取 main.py", False, "文件为空或不存在")
-        return
-    hb = src("backends/headless_backend.py")
-    eb = src("backends/extension_backend.py")
-    now = tool_names(main)
+        r.ok("B0 能读到 main.py（否则本组多数检查无从判定）", False,
+             "文件缺失或为空")
+    hb = src_safe("backends/headless_backend.py")
+    eb = src_safe("backends/extension_backend.py")
+    now = tool_names(main) if main else set()
 
     section("旧工具 → 新出口")
     missing, intentional = [], []
@@ -235,8 +239,8 @@ def run(r) -> None:
          not (called - eb_m - local), f"缺={sorted(called - eb_m - local) or '无'}")
 
     # 协议两端 + 扩展实现
-    proto_py = src("protocol.py")
-    proto_js = src("browser-bridge/protocol.js")
+    proto_py = src_safe("protocol.py")
+    proto_js = src_safe("browser-bridge/protocol.js")
     py_cmds = set(re.findall(r'^CMD_[A-Z_]+ = "([a-z_]+)"', proto_py, re.M))
     # ⚠️ 先确认标记存在再 split：否则 IndexError 会逃出 run()，
     #    整组变成一条笼统失败、后面所有检查都不执行。
@@ -254,10 +258,10 @@ def run(r) -> None:
              f"仅 Python={sorted(py_cmds - js_cmds) or '无'}；"
              f"仅 JS={sorted(j for j in js_cmds - py_cmds) or '无'}")
 
-    bg = src("browser-bridge/background.js")
+    bg = src_safe("browser-bridge/background.js")
     impl = set(re.findall(r'async function (\w+)\(', bg))
-    cap = src("browser-bridge/capabilities.js")
-    cmds = src("browser-bridge/commands.js")
+    cap = src_safe("browser-bridge/capabilities.js")
+    cmds = src_safe("browser-bridge/commands.js")
     impl |= set(re.findall(r'async function (\w+)\(', cap + cmds))
     r.ok("C5b 补齐的命令都有实现",
          all(f"async function {f}(" in (cap + cmds) for f in
@@ -275,7 +279,7 @@ def run(r) -> None:
          bool(_ej) and "chrome.userScripts.execute" in _ej,
          "必须在 execJs 自己的实现里出现")
     r.ok("C7 扩展侧实现 upload（DataTransfer）",
-         "async function upload(" in cap and "DataTransfer" in src("browser-bridge/content.js"))
+         "async function upload(" in cap and "DataTransfer" in src_safe("browser-bridge/content.js"))
     # 看**意图**而不是写死的字面量：现在凭据是按协议条件携带的
     # （HTTPS 才带，防止明文泄漏），所以断言"用用户会话"这一点。
     # ⚠️ 只看"有三个子串"是不够的：即使 credentials 被改成无条件
@@ -368,6 +372,39 @@ def run(r) -> None:
                              _it.get("detail", ""))
         except Exception as e:
             r.ok("C8b 凭据模式行为验证", False, f"{type(e).__name__}: {e}"[:140])
+
+    # ── 重定向流程的**行为**验证（真实 302 服务器）──────────────────
+    #  ⚠️ 这条补的是"选项选对了没有"——上一版用 `redirect:"manual"`
+    #     自己跟，看起来更保守，**在浏览器里却根本读不到 Location**
+    #     （opaqueredirect：status=0、响应头全空），必然失败。
+    #     注意：**Node 测不出那个浏览器差异**（undici 不做那层过滤），
+    #     所以浏览器语义靠 B2.5/C8c 的静态守卫，这里测"跟得到底"。
+    _rf = JS_DIR / "redirect_flow.mjs"
+    if not _rf.is_file():
+        r.ok("C8d 重定向流程探测脚本存在（redirect_flow.mjs）", False,
+             "缺少 " + str(_rf) + " —— 重定向链路将没有行为验证")
+    elif not _node:
+        r.warn("没有 node，跳过 C8d 重定向流程验证", "安装 Node.js 后可启用")
+    else:
+        try:
+            _e5 = {
+                "PATH": _os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/local/bin",
+                "KIRA_PLUGIN_DIR": str(PLUGIN_DIR),
+            }
+            _cp5 = _subprocess.run([_node, str(_rf)], cwd=str(JS_DIR),
+                                   capture_output=True, text=True, env=_e5,
+                                   timeout=120)
+            if _cp5.returncode != 0:
+                r.ok("C8d 重定向流程探测脚本正常退出", False,
+                     f"exit={_cp5.returncode}；{(_cp5.stderr or '')[:180]}")
+            else:
+                _d5 = json.loads((_cp5.stdout or "[]").strip().splitlines()[-1])
+                for _it in _d5:
+                    r.ok(f"C8d {_it['name']}", _it.get("ok"),
+                         str(_it.get("detail", ""))[:160])
+        except Exception as _e:
+            r.ok("C8d 重定向流程验证可运行", False, f"{type(_e).__name__}: {_e}"[:150])
+
 
     r.ok("C9 扩展侧实现 cookie 导出/写入",
          "async function cookieGet(" in cap and "async function cookieSet(" in cap)
