@@ -489,6 +489,57 @@ python -m playwright install chromium
 <details>
 <summary><b>2.1.x</b> — 49 个版本　·　最新的一系列：双后端重构、安全加固、以及大量审查修复</summary>
 
+### v2.1.56（2026-09-18）
+
+**修注入位置：状态块原来注进了提示词缓存的"前缀"里。**
+
+#### 问题
+
+`inject_browser_state` 把"当前网址 / 标题 / 标签页数"追加进 **`system_prompt`**
+的段里。而框架的拼装顺序（`core/provider/llm_model.py`）是：
+
+- `system_prompt` → 插到 messages 的**位置 0**，是**最前面的前缀**
+- `user_prompt` → 追加成**最后一条** user 消息
+
+提示词缓存按**前缀**命中。这个状态块**每 2 分钟就可能变一次**，
+放在前缀里 = **每次一变就把后面整段对话的缓存全部作废**（对话越长亏得越多）。
+
+#### 修法
+
+改注入到**动态段 `chat_env`** —— 框架有"动态段重定位"机制：
+
+> `sessions` / `chat_env` / `time`（v2.33.1 起 `memory` 也是）在 assemble 时
+> 会被标 `persist=False`、包上 `<system_reminder>`、**挪到最新 user 消息最前**，
+> system prompt 因此跨轮稳定。
+
+时机也正好：本钩子（`ON_LLM_REQUEST`）在 `message_manager` 里
+**先于** `assemble_prompt()` 执行，所以往 `chat_env` 里加的内容会被那次重定位带走。
+
+没有 `chat_env` 段时退化成 `req.user_prompt.insert(0, Prompt(..., persist=False))`
+（skill 里写的两种方式）。
+
+#### 顺带修：扩展探测到的端口没被采信
+
+`discover()` 原来把**响应里报的** `port` 存下来。但那个值来自插件读
+`webui.json`，某些部署下该文件不存在（插件会回落到默认 5267）——
+于是会出现"**在 8080 上探测成功、却被记成 5267、然后连 5267 失败**"。
+
+→ 改成**以探测到的端口为准**：我们刚刚就是在这个端口上跟它说上话的，
+这是硬证据。
+
+#### 新增守卫 A16
+
+`inject_browser_state` 里，往 `system_prompt` 段追加内容时**必须是动态段**
+（`chat_env` / `sessions` / `time` / `memory`）—— 否则报红。
+
+首跑把正确写法也误报了（两者都是 `X.content += ...`，区别只在
+**上几行有没有动态段的名字判断**），判据已收紧；
+反向验证：写回旧版注入 → A16 报红并点名到行。
+
+#### 结果
+
+回归套件 **383/383 全绿**。版本 2.1.55 → 2.1.56。
+
 ### v2.1.55（2026-09-18）
 
 **紧急修复：扩展启动即崩。**

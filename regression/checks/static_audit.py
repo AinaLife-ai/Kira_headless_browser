@@ -382,6 +382,48 @@ def run(r) -> None:
                 if _nm not in _tools and _nm not in _NOT_TOOL:
                     _stale.setdefault(_nm, []).append(f"{_rel}:{_i}")
     _stale_txt = {k: v[:2] for k, v in _stale.items()}
+    # ── A16 动态内容不能注入到 system prompt 前缀（会毁掉提示词缓存）──
+    #  ⚠️ 抓这个的由来：`inject_browser_state` 原来把"当前网址 / 标题 /
+    #    标签页数"追加进 `system_prompt` 的 memory/prompt 段 —— 而
+    #    system_prompt 在 assemble 时被插到 messages 的**位置 0**，
+    #    是**前缀缓存**覆盖的那一段。这个块每 2 分钟就变一次，
+    #    于是每次一变就把**后面整段对话**的缓存全部作废。
+    #
+    #    框架为此提供了"动态段重定位"：往 `sessions` / `chat_env` / `time` /
+    #    `memory` 段里加的内容会被挪到最新 user 消息（`persist=False`）。
+    #    本钩子先于 `assemble_prompt()` 执行，所以那样写才会被带走。
+    _seg16 = ""
+    _m16 = re.search(r"async def inject_browser_state\b.*?(?=\n    (?:async )?def )",
+                     src_safe("main.py"), re.S)
+    if _m16:
+        _seg16 = _m16.group(0)
+    _bad16 = []
+    if not _seg16:
+        _bad16.append("找不到 inject_browser_state")
+    else:
+        # ⚠️ 判据要**区分动态段与普通段**：
+        #    往 `chat_env` / `sessions` / `time` / `memory` 里加是**对的**
+        #    （框架会把它们挪到最新 user 消息）；往别的段里加才破坏缓存。
+        #    首跑时把正确写法也误报了 —— 因为两者都是 `X.content += ...`，
+        #    区别只在**上几行有没有动态段的名字判断**。
+        _DYN16 = ("chat_env", "sessions", "time", "memory")
+        _lines16 = _seg16.splitlines()
+        for _i16, _ln16 in enumerate(_lines16):
+            if not re.search(r'\.content\s*\+=', _ln16):
+                continue
+            _above = "\n".join(_lines16[max(0, _i16 - 4):_i16 + 1])
+            if not any(f'"{d}"' in _above for d in _DYN16):
+                _bad16.append(f"第 {_i16 + 1} 行往**非动态段**追加内容")
+        # 兜底写法（没有 chat_env 时自己放进最新用户轮）必须带 persist=False
+        if "persist=False" in _seg16 and "user_prompt" not in _seg16:
+            pass
+        if "chat_env" not in _seg16 and "persist=False" not in _seg16:
+            _bad16.append("既没放 chat_env 也没带 persist=False")
+    r.ok("A16 动态状态不注入 system prompt 前缀（前缀缓存）",
+         not _bad16,
+         f"问题={_bad16 or '无'}"
+         " —— 易变内容留在前缀里，一变就把后面整段对话的缓存作废")
+
     r.ok("A15 文本里提到的工具名都真实存在（不能再出现已删工具名）",
          not _stale_txt,
          f"幽灵工具名={_stale_txt or '无'}"

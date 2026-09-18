@@ -112,7 +112,7 @@ export async function upsertInstance(inst) {
 //  所以不需要登录也不会把令牌漏给网络上的其他人。
 
 /** 探测单个端口；命中返回插件给的接入信息，否则 null。 */
-async function probePort(port, timeoutMs) {
+export async function probePort(port, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -122,7 +122,13 @@ async function probePort(port, timeoutMs) {
     });
     if (!r.ok) return null;
     const j = await r.json();
-    return (j && j.ok && j.token) ? j : null;
+    if (!j || !j.ok || !j.token) return null;
+    // ⚠️ **端口以"探测到的"为准**，不用响应里报的那个。
+    //    我们刚刚就是在这个端口上跟它说上话的 —— 这是硬证据。
+    //    而响应里的 port 是插件读 `webui.json` 得来的，某些部署下该文件
+    //    不存在（插件会回落到默认 5267）—— 于是会出现
+    //    "在 8080 探测成功、却被记成 5267、然后连 5267 失败"。
+    return Object.assign({}, j, { port });
   } catch (e) {
     return null;                  // 端口没人听 / 不是 KiraAI / 超时
   } finally {

@@ -805,14 +805,31 @@ class BrowserPlugin(BasePlugin):
         lines.append(f"能力：{self._capability_summary()}")
         block = "\n".join(lines)
 
-        injected = False
-        for p in req.system_prompt:
-            if getattr(p, "name", None) == "memory":
-                p.content += f"\n{block}"
-                injected = True
+        # ⚠️ 注入位置：**动态段 `chat_env`**，不是随便一个 system 段。
+        #
+        #    为什么：这个块里有"当前网址 / 标题 / 标签页数"，**每轮都可能变**。
+        #    而提示词缓存按**前缀**命中 —— 把易变内容留在 system prompt 前缀里，
+        #    等于每次一变就把**后面整段对话**的缓存全部作废（对话越长亏得越多）。
+        #
+        #    框架为此提供了"动态段重定位"：`sessions` / `chat_env` / `time`
+        #    （v2.33.1 起 `memory` 也是）在 assemble 时会被标 `persist=False`、
+        #    包上 `<system_reminder>`、**挪到最新 user 消息最前** ——
+        #    system prompt 因此跨轮稳定，前缀缓存能覆盖整段记忆。
+        #
+        #    时机上这样是对的：本钩子（ON_LLM_REQUEST）在 message_manager 里
+        #    **先于** `assemble_prompt()` 执行，所以往 `chat_env` 里加的内容
+        #    会被那次重定位一并带走。
+        from core.provider.llm_model import Prompt as _Prompt
+        for _p in req.system_prompt:
+            if getattr(_p, "name", None) == "chat_env":
+                _p.content += f"\n{block}"
                 break
-        if not injected and req.system_prompt:
-            req.system_prompt[-1].content += f"\n{block}"
+        else:
+            # 没有 chat_env 段（部署差异）→ 退化成"自己放进最新用户轮"，
+            # 同样带 persist=False（不进记忆/日志）
+            req.user_prompt.insert(
+                0, _Prompt(content=block, name="browser_state",
+                           source=PLUGIN_ID, persist=False))
 
     def _capability_summary(self) -> str:
         if self.read_only:
