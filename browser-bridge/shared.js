@@ -9,25 +9,59 @@
 
 import { MSG, ERR_TIMEOUT } from "./protocol.js";
 
-/** 共享的可变状态（socket 会被 background.js 重新赋值，所以放对象里） */
+/** 共享的可变状态。
+ *
+ *  ⚠️ 这里**不再有 `socket`** —— 扩展现在可以同时连**多个** KiraAI 实例
+ *     （一台机器上跑好几个 KiraAI 是常见情况，它们都装了本插件、
+ *      都应该能操作这一个浏览器）。
+ *   每条连接在 `links` 里各有一个对象，连接状态也各自持有。
+ */
 export const state = {
-  socket: null,
-  reconnectAttempt: 0,
-  reconnectTimer: null,
-  intentionalClose: false,
   userDisconnected: false,
-  lastError: "",
   /** popup 做链路验证时挂的一次性回调（收到服务端 ping 时触发） */
   probe: null,
 };
 
-// ─── 发送 ──────────────────────────────────────────────────────────────
+/** 所有已登记的连接：`"host:port"` → Link（由 background.js 创建与维护）。
+ *
+ *  放在这里而不是 background.js，是为了让 `sendEvent` 能广播给全部连接，
+ *  同时**不产生循环依赖**（background → shared 是单向的）。
+ */
+export const links = new Map();
 
-export function sendRaw(obj) {
-  const s = state.socket;
-  if (!s || s.readyState !== WebSocket.OPEN) return false;
+/** 谁最近**写过**页面（跨实例）。
+ *
+ *  这个插件允许一个浏览器被多个 KiraAI 实例同时操作（用户有两个 bot，
+ *  都该看得到同一个页面）。不做仲裁，但要让 bot **自己知道**
+ *  页面可能已经不是我记忆里的样子了。 */
+export const activity = { lastWriter: "", lastWriteTs: 0 };
+
+/** 这次要给这条连接带回"页面被别的实例动过"的提示吗？
+ *
+ *  条件：另一个实例写过，**且**写的时间晚于这条连接上次收到结果的时间。
+ *  → 同一个事实只提醒一次；没发生就返回空串，**一个 token 都不花**。
+ */
+export function otherWriterFor(link) {
+  if (!link) return "";
+  if (!activity.lastWriter || activity.lastWriter === link.label) return "";
+  return activity.lastWriteTs > (link.lastResultTs || 0) ? activity.lastWriter : "";
+}
+
+// ─── 发送 ──────────────────────────────────────────────────────────────
+//
+//  ⚠️ 每个 send* 都必须**显式带上目标连接**（`link`）。
+//
+//     不要图省事搞一个"当前连接"全局变量：命令是 async 的 ——
+//     A（实例1）在 await 期间，B（实例2）的命令进来会把它改掉，
+//     A 恢复后再调 sendResult 就把**自己的响应发给了 B**。
+//     现象是"跟 A 说话 A 没反应，B 却收到一堆不属于它的结果"，
+//     而且只在两个实例同时忙的时候才出现，最难查。
+
+/** 往**指定连接**发一条消息。没有可用连接时返回 false。 */
+export function sendRaw(obj, link) {
+  if (!link || !link.open) return false;
   try {
-    s.send(JSON.stringify(obj));
+    link.ws.send(JSON.stringify(obj));
     return true;
   } catch (e) {
     console.error("[KiraBridge] 发送失败", e);
@@ -35,13 +69,25 @@ export function sendRaw(obj) {
   }
 }
 
-export function sendResult(id, ok, data, error, errorCode) {
-  sendRaw({ type: MSG.RESULT, id, ok, data: data ?? null,
-            error: error ?? null, error_code: errorCode ?? null });
+export function sendResult(id, ok, data, error, errorCode, link) {
+  return sendRaw({ type: MSG.RESULT, id, ok, data: data ?? null,
+                   error: error ?? null, error_code: errorCode ?? null }, link);
 }
 
-export function sendEvent(name, data) {
-  sendRaw({ type: MSG.EVENT, name, data: data || {} });
+/** 浏览器事件。
+ *
+ *  ⚠️ 默认**广播给所有已连接实例** —— 标签页切换、页面加载这些是
+ *     **浏览器级**的事实，每个实例都该知道（否则另一个实例的"当前页"
+ *     会和真实情况脱节）。指定 `link` 时只发那一条。
+ */
+export function sendEvent(name, data, link) {
+  const msg = { type: MSG.EVENT, name, data: data || {} };
+  if (link) return sendRaw(msg, link);
+  let sent = false;
+  for (const l of links.values()) {
+    if (sendRaw(msg, l)) sent = true;
+  }
+  return sent;
 }
 
 /** 下载分块回传（扩展 → 插件）。
@@ -51,13 +97,13 @@ export function sendEvent(name, data) {
  *    因此以为分块发出去了，最后还会 return {ok:true}，
  *    等于"下载成功了但文件其实缺了一大段"。
  */
-export function sendChunk(cmdId, uint8) {
+export function sendChunk(cmdId, uint8, link) {
   let bin = "";
   const step = 0x8000;
   for (let i = 0; i < uint8.length; i += step) {
     bin += String.fromCharCode.apply(null, uint8.subarray(i, i + step));
   }
-  return sendRaw({ type: MSG.CHUNK, id: cmdId, data: btoa(bin) });
+  return sendRaw({ type: MSG.CHUNK, id: cmdId, data: btoa(bin) }, link);
 }
 
 // ─── 标签页解析 ────────────────────────────────────────────────────────

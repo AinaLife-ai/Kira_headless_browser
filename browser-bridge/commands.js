@@ -1,5 +1,5 @@
 import {
-  resolveTab, assertInjectable, callContent, detectBrowser, state,
+  resolveTab, assertInjectable, callContent, detectBrowser, state, links,
 } from "./shared.js";
 import { ensureUserScripts } from "./capabilities.js";
 
@@ -136,7 +136,8 @@ async function debugInfo(params) {
   return {
     backend: "extension",
     browser: detectBrowser(),
-    connected: !!(state.socket && state.socket.readyState === WebSocket.OPEN),
+    // 只要**有一条**实例连着就算已连接（现在可以同时连多个）
+    connected: Array.from(links.values()).some((l) => l.open),
     user_scripts: chk.ok ? "可用" : `不可用(${chk.reason})`,
     has_downloads_api: !!chrome.downloads,
     has_cookies_api: !!chrome.cookies,

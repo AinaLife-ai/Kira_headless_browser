@@ -49,6 +49,17 @@
       ],
       "run_at": "document_idle",
       "all_frames": false
+    },
+    {
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "pairing-page.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ],
   "browser_specific_settings": {}

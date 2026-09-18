@@ -107,7 +107,10 @@ def _render_fields() -> dict[str, set[str]]:
         #    只认 ast.FunctionDef 的话这里会**静默找不到**，
         #    字段提取返回空 → F1 契约校验变成空转（看起来还是 PASS）。
         if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == "_render"):
+                # ⚠️ 渲染分支现在在 `_render_base` 里 —— `_render` 外面包了
+                #    一层"按需追加跨实例提醒"。两个名字都认，
+                #    免得以后改名又让字段提取静默变空。
+                and node.name in ("_render", "_render_base")):
             continue
         for sub in ast.walk(node):
             if not isinstance(sub, ast.If):

@@ -133,6 +133,16 @@ def main():
     except Exception as e:
         out["term2"] = f"{type(e).__name__}: {e}"
 
+    # ── 跨实例提醒：**平时一个字都不多**（这是它省 token 的关键）──
+    class _R:
+        def __init__(self, d):
+            self.data = d
+    out["note_silent"] = p._cross_actor_note(_R({})) == ""
+    out["note_silent2"] = p._cross_actor_note(_R(None)) == ""
+    out["note_silent3"] = p._cross_actor_note(_R({"url": "x"})) == ""
+    _n = p._cross_actor_note(_R({"other_writer": "kira-b"}))
+    out["note_fires"] = ("kira-b" in _n) and 0 < len(_n) < 120
+
     print("RESULT:" + json.dumps(out, ensure_ascii=False))
 
 
@@ -194,6 +204,15 @@ def run(r) -> None:
     # ② 第二轮（热重载）
     r.ok("热重载再 initialize() 不抛异常", res.get("init2") == "ok",
          f"{res.get('init2')}  {res.get('init2_where', '')}")
+
+    # 跨实例提醒：**平时一个字都不多**（这是它省 token 的关键）
+    for _k, _d in (
+        ("note_silent", "没有别的实例操作时不加任何提示（零 token 开销）"),
+        ("note_silent2", "data 为 None 时也不炸、不加提示"),
+        ("note_silent3", "其它字段不会误触发提示"),
+        ("note_fires", "别的实例操作过 → 追加一句短提示"),
+    ):
+        r.ok(f"L.{_k} {_d}", res.get(_k) is True, f"结果={res.get(_k)!r}")
     r.ok("terminate()（第二轮）不抛异常", res.get("term2") == "ok",
          str(res.get("term2"))[:200])
 

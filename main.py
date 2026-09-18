@@ -33,6 +33,14 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# ⚠️ FastAPI 的 Request：配对端点要用它判断"请求是不是来自本机"。
+#    插件跑在 KiraAI 进程里，FastAPI 一定在；这里仍然兜一下，
+#    免得以后有人单独 import main.py 做静态检查时炸掉。
+try:
+    from fastapi import HTTPException, Request
+except ImportError:  # pragma: no cover
+    HTTPException = Request = None  # type: ignore
+
 from core.plugin import BasePlugin, Priority, PageMenu, PluginPage, on, register
 from core.logging_manager import get_logger
 from core.provider import LLMRequest
@@ -128,6 +136,8 @@ class BrowserPlugin(BasePlugin):
         #    控件会退化成文本框、把整个列表存成一串文本 ——
         #    这时 `list("*.bank*")` 得到的是 `['*','.','b',...]` **逐字符**
         #    的列表，黑名单**静默失效**（看着配了，实际每条规则只剩一个字符）。
+        # 扩展「自动接入」的跨机开关（配对端点用）
+        self.allow_remote_pairing = _b(cfg.get("allow_remote_pairing"))
         self.allowed_domains = _as_list(cfg.get("allowed_domains"))
         self.blocked_domains = _as_list(cfg.get("blocked_domains"))
         # —— 截图 → VLM 描述（让 bot 能"看到"页面）——
@@ -606,7 +616,36 @@ class BrowserPlugin(BasePlugin):
                 f"不装也不影响使用，会继续用插件自带的无头浏览器。）")
 
     def _render(self, method: str, res, backend) -> str:
-        """把后端返回渲染成给模型看的文本（含来源标注）。"""
+        """把后端返回渲染成给模型看的文本（含来源标注）。
+
+        末尾**可能**追加一句"另一个实例刚动过页面"的提醒 ——
+        见 :meth:`_cross_actor_note`。正常情况一个字都不多。
+        """
+        text = self._render_base(method, res, backend)
+        note = self._cross_actor_note(res)
+        return f"{text}{note}" if note else text
+
+    def _cross_actor_note(self, res) -> str:
+        """别的 KiraAI 实例在我上次收到结果之后写过页面 → 提醒一句。
+
+        为什么需要：这个插件现在允许**一个浏览器被多个实例同时操作**
+        （用户有两个 bot，都该能看到同一个页面）。不做仲裁 —— 谁都能动，
+        会抢鼠标 —— 但必须让 bot **自己知道**页面可能已经不是我记忆里的
+        样子了，否则它会拿旧的 selector 去点一个早就被换掉的页面。
+
+        ⚠️ 只在真的发生时才返回非空：平时这条提示**一个 token 都不花**。
+        """
+        try:
+            who = (res.data or {}).get("other_writer")
+        except (AttributeError, TypeError):
+            return ""
+        if not who:
+            return ""
+        return (f"\n\n⚠️ 另一个实例（{who}）在你上次操作之后动过这个页面，"
+                f"内容可能已经变了 —— 建议重新读一次再继续。")
+
+    def _render_base(self, method: str, res, backend) -> str:
+        """真正的渲染（按 method 分支）。"""
         d = res.data or {}
         tag = f"（来源：{backend.display}）"
 
@@ -1479,6 +1518,89 @@ class BrowserPlugin(BasePlugin):
     )
     def page_panel(self):
         return PluginPage.from_folder("./web")
+
+    # ── 浏览器扩展的「零配置接入」端点 ───────────────────────────────
+    #  为什么需要：扩展要填 host / 端口 / 令牌三样，而**端口默认写死 5267** ——
+    #  用户只要改过 KiraAI 的端口，扩展就连不上，且报错只说"连不上"，
+    #  小白用户根本不知道该改哪里。
+    @register.api("GET", "/pair", auth=False)
+    async def api_pair(self, request: Request):
+        """返回本实例的接入信息（端口 + 令牌），供扩展自动填充。
+
+        ⚠️ **为什么可以免登录**：来调它的人正是"还没配好、连不上"的扩展。
+        要求登录就还是要用户先去面板里找令牌 —— 那就没解决问题。
+        所以这里用**回环限制**代替登录：只回答来自本机（127.0.0.1 / ::1）
+        的请求。确实需要"浏览器在另一台机器"的用户，可以打开
+        `allow_remote_pairing` 显式放行（那时请自行确保网络可信）。
+        """
+        if not self.enabled:
+            raise HTTPException(status_code=404, detail="插件未启用")
+        if not _is_loopback(request) and not self.allow_remote_pairing:
+            raise HTTPException(
+                status_code=403,
+                detail="只允许本机配对。要在另一台机器上用浏览器，"
+                       "请打开「允许跨机配对」配置。")
+        return {
+            "ok": True,
+            "plugin": PLUGIN_ID,
+            "host": "127.0.0.1",
+            "port": _server_port(),
+            "token": self._token,
+            "ws_path": f"/ws/plugin/{PLUGIN_ID}/bridge",
+            # ⚠️ 「这台机器上还有别的 KiraAI」时的区分依据：
+            #    扩展会把所有探测到的实例列出来让用户选，
+            #    所以每个实例必须能被**认出来**，不能只给一个端口号
+            #    （端口对小白没有意义，他们分不清 5267 和 8080 哪个是自己的）。
+            **_instance_label(),
+        }
+
+
+def _instance_label() -> dict:
+    """本实例的标识：数据目录 + 它的上一级目录名。
+
+    一台机器上可能部署了多个 KiraAI（不同端口、不同数据目录），
+    它们都装了本插件。扩展自动探测时必须能分辨，否则会**连错实例** ——
+    用户会发现自己对着 A 说话，B 却动了他的浏览器。
+    """
+    out = {"instance": "", "data_dir": ""}
+    try:
+        from core.utils.path_utils import get_data_path
+        d = Path(get_data_path()).resolve()
+        out["data_dir"] = str(d)
+        # 数据目录的上一级目录名通常是部署目录名（如 `kira-a`），
+        # 比完整路径短，面板上列出来看得清
+        out["instance"] = d.parent.name or d.name
+    except Exception:
+        pass
+    return out
+
+
+def _is_loopback(request) -> bool:
+    """请求是否来自本机。"""
+    try:
+        host = (request.client.host or "").strip()
+    except Exception:
+        return False
+    return host in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+
+
+def _server_port() -> int:
+    """KiraAI 实际监听的端口。
+
+    优先读框架自己的 `webui.json`（`<data>/webui.json` 的 `port`）——
+    用户改过端口就按改后的来。读不到再回落到框架默认值。
+    """
+    try:
+        from core.utils.path_utils import get_data_path
+        conf = Path(get_data_path()) / "webui.json"
+        if conf.is_file():
+            import json as _json
+            port = int(_json.loads(conf.read_text(encoding="utf-8")).get("port") or 0)
+            if 1 <= port <= 65535:
+                return port
+    except Exception:
+        pass
+    return 5267
 
 
 def _b(v) -> bool:

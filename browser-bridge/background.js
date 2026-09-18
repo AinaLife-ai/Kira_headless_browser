@@ -16,12 +16,13 @@
 import {
   PROTOCOL_VERSION, MSG, CMD, EVT,
   buildWsUrl, KEEPALIVE_ALARM, KEEPALIVE_PERIOD_MINUTES, RECONNECT_DELAYS, STORE,
-  DEFAULT_CONFIRM_TIMEOUT_MS,
+  DEFAULT_CONFIRM_TIMEOUT_MS, PAIR_PATH, CANDIDATE_PORTS, READ_COMMANDS,
 } from "./protocol.js";
 import { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
          downloadViaSession, cookieGet, cookieSet } from "./capabilities.js";
 import {
-  state, sendRaw, sendResult, sendEvent, sendChunk,
+  state, links, activity, otherWriterFor,
+  sendRaw, sendResult, sendEvent, sendChunk,
   resolveTab, assertInjectable, callContent, detectBrowser,
   askUser, confirmTimeoutMs, resolveConfirm,
   NEEDS_CONFIRM_COMMANDS, confirmPromptFor,
@@ -70,145 +71,330 @@ async function getConfig() {
   };
 }
 
-// ─── 连接管理 ────────────────────────────────────────────────────────────────
+// ─── 零配置接入：自动发现本机的 KiraAI 实例 ──────────────────────────────────
+//
+//  为什么需要：扩展原来要用户手填 服务地址 / 端口 / 令牌 三样，而端口在
+//  代码里**写死 5267**。用户只要改过 KiraAI 的端口就连不上，且报错只说
+//  "连不上" —— 小白用户根本不知道该改哪里。
+//
+//  做法：向候选端口发一个 GET 到插件的配对端点，谁回了就把它的
+//  **端口 + 令牌**存下来。插件侧对这个端点做了"只回答本机请求"的限制，
+//  所以不需要登录也不会把令牌漏给网络上的其他人。
 
-export async function connect({ manual = false } = {}) {
-  const cfg = await getConfig();
-
-  if (!cfg.token) {
-    state.lastError = "尚未配置令牌";
-    await setStatus({ connected: false, error: state.lastError });
-    return { ok: false, error: state.lastError };
-  }
-
-  // 已经是打开状态就不重复连
-  if (state.socket && (state.socket.readyState === WebSocket.OPEN || state.socket.readyState === WebSocket.CONNECTING)) {
-    return { ok: true, already: true };
-  }
-
-  // 手动连接是用户明确表达「我要连」，允许覆盖上一次的手动断开；
-  // 自动重连/保活则必须尊重它，否则「断开」形同虚设。
-  if (manual) {
-    await setUserDisconnected(false);
-  } else if (await isUserDisconnected()) {
-    return { ok: false, error: "用户已手动断开" };
-  }
-
-  state.intentionalClose = false;
-  clearTimeout(state.reconnectTimer);
-
-  let url;
+/** 探测单个端口；命中返回插件给的接入信息，否则 null。 */
+async function probePort(port, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    url = buildWsUrl(cfg.host, cfg.port, cfg.token);
+    const r = await fetch(`http://127.0.0.1:${port}${PAIR_PATH}`, {
+      signal: ctrl.signal,
+      cache: "no-store",
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j && j.ok && j.token) ? j : null;
   } catch (e) {
-    // 例如"非本机却用了 ws://" —— 明确告诉用户，不要静默失败
-    state.lastError = e.message;
-    await setStatus({ connected: false, error: e.message });
-    return { ok: false, error: e.message };
+    return null;                  // 端口没人听 / 不是 KiraAI / 超时
+  } finally {
+    clearTimeout(timer);
   }
-  console.log("[KiraBridge] 正在连接", url.replace(/token=.*/, "token=***"));
+}
 
-  let mine;
-  try {
-    mine = new WebSocket(url);
-    state.socket = mine;
-  } catch (e) {
-    state.lastError = "创建连接失败：" + e.message;
-    await setStatus({ connected: false, error: state.lastError });
-    scheduleReconnect();
-    return { ok: false, error: state.lastError };
+/** 把探测到的接入信息写进存储。 */
+async function applyPair(hit) {
+  const host = hit.host || "127.0.0.1";
+  const port = Number(hit.port) || 5267;
+  await chrome.storage.local.set({
+    [STORE.HOST]: host,
+    [STORE.PORT]: port,
+    [STORE.TOKEN]: hit.token,
+  });
+  return { host, port, token: hit.token };
+}
+
+/**
+ * 自动发现 KiraAI 实例并写好配置。
+ *
+ * ⚠️ **一台机器上可能有多个 KiraAI**（不同端口、不同数据目录），
+ *    它们都装了本插件。所以这里的原则是：
+ *
+ *    1. **先单独探"用户存过的端口"** —— 保证已经配好的人永远连同一个实例，
+ *       不会因为"并行探测谁先回"而漂到别的实例上去。
+ *    2. 扫其余候选端口，收集**全部**命中。
+ *    3. 命中 0 个 → 报错并给手动办法。
+ *    4. 命中 1 个 → 直接填好（小白的默认路径，零配置）。
+ *    5. 命中 **≥2 个 → 不猜**，把列表交回去让用户选。
+ *       猜错的后果是"我对 A 说话，B 却动了我的浏览器"，比多点一下严重得多。
+ */
+export async function discover({ timeoutMs = 1500 } = {}) {
+  const saved = await getConfig();
+
+  // ① 存过的端口优先，单独探，命中就锁定
+  if (saved.port) {
+    const hit = await probePort(saved.port, timeoutMs);
+    if (hit) return { ok: true, single: await applyPair(hit) };
   }
 
-  return new Promise((resolve) => {
-    let settled = false;
-    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+  // ② 扫其余候选端口
+  const ports = [];
+  for (const p of CANDIDATE_PORTS) {
+    const n = Number(p);
+    if (Number.isInteger(n) && n > 0 && n < 65536
+        && n !== Number(saved.port) && !ports.includes(n)) ports.push(n);
+  }
+  const results = await Promise.all(ports.map((p) => probePort(p, timeoutMs)));
+  const hits = [];
+  for (const r of results) {
+    if (r && r.ok && r.token && !hits.some((h) => Number(h.port) === Number(r.port))) {
+      hits.push(r);
+    }
+  }
 
-    const openTimeout = setTimeout(() => {
-      state.lastError = "连接超时：确认 KiraAI 正在运行，且插件已启用";
-      // ⚠️ 超时后必须**真的把这个 socket 收掉**：
-      //    只 settle 的话它会一直停在 CONNECTING，state.socket 仍指向它 →
-      //    之后每次 ensureAlive/connect 都看到"已有连接"而直接返回，
-      //    用户点多少次重连都没用（既连不上也没人重试）。
-      try { mine.close(); } catch (_) {}
-      if (state.socket === mine) state.socket = null;   // 只清自己的引用
-      setStatus({ connected: false, error: state.lastError });
-      scheduleReconnect();
-      settle({ ok: false, error: state.lastError });
-    }, 8000);
-
-    // ⚠️ 所有回调都必须先确认 **自己仍是当前连接**（state.socket === mine）。
-    //    否则：disconnect() 异步关旧 socket → 用户马上重连 →
-    //    旧 socket 的 onclose 在新连接已写入 state.socket 之后才执行，
-    //    于是它把**新连接引用清成 null**，还可能给旧连接起一次重连。
-    mine.onopen = () => {
-      if (state.socket !== mine) return;
-      clearTimeout(openTimeout);
-      state.reconnectAttempt = 0;
-      state.lastError = "";
-      console.log("[KiraBridge] 已连接");
-
-      chrome.action.setBadgeText({ text: "ON" });
-      chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
-
-      sendRaw({
-        type: MSG.HELLO,
-        protocol: PROTOCOL_VERSION,
-        extension_version: chrome.runtime.getManifest().version,
-        browser: detectBrowser(),
-      });
-
-      setStatus({ connected: true, error: "" });
-      settle({ ok: true });
+  if (hits.length === 0) {
+    return {
+      ok: false,
+      error: "没有在本机找到 KiraAI 实例。"
+           + "如果 KiraAI 改了端口，可以在插件面板点「复制接入配置」，"
+           + "再粘贴到上面的输入框。",
     };
+  }
+  if (hits.length === 1) {
+    return { ok: true, single: await applyPair(hits[0]) };
+  }
+  // ③ 多个实例 —— 交回给用户选，绝不替用户猜
+  return {
+    ok: false,
+    multiple: hits.map((h) => ({
+      host: h.host || "127.0.0.1",
+      port: Number(h.port),
+      token: h.token,
+      instance: h.instance || "",
+      data_dir: h.data_dir || "",
+    })),
+    error: `本机找到 ${hits.length} 个 KiraAI 实例，请选一个。`,
+  };
+}
 
-    mine.onmessage = (ev) => {
-      if (state.socket !== mine) return;
-      handleMessage(ev.data).catch((e) => console.error("[KiraBridge] 消息处理异常", e));
-    };
+// ─── 连接管理：**多连接** ─────────────────────────────────────────────────────
+//
+//  ⚠️ 为什么不是"选一个连"：一台机器上可以同时跑多个 KiraAI 实例，它们都装了
+//     本插件、都想操作这**同一个**浏览器。所以扩展不是挑一个，而是**全都连上**。
+//
+//      好处一：不用挑 —— 根本不存在"选错实例"这回事
+//              （原来那套"面板交接 / 让用户选"是为了绕开"只能连一个"这个
+//                自设的限制，现在整个不需要了）。
+//      好处二：两个 bot 可以**同时看着同一个页面**。
+//      代价  ：它会变成"一个浏览器两只手"。会抢，而且**互相看不见对方刚做了什么** ——
+//              最危险的不是抢鼠标，是"我以为页面还是我上次看到的样子"。
+//              所以每条命令的返回里都带上 `meta.url` 和 `meta.last_actor`
+//              （上次**写**操作来自哪个实例），让 bot 自己发现页面被动了。
 
-    mine.onerror = () => {
-      if (state.socket !== mine) return;
-      // onerror 后必然跟 onclose，这里不做重连，避免双触发
-      state.lastError = "连接出错，请确认 KiraAI 正在运行";
-    };
+/** 一条到某个 KiraAI 实例的连接。 */
+export class Link {
+  constructor(inst) {
+    this.inst = Object.assign(
+      { host: "127.0.0.1", port: 5267, token: "", label: "" }, inst || {});
+    this.ws = null;
+    this.intentionalClose = false;
+    this.reconnectTimer = null;
+    this.reconnectAttempt = 0;
+    this.lastError = "";
+    this.connecting = null;
+  }
 
-    mine.onclose = (ev) => {
-      clearTimeout(openTimeout);
-      console.log("[KiraBridge] 连接关闭", ev.code, ev.reason);
+  get key() { return `${this.inst.host}:${this.inst.port}`; }
+  get label() { return this.inst.label || this.key; }
+  get open() { return !!this.ws && this.ws.readyState === WebSocket.OPEN; }
 
-      // 旧连接的收尾**不能动新连接的状态**
-      if (state.socket !== mine) {
-        settle({ ok: false, error: "连接已被替换" });
-        return;
-      }
+  status() {
+    let s = "disconnected";
+    if (this.ws) {
+      if (this.ws.readyState === WebSocket.OPEN) s = "connected";
+      else if (this.ws.readyState === WebSocket.CONNECTING) s = "connecting";
+    }
+    return { key: this.key, label: this.label, host: this.inst.host,
+             port: this.inst.port, status: s, error: this.lastError };
+  }
 
-      chrome.action.setBadgeText({ text: "" });
-      setStatus({ connected: false, error: state.lastError || `连接已断开 (${ev.code})` });
+  sendRaw(obj) {
+    if (!this.open) return false;
+    try { this.ws.send(JSON.stringify(obj)); return true; } catch (_) { return false; }
+  }
 
-      state.socket = null;
-      settle({ ok: false, error: state.lastError || `连接已断开 (${ev.code})` });
+  /** 建立连接。并发调用共用同一个 promise，不会连出两条。 */
+  connect() {
+    if (this.open) return Promise.resolve({ ok: true, already: true });
+    if (this.connecting) return this.connecting;
+    this.intentionalClose = false;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.connecting = this._doConnect().finally(() => { this.connecting = null; });
+    return this.connecting;
+  }
 
-      if (!state.intentionalClose) scheduleReconnect();
-    };
+  _doConnect() {
+    let url;
+    try {
+      url = buildWsUrl(this.inst.host, this.inst.port, this.inst.token);
+    } catch (e) {
+      this.lastError = e.message;
+      scheduleReconnect(this);
+      return Promise.resolve({ ok: false, error: e.message });
+    }
+    console.log("[KiraBridge] 正在连接", this.label,
+                url.replace(/token=.*/, "token=***"));
+
+    let ws;
+    try {
+      ws = new WebSocket(url);
+      this.ws = ws;
+    } catch (e) {
+      this.lastError = "创建连接失败：" + e.message;
+      scheduleReconnect(this);
+      return Promise.resolve({ ok: false, error: this.lastError });
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+
+      const openTimeout = setTimeout(() => {
+        this.lastError = "连接超时：确认 KiraAI 正在运行，且插件已启用";
+        // ⚠️ 超时后必须**真的把这个 socket 收掉**：
+        //    只 settle 的话它会一直停在 CONNECTING，this.ws 仍指向它 →
+        //    之后 ensureAlive/connect 都看到"已有连接"而直接返回，
+        //    用户点多少次重连都没用（既连不上也没人重试）。
+        try { ws.close(); } catch (_) {}
+        if (this.ws === ws) this.ws = null;
+        scheduleReconnect(this);
+        settle({ ok: false, error: this.lastError });
+      }, 8000);
+
+      // ⚠️ 所有回调都先确认"我还是这条连接当前的 socket"。
+      //    否则：disconnect() 关旧 socket → 用户马上重连 →
+      //    旧 socket 的 onclose 在新 socket 写入之后才执行，
+      //    于是它把**新连接**的引用清成 null，还可能给旧连接起一次重连。
+      ws.onopen = () => {
+        if (this.ws !== ws) return;
+        clearTimeout(openTimeout);
+        this.reconnectAttempt = 0;
+        this.lastError = "";
+        console.log("[KiraBridge] 已连接", this.label);
+        this.sendRaw({
+          type: MSG.HELLO,
+          protocol: PROTOCOL_VERSION,
+          extension_version: chrome.runtime.getManifest().version,
+          browser: detectBrowser(),
+        });
+        refreshBadgeAndStatus();
+        settle({ ok: true, label: this.label });
+      };
+
+      ws.onmessage = (ev) => {
+        if (this.ws !== ws) return;
+        handleMessage(ev.data, this)
+          .catch((e) => console.error("[KiraBridge] 消息处理异常", e));
+      };
+
+      ws.onerror = () => {
+        if (this.ws !== ws) return;
+        // onerror 后必然跟 onclose，这里不重连，避免双触发
+        this.lastError = "连接出错，请确认 KiraAI 正在运行";
+      };
+
+      ws.onclose = (ev) => {
+        clearTimeout(openTimeout);
+        if (this.ws !== ws) { settle({ ok: false, error: "连接已被替换" }); return; }
+        console.log("[KiraBridge] 连接关闭", this.label, ev.code, ev.reason);
+        this.ws = null;
+        if (!this.lastError) this.lastError = `连接已断开 (${ev.code})`;
+        refreshBadgeAndStatus();
+        settle({ ok: false, error: this.lastError });
+        if (!this.intentionalClose) scheduleReconnect(this);
+      };
+    });
+  }
+
+  close(reason = "closed") {
+    this.intentionalClose = true;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const cur = this.ws;
+    this.ws = null;
+    if (cur) { try { cur.close(1000, reason); } catch (_) {} }
+  }
+}
+
+
+
+// 活动记录与判定都挪到了 shared.js —— 那边能被 node 测试直接 import，
+// 这里只用它。（`activity` / `otherWriterFor`）
+
+
+
+export function getLinks() {
+  return Array.from(links.values()).map((l) => l.status());
+}
+
+function upsertLink(inst) {
+  const key = `${inst.host || "127.0.0.1"}:${inst.port}`;
+  let l = links.get(key);
+  if (!l) {
+    l = new Link(inst);
+    links.set(key, l);
+  } else {
+    l.inst = Object.assign(l.inst, inst);
+  }
+  return l;
+}
+
+function refreshBadgeAndStatus() {
+  const list = getLinks();
+  const n = list.filter((x) => x.status === "connected").length;
+  chrome.action.setBadgeText({ text: n ? String(n) : "" });
+  chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
+  return setStatus({
+    connected: n > 0,
+    count: n,
+    instances: list,
+    error: list.find((x) => x.error && x.status !== "connected")?.error || "",
   });
 }
 
-export async function disconnect() {
-  state.intentionalClose = true;
-  await setUserDisconnected(true);
-  clearTimeout(state.reconnectTimer);
-  state.reconnectTimer = null;
+/** 连上所有已配对的实例（并发）。 */
+export async function connectAll({ manual = false } = {}) {
+  const cfg = await getConfig();
 
-  // 只把**当前**连接置空再关；关之前捕获引用，避免 onclose 里
-  // 因为 state.socket 已是 null 而误判
-  const cur = state.socket;
-  state.socket = null;
-  if (cur) {
-    try { cur.close(1000, "user disconnected"); } catch (_) {}
+  if (manual) await setUserDisconnected(false);
+  else if (await isUserDisconnected()) return { ok: false, error: "用户已手动断开" };
+
+  // 一条都没配对过 → 先自动发现（首次安装的默认路径）
+  if (!cfg.instances.length) {
+    const d = await discover();
+    if (!d.ok) {
+      await setStatus({ connected: false, count: 0, error: d.error });
+      return { ok: false, error: d.error };
+    }
   }
 
-  chrome.action.setBadgeText({ text: "" });
-  await setStatus({ connected: false, error: "" });
+  const all = (await getConfig()).instances;
+  for (const inst of all) upsertLink(inst);
+
+  const results = await Promise.all(
+    Array.from(links.values()).map((l) => l.connect()));
+  await refreshBadgeAndStatus();
+  const okN = results.filter((r) => r.ok).length;
+  return { ok: okN > 0, count: okN, total: all.length,
+           error: okN ? "" : (results[0]?.error || "没有连上任何实例") };
+}
+
+/** 兼容旧名字（后台保活、popup 都在用）。 */
+export async function connect(opts) { return connectAll(opts); }
+
+export async function disconnect() {
+  await setUserDisconnected(true);
+  for (const l of links.values()) l.close("user disconnected");
+  await refreshBadgeAndStatus();
   return { ok: true };
 }
 
@@ -229,27 +415,29 @@ async function setUserDisconnected(v) {
   } catch (_) {}
 }
 
-function scheduleReconnect() {
-  if (state.reconnectTimer) return;
+/** 给某条连接安排一次重连。 */
+function scheduleReconnect(link) {
+  if (!link || link.intentionalClose) return;
+  if (link.reconnectTimer) return;
   if (state.userDisconnected) return;
 
-  const delay = RECONNECT_DELAYS[Math.min(state.reconnectAttempt, RECONNECT_DELAYS.length - 1)];
-  state.reconnectAttempt += 1;
-
-  console.log(`[KiraBridge] ${delay}ms 后重连（第 ${state.reconnectAttempt} 次）`);
-  state.reconnectTimer = setTimeout(async () => {
-    state.reconnectTimer = null;
+  const delay = RECONNECT_DELAYS[
+    Math.min(link.reconnectAttempt, RECONNECT_DELAYS.length - 1)];
+  link.reconnectAttempt += 1;
+  console.log(`[KiraBridge] ${link.label} ${delay}ms 后重连（第 ${link.reconnectAttempt} 次）`);
+  link.reconnectTimer = setTimeout(async () => {
+    link.reconnectTimer = null;
     const cfg = await getConfig();
     if (!cfg.autoConnect) return;
-    if (!cfg.token) return;
-    await connect();
+    if (await isUserDisconnected()) return;
+    await link.connect();
   }, delay);
 }
 
-/** 保活与自愈：alarms 唤醒后调用 */
+/** 保活与自愈：alarms 唤醒后调用（对所有连接生效）。 */
 async function ensureAlive() {
   const cfg = await getConfig();
-  if (!cfg.autoConnect || !cfg.token) return;
+  if (!cfg.autoConnect || !cfg.instances.length) return;
   // ⚠️ 必须从 storage 读，不能只看内存里的 state ——
   //    MV3 的 Service Worker 空闲会被回收，保活闹钟（30s）再把它唤醒。
   //    唤醒后内存里的 userDisconnected 又变回 false，
@@ -257,12 +445,15 @@ async function ensureAlive() {
   //    「自动重连已暂停」就成了假话。
   if (await isUserDisconnected()) return;
 
-  if (!state.socket || state.socket.readyState === WebSocket.CLOSED || state.socket.readyState === WebSocket.CLOSING) {
-    console.log("[KiraBridge] 保活检测：连接已断，尝试重连");
-    state.reconnectAttempt = 0;
-    await connect();
+  for (const l of links.values()) {
+    if (!l.ws || l.ws.readyState === WebSocket.CLOSED
+        || l.ws.readyState === WebSocket.CLOSING) {
+      l.reconnectAttempt = 0;
+      await l.connect();
+    }
   }
 }
+
 
 // ─── 消息分发 ────────────────────────────────────────────────────────────────
 
@@ -276,17 +467,19 @@ async function ensureAlive() {
  * ⚠️ 超时必须**大于心跳间隔 25 秒**，否则正常链路也会被判超时。
  * ⚠️ 不要反过来给插件发 ping —— bridge.py 只发不收，它只处理扩展回的 pong。
  */
-function probeServerRoundTrip(timeoutMs = 30000) {
+function probeServerRoundTrip(timeoutMs = 30000, link) {
   return new Promise((resolve) => {
-    if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    // 没指定就挑第一条活着的连接 —— 有多条时测哪条都算"链路通"。
+    const target = link || Array.from(links.values()).find((l) => l.open);
+    if (!target || !target.open) {
       resolve({ ok: false, error: "未连接到 KiraAI（请先点连接）" });
       return;
     }
     // ⚠️ 同一时刻只允许一个探测在跑。
-    //    state.probe 是**单个**槽位：第二个探测会把它覆盖掉，
+    //    probe 槽位是**每条连接各一个**：多条连接同时探测时互不覆盖。
     //    于是旧探测的超时定时器仍会触发，并把**新**探测的回调清掉 ——
     //    表现为"点了测试没反应"或者拿到上一个的结果。
-    if (state.probe) {
+    if (target.probe) {
       resolve({ ok: false, error: "已有一次链路测试在进行中，请稍候" });
       return;
     }
@@ -295,7 +488,7 @@ function probeServerRoundTrip(timeoutMs = 30000) {
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
-      state.probe = null;
+      target.probe = null;
       resolve({
         ok: false,
         error: `${Math.round(timeoutMs / 1000)} 秒内没收到服务端心跳，`
@@ -303,11 +496,12 @@ function probeServerRoundTrip(timeoutMs = 30000) {
       });
     }, timeoutMs);
 
-    state.probe = () => {
+    target.probe = () => {
+      void 0;
       if (done) return;
       done = true;
       clearTimeout(timer);
-      state.probe = null;
+      target.probe = null;
       resolve({
         ok: true,
         socket: "OPEN",
@@ -318,7 +512,7 @@ function probeServerRoundTrip(timeoutMs = 30000) {
   });
 }
 
-async function handleMessage(raw) {
+async function handleMessage(raw, link) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
 
@@ -330,11 +524,11 @@ async function handleMessage(raw) {
     case MSG.PING: {
       // ⚠️ 只有 **PONG 真的发出去了**，这次往返才算成立。
       //    收到 ping 说明"我们能收"，但发不出去 = socket 只能收不能发，
-      //    链路其实是不通的。原来无论 sendRaw 成功与否都调 state.probe()
+      //    链路其实是不通的。原来无论 sendRaw 成功与否都调探测回调
       //    → 弹窗显示"链路正常"，而实际连命令都发不出去（假成功）。
-      const pongSent = sendRaw({ type: MSG.PONG, ts: Date.now() });
-      if (pongSent && typeof state.probe === "function") {
-        try { state.probe(); } catch (_) {}
+      const pongSent = sendRaw({ type: MSG.PONG, ts: Date.now() }, link);
+      if (pongSent && link && typeof link.probe === "function") {
+        try { link.probe(); } catch (_) {}
       }
       break;
     }
@@ -348,7 +542,7 @@ async function handleMessage(raw) {
   }
 }
 
-async function runCommand(id, name, params) {
+async function runCommand(id, name, params, link) {
   try {
     // ⚠️ 二次确认必须**集中在这里**判定。
     //    之前只在 navigate/click/type 里各写一次，导致 exec_js / upload /
@@ -363,25 +557,44 @@ async function runCommand(id, name, params) {
         timeout_ms: confirmTimeoutMs(params),
       });
       if (!ok) {
-        sendResult(id, true, { declined: true });
+        sendResult(id, true, { declined: true }, null, null, link);
         return;
       }
     }
 
     // 下载需要边收边回传分块，得知道自己的 cmdId
     const data = name === CMD.DOWNLOAD
-      ? await downloadViaSession(params, id)
+      ? await downloadViaSession(params, id, link)
       : await execute(name, params);
     if (data && data.__declined) {
-      sendResult(id, true, { declined: true });
+      sendResult(id, true, { declined: true }, null, null, link);
     } else {
-      sendResult(id, true, data);
+      // ── "页面被别的实例动过"的提示（**只在真发生时才带**）──
+      //
+      //  为什么放在这里：这是"一个浏览器两只手"的补偿 —— 不做仲裁（谁都能动），
+      //  但要让 bot **自己知道**页面可能已经变了。否则它会拿旧的 selector
+      //  去点，而页面早被另一个实例换掉了。
+      //
+      //  ⚠️ 平时一个 token 都不花：只有"别的实例在我上次收到结果之后
+      //     写过页面"时才加这一个字段。
+      if (!READ_COMMANDS.has(name)) {
+        activity.lastWriter = link ? link.label : "";
+        activity.lastWriteTs = Date.now();
+      }
+      if (link) {
+        const who = otherWriterFor(link);      // 没发生就返回 ""（零开销）
+        if (who && data && typeof data === "object" && !Array.isArray(data)) {
+          data.other_writer = who;
+        }
+        link.lastResultTs = Date.now();
+      }
+      sendResult(id, true, data, null, null, link);
     }
   } catch (e) {
     console.error(`[KiraBridge] 命令 ${name} 失败`, e);
     // ⚠️ 把**错误类别**也传回去（e.code）。插件侧据此判断"结果不确定"，
     //    而不是靠解析错误文案里的"超时"两个字 —— 文案一改，安全逻辑就没了。
-    sendResult(id, false, null, e.message || String(e), e && e.code);
+    sendResult(id, false, null, e.message || String(e), e && e.code, link);
   }
 }
 
@@ -674,17 +887,20 @@ async function safeRun(label, fn) {
 chrome.runtime.onInstalled.addListener(() => safeRun("onInstalled", async () => {
   chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
   const cfg = await getConfig();
-  if (cfg.token && cfg.autoConnect) {
+  // 已经配对过至少一个实例？没有就先跑自动发现（connect 内部会做）
+  if (cfg.autoConnect) {
     await connect();
   } else {
-    await setStatus({ connected: false, error: "尚未配置令牌" });
+    await setStatus({ connected: false, count: 0,
+                      error: "尚未配对任何 KiraAI 实例" });
   }
 }));
 
 chrome.runtime.onStartup.addListener(() => safeRun("onStartup", async () => {
   chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
   const cfg = await getConfig();
-  if (cfg.token && cfg.autoConnect) {
+  // 已经配对过至少一个实例？没有就先跑自动发现（connect 内部会做）
+  if (cfg.autoConnect) {
     await connect();
   }
 }));
@@ -702,6 +918,70 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "connect":
         sendResponse(await connect({ manual: true }));
         break;
+      case "page_pair": {
+        // KiraAI 面板页直接把手里的接入信息交过来。
+        // ⚠️ 端口取自**页面实际所在的那个实例**（content script 用的是
+        //    `location.port`）—— 所以用户有多个 KiraAI 时，他在谁的面板里
+        //    就配谁，**不会认错**，不需要探测也不需要让用户选。
+        const p = msg.payload || {};
+        if (!p.token || !p.port) {
+          sendResponse({ ok: false, error: "接入信息不完整" });
+          break;
+        }
+        // ⚠️ 只在**接入信息真的变了**的时候才动作。
+        //    面板每次加载（含 10 分钟一次的令牌轮询）都会推一遍 ——
+        //    若无条件 `setUserDisconnected(false)` + `connect()`，
+        //    用户手动点的「断开」会被每 10 分钟**自动撤销**一次。
+        const before = await getConfig();
+        const changed = before.token !== p.token || Number(before.port) !== Number(p.port);
+        const saved = await applyPair(p);
+        if (!changed) {
+          sendResponse({ ok: true, single: saved, unchanged: true });
+          break;
+        }
+        // 用户主动打开面板来的，就别让他再点一次「连接」
+        await setUserDisconnected(false);
+        if ((await getConfig()).autoConnect) {
+          await connect();
+        }
+        sendResponse({ ok: true, single: saved });
+        break;
+      }
+      case "add_instance": {
+        // 弹窗里手动添加一个实例（自动探测覆盖不到的端口用这个兜底）
+        const inst = msg.inst || {};
+        if (!inst.token || !(Number(inst.port) > 0)) {
+          sendResponse({ ok: false, error: "实例信息不完整" });
+          break;
+        }
+        await upsertInstance({
+          host: inst.host || "127.0.0.1",
+          port: Number(inst.port),
+          token: inst.token,
+          label: inst.label || "",
+        });
+        await setUserDisconnected(false);
+        if ((await getConfig()).autoConnect) await connect();
+        sendResponse({ ok: true });
+        break;
+      }
+      case "discover": {
+        // 弹窗上的「自动检测」按钮：只探测并写好配置，不直接连
+        // （让用户看得见检测到了什么，再决定要不要连）。
+        const d = await discover();
+        sendResponse(d);
+        break;
+      }
+      case "use_instance": {
+        // 探测到多个实例时，用户在弹窗里选定了一个
+        const hit = msg.hit || {};
+        if (!hit.token || !hit.port) {
+          sendResponse({ ok: false, error: "实例信息不完整" });
+          break;
+        }
+        sendResponse({ ok: true, single: await applyPair(hit) });
+        break;
+      }
       case "disconnect":
         sendResponse(await disconnect());
         break;
@@ -709,14 +989,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const st = (await chrome.storage.local.get(STORE.LAST_STATUS))[STORE.LAST_STATUS] || {};
         // ⚠️ 顺序很重要：**先铺存下来的，再盖上实时的**。
         //    setStatus 会把 `connected` 一起持久化进 STORE.LAST_STATUS。
-        //    MV3 的 service worker 被回收重启后 state.socket 是 null，
+        //    MV3 的 service worker 被回收重启后连接表是空的，
         //    但 st.connected 还是 true —— 若把 ...st 放后面，弹窗就会
         //    显示「已连接」，而实际根本没有 socket（和 test_ping
         //    要防的是同一种假阳性）。
+        // 从**连接表**实时算，不用内存里的单 socket（那条路已经没有了）
+        const _list = getLinks();
+        const _n = _list.filter((x) => x.status === "connected").length;
         sendResponse({
           ...st,
-          connected: !!state.socket && state.socket.readyState === WebSocket.OPEN,
-          readyState: state.socket ? state.socket.readyState : -1,
+          connected: _n > 0,          // 只要有一条通，就算"已连接"
+          count: _n,
+          instances: _list,           // 弹窗按这个渲染**实例列表**
+          readyState: _n ? 1 : -1,
         });
         break;
       }
@@ -725,7 +1010,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         //    原来只调本地 listTabs()，就算 WebSocket 早断了也会返回成功，
         //    于是弹窗显示"链路正常"而实际根本连不上。
         try {
-          if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+          const _live = Array.from(links.values()).find((l) => l.open);
+          if (!_live) {
             sendResponse({ ok: false, error: "未连接到 KiraAI（请先点连接）" });
             break;
           }
@@ -765,7 +1051,8 @@ safeRun("bootstrap", async () => {
     chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
   }
   const cfg = await getConfig();
-  if (cfg.token && cfg.autoConnect) {
+  // 已经配对过至少一个实例？没有就先跑自动发现（connect 内部会做）
+  if (cfg.autoConnect) {
     await connect();
   }
 });

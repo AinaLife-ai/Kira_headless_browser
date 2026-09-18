@@ -44,15 +44,21 @@
   .check { display: flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 12px; color: #374151; }
   .check input { width: auto; }
   a { color: #4f46e5; font-size: 11.5px; }
+  /* 多实例选择：一台机器上跑了多个 KiraAI 时列出来让用户挑 */
+  .instances { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+  .inst { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+  .inst .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inst .st { color: #6b7280; }
 </style>
 </head>
 <body>
   <h1><span class="dot" id="dot"></span>Kira Browser Bridge</h1>
 
   <label for="token">接入令牌</label>
-  <input type="password" id="token" placeholder="从 KiraAI 插件面板复制" autocomplete="off">
+  <input type="password" id="token" placeholder="点下面「自动检测」即可，不用手填" autocomplete="off">
   <div class="hint">
-    在 KiraAI 的「浏览器桥」页面生成并复制令牌，粘贴到这里。
+    首次使用点「自动检测」：会自动找到本机的 KiraAI，并把端口和令牌填好。<br>
+    找不到时，再去 KiraAI 的「全能浏览器」页面复制令牌，粘贴到这里。
   </div>
 
   <div class="row" style="margin-top:10px">
@@ -72,15 +78,17 @@
   </div>
 
   <div class="actions">
-    <button id="btnSave" class="ghost">保存</button>
+    <button id="btnAdd" class="ghost">添加</button>
     <button id="btnConnect">连接</button>
   </div>
   <div class="actions" style="margin-top:8px">
+    <button id="btnDiscover" class="ghost">自动检测</button>
     <button id="btnDisconnect" class="ghost">断开</button>
     <button id="btnTest" class="ghost">测试链路</button>
   </div>
 
   <div class="status" id="status">读取中…</div>
+  <div id="instances" class="instances"></div>
 
   <div class="divider"></div>
   <div class="hint">
