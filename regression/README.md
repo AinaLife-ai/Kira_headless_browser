@@ -2,6 +2,11 @@
 
 这个目录是插件的**回归测试套件**。改动插件后跑一遍，能挡住大部分"改一处坏一处"。
 
+> ⚠️ **首次运行前先装 JS 依赖**（跑 `content.js` 的真实 DOM 行为要用 jsdom）：
+> `cd regression/js && npm install`
+> 不装的话，`B0 VLM 行为探针` / `B0 cookie 探针` 两条会红 —— 是环境问题，
+> 不是产品问题。（`node_modules` 是构建产物，没有提交进仓库。）
+
 ```bash
 python3 regression/run_all.py            # 跑全部
 python3 regression/run_all.py 安全        # 只跑名称含「安全」的
