@@ -12,6 +12,8 @@
   }
   h1 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #cbd5e1; flex: none; }
+  /* 版本号：小、淡，但一直在 —— 用户报问题时报这一行就够了 */
+  #ver { font-size: 11px; font-weight: 400; color: #94a3b8; margin-left: 6px; }
   .dot.on { background: #16a34a; box-shadow: 0 0 0 3px rgba(22,163,74,.18); }
   .dot.err { background: #dc2626; }
   label { display: block; font-size: 12px; color: #6b7280; margin: 10px 0 4px; }
@@ -52,7 +54,9 @@
 </style>
 </head>
 <body>
-  <h1><span class="dot" id="dot"></span>Kira Browser Bridge</h1>
+  <h1><span class="dot" id="dot"></span>Kira Browser Bridge
+    <small id="ver" title="扩展版本 —— 报问题时请带上它，方便确认你装的是哪一版"></small>
+  </h1>
 
   <label for="token">接入令牌</label>
   <input type="password" id="token" placeholder="点下面「自动检测」即可，不用手填" autocomplete="off">

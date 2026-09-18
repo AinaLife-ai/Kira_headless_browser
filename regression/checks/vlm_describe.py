@@ -252,6 +252,47 @@ def run(r) -> None:
     r.ok("A10 vlm_model 是 model_select 类型（面板上给下拉框选）",
          (sch.get("vlm_model") or {}).get("type") == "model_select")
 
+    # ── A13 超时默认 30 秒，且 schema 与代码**不能各说各话** ──────────
+    #    ⚠️ 原来默认 10 秒，对视觉模型偏紧：一张大截图的编码+推理经常就要
+    #       十几秒，超时后描述被丢掉，用户看到的是"没拿到描述"。
+    #    判据两处都要看 —— 只查 schema 的话，代码里的回落值偷偷留着 10
+    #    也照样绿（用户没在面板上存过配置时走的就是代码回落）。
+    _sch_to = (sch.get("vlm_timeout") or {}).get("default")
+    _m_to = re.search(r'cfg\.get\(\s*["\']vlm_timeout["\']\s*,\s*(\d+)', main)
+    r.ok("A13a schema 里 vlm_timeout 默认 30 秒", _sch_to == 30,
+         f"实际={_sch_to!r}")
+    r.ok("A13b 代码回落值也是 30，且与 schema 一致",
+         bool(_m_to) and _m_to.group(1) == "30",
+         f"实际={_m_to.group(1) if _m_to else '没找到 cfg.get(...)'}")
+    r.ok("A13c describe_image 的 timeout 形参默认也是 30",
+         "timeout: float = 30.0" in v,
+         "调用方不传 timeout 时用的就是它")
+
+    # ── A14 失败文案必须**短**（不要一段排查说明挤进每次返回）────────
+    #    ⚠️ 原来失败时返回六行"常见原因…图片本身已保存…"，既占 token
+    #       又干扰模型。细节都在 browser_diag(action="vlm") 里，要查的人
+    #       自然会去查 —— 内联只需要说清"这次没拿到"。
+    #    ⚠️ 只查**截图工具里那段**，不要全文查 —— "常见原因" 这个词
+    #       在 `_diag_vlm`（browser_diag 的详细诊断）里**本来就该有**，
+    #       全文查会把它一起算进来（首跑就是这么误报的）。
+    _seg = ""
+    _i = main.find("if desc:")
+    if _i >= 0:
+        _j = main.find('return "\n".join(parts)', _i)
+        _seg = main[_i:_j if _j > 0 else _i + 600]
+    _long = []
+    if not _seg:
+        _long.append("找不到截图工具里 if desc: 那段")
+    else:
+        if "常见原因" in _seg or "未能生成图片描述" in _seg:
+            _long.append("失败分支还在展开排查说明")
+        if "这次没拿到图片描述" not in _seg:
+            _long.append("失败分支没换成短文案")
+        if "browser_diag" not in _seg:
+            _long.append("没把细节指向 browser_diag")
+    r.ok("A14 没拿到描述时的内联文案简短（细节指向 browser_diag）",
+         not _long, f"问题={_long or '无'}")
+
     # ── main.py 读配置 ───────────────────────────────────────────────
     for key in ("vlm_model", "vlm_describe_prompt", "vlm_timeout",
                 "auto_describe_screenshot"):

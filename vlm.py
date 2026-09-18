@@ -165,7 +165,7 @@ async def get_vlm_client(ctx, configured: str = "") -> Optional[object]:
 async def describe_image(ctx, image_path: str, *,
                          configured_model: str = "",
                          prompt: str = "",
-                         timeout: float = 10.0) -> str:
+                         timeout: float = 30.0) -> str:
     """用 VLM 描述一张图；失败/超时返回空串（**不抛异常**）。
 
     调用方（截图工具）据此决定是否把描述附给 bot —— 描述拿不到
@@ -197,7 +197,7 @@ async def describe_image(ctx, image_path: str, *,
             desc_img(client=client,
                      image=_Image(image=image_path),
                      prompt=prompt or VLM_TOOL_OPTIMIZED_PROMPT),
-            timeout=float(timeout or 10.0),
+            timeout=float(timeout or 30.0),
         )
         return (desc or "").strip()
     except asyncio.TimeoutError:

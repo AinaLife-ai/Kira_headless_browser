@@ -544,8 +544,8 @@
   "vlm_timeout": {
     "name": "VLM Timeout",
     "type": "integer",
-    "default": 10,
-    "hint": "Seconds to wait for the VLM description. On timeout the description is skipped - the screenshot itself still succeeds and is still sent.",
+    "default": 30,
+    "hint": "Seconds to wait for the VLM description (default 30). On timeout the description is skipped - the screenshot itself still succeeds.",
     "locales": {
       "zh": {
         "name": "VLM 超时（秒）",

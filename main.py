@@ -148,7 +148,11 @@ class BrowserPlugin(BasePlugin):
         #    两个后端都适用（VLM 调用在插件进程里，跟谁拍的图无关）。
         self.vlm_model = str(cfg.get("vlm_model") or "").strip()
         self.vlm_describe_prompt = str(cfg.get("vlm_describe_prompt") or "").strip()
-        self.vlm_timeout = float(cfg.get("vlm_timeout", 10) or 10)
+        # ⚠️ 默认 30 秒。原来 10 秒对视觉模型偏紧：一张大截图的编码 + 推理
+        #    经常就要十几秒，超时后描述被丢掉，用户看到的是"没拿到描述"。
+        #    30 秒是"够用又不至于把工具卡太久"的折中（超时只是不附描述，
+        #    截图本身照常返回）。
+        self.vlm_timeout = float(cfg.get("vlm_timeout", 30) or 30)
         #: 默认是否描述。**每次截图时模型也可以自己用 describe 参数覆盖** ——
         # 「要不要看图」应该由模型按当前任务决定（有时它只想把图发给用户）。
         self.auto_describe_screenshot = _b(cfg.get("auto_describe_screenshot", True))
@@ -994,15 +998,11 @@ class BrowserPlugin(BasePlugin):
             if desc:
                 parts.append(f"🖼️ 图片描述（VLM）：\n{desc}")
             else:
-                parts.append(
-                    "ℹ️ 未能生成图片描述。常见原因：\n"
-                    "  · 没配视觉模型 —— 在 KiraAI 的模型设置里指定默认 VLM，"
-                    "或在插件配置里选「VLM 模型」；\n"
-                    "  · **模型配错了组** —— 用于描述截图的模型必须是"
-                    "**大语言模型**组里的（不能放在「图像」组），"
-                    "即使它本身支持视觉也一样；\n"
-                    "  · 调用超时（可在插件配置里调大「VLM 超时」）。\n"
-                    "图片本身已保存/已发送，只是这次我没拿到描述。")
+                # 这里**不要**展开讲原因 —— 一段六行的排查说明会挤进每次
+                # 失败的返回里，既占 token 又干扰模型。细节都在
+                # `browser_diag(action="vlm")`，要查的人自然会去查。
+                parts.append("ℹ️ 这次没拿到图片描述（图已保存）。"
+                             "排查：browser_diag action=\"vlm\"")
         return "\n".join(parts)
 
     # ── 2. 等 ────────────────────────────────────────────────────────
