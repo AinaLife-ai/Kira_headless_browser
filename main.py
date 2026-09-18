@@ -1517,7 +1517,7 @@ class BrowserPlugin(BasePlugin):
     @register.page(
         "/panel",
         auth=True,
-        menu=PageMenu(label={"zh": "浏览器", "en": "Browser"}, icon="Monitor", order=60),
+        menu=PageMenu(label={"zh": "全能浏览器", "en": "All-in-One Browser"}, icon="Monitor", order=60),
     )
     def page_panel(self):
         return PluginPage.from_folder("./web")

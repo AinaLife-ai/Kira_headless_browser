@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin)
+# 全能浏览器 (All-in-One Browser)
 
 > 让 KiraAI 真正会用浏览器 —— 能打开网页、点击、输入、上传下载、执行脚本。
 
