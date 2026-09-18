@@ -241,6 +241,52 @@ def run(r) -> None:
     sec = PLUGIN_DIR / "SECURITY_DESIGN.md"
     r.ok("F4 有独立的安全设计说明（供自动审阅读，避免误报）", sec.is_file())
 
+    # ── F5 schema 的字段 type 必须是**框架认得**的 ────────────────────
+    #  ⚠️ 抓这个的由来：schema 里曾用 `"type": "array"`（3 处）和
+    #     `"type": "number"`（2 处），而框架的 `create_field_from_schema`
+    #     只认 `list` / `float` —— **不认得的一律兜底成 `StringField`**。
+    #     后果不只是"控件不对"：列表字段会退化成**文本框**，整个列表被存成
+    #     一串文本，而插件侧读的是 `list(cfg[...])` →
+    #     `list("*.bank*")` = `['*','.','b',...]` **逐字符**的列表，
+    #     **黑名单静默失效**；`upload_allowed_dirs` 会变成
+    #     `['d','a','t','a',...]`。没有任何检查盯着这件事。
+    _fw_types = None
+    _fw = os.environ.get("KIRA_FW_DIR", "")
+    if _fw:
+        _cf = os.path.join(_fw, "core", "config", "config_field.py")
+        if os.path.isfile(_cf):
+            try:
+                with open(_cf, encoding="utf-8") as _f:
+                    _t5 = _f.read()
+                _seg5 = _t5[_t5.index("def create_field_from_schema"):]
+                _seg5 = _seg5[:_seg5.index("def build_fields")]
+                _fw_types = set(re.findall(r'"([a-z_]+)"', _seg5))
+            except (ValueError, OSError):
+                _fw_types = None
+    #: 框架不认识时用这份**从源码抄下来**的清单（写清楚来源，便于日后校对）
+    _FALLBACK_TYPES = {
+        "string", "text", "sensitive", "integer", "int", "float", "list",
+        "enum", "switch", "bool", "boolean", "json", "markdown", "yaml",
+        "editor", "textarea", "model_select", "multi_select",
+        "persona_select", "session_select", "section", "info",
+    }
+    _known = _fw_types or _FALLBACK_TYPES
+    _bad_type = []
+    try:
+        _sch5 = json.loads(src_safe("schema.json"))
+        for _k5, _v5 in (_sch5 or {}).items():
+            if isinstance(_v5, dict) and "type" in _v5:
+                if _v5["type"] not in _known:
+                    _bad_type.append(f"{_k5}={_v5['type']!r}")
+    except Exception as e:
+        _bad_type = [f"<schema 读不了: {type(e).__name__}>"]
+    r.ok("F5 schema 字段 type 都是框架认得的（否则退化成文本框）",
+         not _bad_type,
+         f"不识别={_bad_type or '无'}"
+         f"（来源={'框架源码' if _fw_types else '内置清单'}）"
+         " —— 列表字段退化成文本框会把列表存成一串文本，"
+         "插件侧 list(字符串) 会变成逐字符列表，拦截静默失效")
+
     section("G. 回归套件自身的文档与登记表一致")
 
     # ⚠️ 这条是补一次"文档漂移"的教训：`regression/README.md` 里的

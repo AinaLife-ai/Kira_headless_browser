@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -120,8 +121,13 @@ class BrowserPlugin(BasePlugin):
         # 默认 false：让 bot 拥有完整的读写能力（点击/输入/跳转）。
         # 想收紧的话在配置里打开；打开后写工具会从模型可见的工具表里整个摘掉。
         self.read_only = _b(cfg.get("read_only", False))
-        self.allowed_domains = list(cfg.get("allowed_domains") or [])
-        self.blocked_domains = list(cfg.get("blocked_domains") or [])
+        # ⚠️ 必须防"存回来的是**字符串**"：面板字段类型一旦与框架认得的
+        #    类型对不上（schema 里曾写成 `array`，而框架只认 `list`），
+        #    控件会退化成文本框、把整个列表存成一串文本 ——
+        #    这时 `list("*.bank*")` 得到的是 `['*','.','b',...]` **逐字符**
+        #    的列表，黑名单**静默失效**（看着配了，实际每条规则只剩一个字符）。
+        self.allowed_domains = _as_list(cfg.get("allowed_domains"))
+        self.blocked_domains = _as_list(cfg.get("blocked_domains"))
         # —— 截图 → VLM 描述（让 bot 能"看到"页面）——
         # ⚠️ 这个能力在原版 headless_browser 里是有的，合并时**被整体弄丢**过。
         #    它很重要：插件能给**用户**发图，但 bot 自己看不到图 ——
@@ -1521,3 +1527,27 @@ def _b(v) -> bool:
     if isinstance(v, str):
         return v.strip().lower() in ("true", "1", "yes", "on")
     return bool(v)
+
+
+def _as_list(v):
+    """把配置值统一成字符串列表。
+
+    ⚠️ 为什么要防：这套配置由面板按 `schema.json` 渲染。如果 schema 里写了
+    一个框架**不认得**的 type（例如 `array` —— 框架只认 `list`），控件会
+    **退化成文本框**，于是整个列表被存成一串文本。这时
+    `list("*.bank*")` 会得到 `['*','.','b','a','n','k','*']` 这样**逐字符**
+    的列表：看着配了黑名单，实际每条规则都只剩一个字符，拦截**静默失效**
+    —— 是最难发现的那种坏法。
+
+    实测后果：`blocked_domains` 从"拦 *.bank*"变成"拦单个字符"；
+    `upload_allowed_dirs` 会变成 `['d','a','t','a',...]`。
+    """
+    if v is None:
+        return []
+    if isinstance(v, str):
+        # 换行 / 逗号都当分隔符（textarea 与单行文本框两种形态都能收）
+        parts = re.split(r"[\n,]+", v)
+        return [p.strip() for p in parts if p.strip()]
+    if isinstance(v, (list, tuple, set)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [str(v).strip()] if str(v).strip() else []

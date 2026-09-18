@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.47
+# 浏览器插件 (Browser Plugin) 2.1.48
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,65 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.48（2026-09-17）
+
+**清点历史遗留的未解决审查线程时，发现一个真 bug。**
+
+#### 🔴 schema 里有 5 个字段的 `type` **框架根本不认识**
+
+`create_field_from_schema()` 只认这些类型：
+`string/text/sensitive/integer/int/float/list/enum/switch/bool/json/
+markdown/yaml/editor/textarea/model_select/multi_select/persona_select/
+session_select/section/info`。**不认识的一律兜底成 `StringField`**（文本框）。
+
+而 schema 里写着：
+
+| 字段 | 原类型 | 实际渲染 | 应为 |
+|---|---|---|---|
+| `allowed_domains` | `array` | **文本框** | `list` |
+| `blocked_domains` | `array` | **文本框** | `list` |
+| `upload_allowed_dirs` | `array` | **文本框** | `list` |
+| `command_timeout` | `number` | **文本框** | `float` |
+| `op_timeout_ratio` | `number` | **文本框** | `float` |
+
+**这不只是"控件不对"**：列表字段退化成文本框后，整个列表被存成
+**一串文本**，而插件侧读的是 `list(cfg[...])` ——
+
+```python
+list("*.bank*")  # → ['*', '.', 'b', 'a', 'n', 'k', '*']   逐字符！
+```
+
+于是用户在面板上改一次黑名单，**拦截就静默失效了**：看着配了，
+实际每条规则只剩一个字符。`upload_allowed_dirs` 会变成
+`['d','a','t','a','/',...]`。
+
+**→ 两处修复：**
+1. schema 的 5 个类型改成框架认得的（`array`→`list`、`number`→`float`）
+2. 插件侧加 `_as_list()` 兜底：字符串按换行/逗号切分
+   （`upload_allowed_dirs` 早就有这个兜底，两个域名列表漏了）
+   → 即使面板存回字符串，也不会再退化成逐字符列表
+
+**→ 新增检查 F5**：schema 的每个 `type` 必须在框架认得的集合里。
+集合**优先从框架源码现场提取**（`KIRA_FW_DIR/core/config/config_field.py`），
+拿不到才用内置清单 —— 这样它不会随着框架演进而失效。
+反向验证：把 `array` 注回去 → F5 立刻报红并点名到字段。
+
+#### 顺带：清点了 25 条未解决线程
+
+捞出来逐条核实（很多只是因为行号没怎么变、GitHub 没标 outdated）：
+
+| 状态 | 条数 | 说明 |
+|---|---|---|
+| **已修**（核实代码） | 3 | 只读模式的 `WRITE_TOOL_NAMES` 已是注册名；`content_dom` 的 PATH 已改用 `which` 的绝对路径；`static_audit` 的前置读取已加守卫 |
+| **已在运行时兜住** | 1 | `op_timeout_ratio`：schema 没法约束（框架不读 `min`/`max`），但 `main.py` 已 clamp 到 `(0,1)` 并警告 |
+| **本轮修掉** | 1 | `bridge.py` 的旧路由（见 v2.1.47）+ 本条 schema 类型 |
+| **仍开着（设计级）** | 2 | 扩展的 `<all_urls>`（建议改 `optional_host_permissions` + 运行时申请）；`shared.js` 的 `Promise.race` 超时不会取消底层操作 |
+
+#### 结果
+
+`regression/run_all.py` → **346/346，16 组全绿**；`pyflakes` 干净。
+版本 2.1.47 → 2.1.48。
 
 ### v2.1.47（2026-09-17）
 

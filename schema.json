@@ -72,7 +72,7 @@
   },
   "allowed_domains": {
     "name": "Allowed Domains",
-    "type": "array",
+    "type": "list",
     "default": [],
     "locales": {
       "zh": {
@@ -83,7 +83,7 @@
   },
   "blocked_domains": {
     "name": "Blocked Domains",
-    "type": "array",
+    "type": "list",
     "default": [
       "*.bank*",
       "*.pay*"
@@ -140,7 +140,7 @@
   },
   "command_timeout": {
     "name": "Command Timeout (s)",
-    "type": "number",
+    "type": "float",
     "default": 20,
     "locales": {
       "zh": {
@@ -277,7 +277,7 @@
   },
   "op_timeout_ratio": {
     "name": "Timeout Ratio",
-    "type": "number",
+    "type": "float",
     "default": 0.8,
     "locales": {
       "zh": {
@@ -418,7 +418,7 @@
   },
   "upload_allowed_dirs": {
     "name": "Upload Allowed Dirs",
-    "type": "array",
+    "type": "list",
     "default": [
       "data/files",
       "data/temp"
