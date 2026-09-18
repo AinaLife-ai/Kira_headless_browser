@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.45
+# 浏览器插件 (Browser Plugin) 2.1.46
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,82 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.46（2026-09-17）
+
+**CodeRabbit 第四十六轮：7 条全部为真 + 同类自查又抓 6 处。**
+
+#### ① 上传时把本地绝对路径发给了扩展（`extension_backend`）
+
+`CMD_UPLOAD` 里带着 `"path": resolved`（用户机器上的绝对路径）。
+但扩展侧只是把它当显示名回显（`capabilities.js` 里
+`path: params.path || res.name`）—— **并没有拿它去读盘**，文件内容是插件侧
+分块推过去的。所以这条路径白白经过 WS 桥，没有收益（CWE-200）。
+→ 不再下发。同时把 `d2.setdefault("path", resolved)` 改成**赋值** ——
+不下发之后扩展回显的是文件名，`setdefault` 会留下它，两个后端的返回结构
+就不一致了（headless 返回的是绝对路径）。
+新增守卫 **C16f2 / C16f3**，反向验证过。
+
+#### ② `configureWorld (` 会让检查**抛异常中断整组**（`execjs_gates`）
+
+第 59 行用 `re.search(r'configureWorld\s*\(')`（容忍空白），
+第 63 行却用 `code.index("configureWorld(")`（**字面量**）——
+代码写成 `configureWorld (` 时前者找得到、后者抛 `ValueError`，
+合法的 JS 排版却让整个检查组炸掉。
+→ 用正则的 `match.start()`。
+（同类自查：B2 的两处 `.index()` 前面**已有**存在性短路守卫，安全。）
+
+#### ③ `EXT_DIR.iterdir()` 不防目录缺失（`static_audit`）
+
+`browser-bridge/` 整个不在时抛 `FileNotFoundError` → **D 段中断**，
+E 段也不会跑 —— 而 E1 恰恰是负责点名"`browser-bridge/*` 缺了什么"的那条，
+**最该报出来的状态反而被吞掉**。
+→ 目录不在时按"什么都不存在"处理。实测：删掉整个目录后 E1 现在能
+**点名全部 12 个缺失文件**。
+
+#### ④ `load_json_safe` 的兜底过宽（`harness`）
+
+`except Exception → {}` 会把 `PermissionError` / `UnicodeDecodeError`
+（`src_safe` 是**有意**让这两种往外抛的）悄悄转成"JSON 无效"——
+**原因被换成了另一个原因**，排查会往完全错误的方向找。
+→ 只吞 `json.JSONDecodeError`（缺文件时 `src_safe` 返回空串，
+`json.loads("")` 抛的正是它）。实测权限/编码错误现在正常往外抛，
+缺文件仍返回 `{}`。
+
+#### ⑤ 截取窗口是固定字符数，会切进下一个函数（`cred_mode.mjs`）
+
+`cap.slice(dlIdx, dlIdx + 4000)` —— 而 `downloadViaSession` 有 3634 字符，
+窗口**已经切进了后面的 `cookieGet`**。后一个函数里的声明可能被当成前一个
+函数的，判据就会给出错的结果，而且函数一变长还会继续漂。
+→ 改成卡在**下一个顶层函数**处。
+
+#### ⑥ 安全文档的措辞不够限定（`SECURITY_DESIGN.md`）
+
+我上轮写的"跑在个人电脑上 → 该风险≈0"会被读成"风险全为 0"，
+但 `local_access` 开着时本机与内网服务仍然可达。
+→ 改成"**云元数据这一项**风险≈0"，并补一句说明本机/内网风险不受影响。
+
+#### ⑦ 状态轮询也有同一个竞态（`web/index.html`）
+
+上轮我修了 `loadToken` 的请求竞态，**漏了 `refresh()`** —— 它是**每 3 秒**
+跑一次的，而一次 `/status` 比 3 秒还慢时，旧请求后到就会把新状态覆盖回去；
+旧请求若失败，还会把已渲染好的内容改成"读取失败"。
+→ 同样加递增请求序号（成功路径与 catch 路径都判）。
+**实测反向验证**（用旧版 `index.html` 跑新探针）：旧版 2 条红、新版全绿。
+新增探针 `status_race.mjs` + 接入 **I2**。
+
+#### 同类自查（按惯例，抓 6 处）
+
+| 类别 | 抓到 |
+|---|---|
+| 固定字符窗口截取 | `redirect_flow.mjs` 的 6000 字符窗口 —— **同一处问题** |
+| 宽兜底伪装原因 | `security_rules` / `file_hygiene` / `static_audit` 各一处 `except Exception` |
+| 可选导入兜底过宽 | `static_audit` / `tool_merge` 的 `except Exception` → 收窄到 `ImportError` |
+
+#### 结果
+
+`regression/run_all.py` → **343/343，16 组全绿**；`pyflakes` 干净。
+版本 2.1.45 → 2.1.46。
 
 ### v2.1.45（2026-09-17）
 

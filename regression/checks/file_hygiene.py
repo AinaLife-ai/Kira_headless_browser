@@ -178,7 +178,10 @@ def run(r) -> None:
     # ⚠️ 同样要容错：manifest.json 缺失时空串会让 json.loads 抛错。
     try:
         man_refs.add(json.loads(src_safe("manifest.json")).get("icon", ""))
-    except Exception:
+    except json.JSONDecodeError:
+        # 同上：只吞"文件缺失/内容不是 JSON"（src_safe 缺文件返回空串 →
+        # json.loads("") 抛的正是 JSONDecodeError）。权限/编码错误要往外抛，
+        # 否则会被显示成"manifest 有问题"，指错方向。
         man_refs.add("")
     for v in exm.get("icons", {}).values():
         man_refs.add("browser-bridge/" + v)

@@ -433,3 +433,34 @@ def run(r) -> None:
                          _it.get("detail", ""))
         except Exception as e:
             r.ok("I1 面板令牌竞态验证", False, f"{type(e).__name__}: {e}"[:140])
+
+    # ── I2. 状态轮询（refresh）的竞态守卫 ────────────────────────────
+    #  ⚠️ 和令牌那处是**同一个**竞态，只是发生在 3 秒一次的状态轮询上：
+    #    一次 `/status` 比 3 秒还慢时，旧请求后到就会把新状态覆盖回去。
+    #    上轮只修了 `loadToken`、**漏了这里** —— 补探测脚本把这个模式钉住。
+    _sr = PLUGIN_DIR / "regression" / "js" / "status_race.mjs"
+    if not _sr.is_file():
+        r.ok("I2 轮询竞态探测脚本存在（status_race.mjs）", False,
+             f"缺少 {_sr} —— refresh() 的竞态将没有行为验证")
+    elif not _node:
+        r.warn("没有 node，跳过 I2 轮询竞态验证", "安装 Node.js 后可启用")
+    else:
+        try:
+            _cs = subprocess.run(
+                [_node, str(_sr)], cwd=str(_sr.parent), capture_output=True,
+                text=True, timeout=60,
+                env={"PATH": os.environ.get("PATH", "") + ":/usr/bin:/bin",
+                     "KIRA_PLUGIN_DIR": str(PLUGIN_DIR)})
+            _it2 = json.loads((_cs.stdout or "[]").strip().splitlines()[-1])
+            _nm2 = [str(x.get("name", "")) for x in _it2]
+            _need2 = ("迟到的旧响应不得覆盖新状态",
+                      "迟到的失败响应不得覆盖成功状态")
+            _miss2 = [n for n in _need2 if n not in _nm2]
+            if _miss2:
+                r.ok("I2 竞态探测覆盖关键场景", False, f"缺={_miss2}；实际={_nm2}")
+            else:
+                for _i2 in _it2:
+                    r.ok(f"I2 {_i2['name']}", bool(_i2.get("ok")),
+                         _i2.get("detail", ""))
+        except Exception as e:
+            r.ok("I2 面板轮询竞态验证", False, f"{type(e).__name__}: {e}"[:140])

@@ -52,7 +52,15 @@ const startUrl = `http://127.0.0.1:${port}/start`;
 
 // ── ② 从**生产代码**里抽出它用的 redirect 模式 ────────────────────────
 const dlIdx = cap.indexOf("async function downloadViaSession(");
-const dlSeg = dlIdx >= 0 ? cap.slice(dlIdx, dlIdx + 6000) : "";
+// ⚠️ 和 cred_mode.mjs 一样：截取范围卡在**下一个顶层函数**，不用固定字符数。
+//    固定窗口会切进后面那个函数，后者的声明可能被当成本函数的；
+//    而且函数一变长就会继续漂。
+let dlSeg = "";
+if (dlIdx >= 0) {
+  dlSeg = cap.slice(dlIdx);
+  const _nxt = dlSeg.search(/\nasync function |\nfunction /);
+  if (_nxt > 0) dlSeg = dlSeg.slice(0, _nxt);
+}
 const mRedirect = dlSeg.match(/redirect:\s*"([a-z]+)"/);
 
 if (!mRedirect) {

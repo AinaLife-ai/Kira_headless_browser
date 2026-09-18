@@ -313,7 +313,11 @@ class ExtensionBackend(Backend):
             r = await self._send(self._P.CMD_UPLOAD, {
                 "selector": selector, "name": name,
                 "mime": _guess_mime(name),
-                "path": resolved,
+                # ⚠️ **不发绝对路径**：扩展侧只是把它当显示名回显
+                #    （capabilities.js 里 `path: params.path || res.name`），
+                #    并没有真拿它去读文件 —— 内容是由插件侧分块推过去的。
+                #    让它白白经过 WS 桥（还带用户主目录结构）没有收益。
+                #    返回给调用方的 path 由下面用本地的 resolved 权威填入。
                 "size": size, "chunk_size": step,
                 "limit": self.max_upload_bytes,
             }, timeout=max(60.0, size / (1024 * 1024) * 3))
@@ -355,7 +359,11 @@ class ExtensionBackend(Backend):
             if not fr.ok:
                 return fr
             d2 = dict(fr.data or {}) if isinstance(fr.data, dict) else {}
-            d2.setdefault("path", resolved)
+            # ⚠️ 用**赋值**而不是 setdefault：上面已经不把 resolved 发给
+            #    扩展了，扩展回显的是文件名（`params.path || res.name`），
+            #    setdefault 会保留那个文件名 → 两个后端的返回结构不一致
+            #    （headless 返回的是绝对路径）。这里以插件侧为准。
+            d2["path"] = resolved
             d2.setdefault("size", size)
             return OpResult(data=d2, backend=self.name)
         except Exception as e:

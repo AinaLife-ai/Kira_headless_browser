@@ -329,7 +329,9 @@ def run(r) -> None:
             _NON_TOOL_IDS |= {k for k in _LEGACY_MAP
                               if _LEGACY_MAP[k] is not None
                               and _LEGACY_MAP[k][0] != k}
-        except Exception:
+        except ImportError:
+            # 可选依赖：拿不到就少排除几个 id。写成 `except Exception`
+            # 会把"模块里真有语法/名字错误"也吞掉，看起来像"这模块不在"。
             pass
         mentioned -= _NON_TOOL_IDS
         nonexistent = sorted(mentioned - ext_names - set(sch) - {"browser_send_file"})
@@ -565,6 +567,21 @@ def run(r) -> None:
          and "chunks\": chunks" not in _eb_code
          and "\"chunks\": chunks" not in _eb_code,
          "必须走分块流式；一次性下发 chunks 会在文件 >~12MiB 时断开连接")
+
+    # ⚠️ 上传时**不要把本地绝对路径发给扩展**：文件内容是插件侧读出来、
+    #    分块推过去的，扩展侧只把它当显示名回显（capabilities.js 里的
+    #    `path: params.path || res.name`），并没有拿它去读盘。
+    #    发过去等于让用户主目录结构白白经过 WS 桥（CWE-200）。
+    #    返回给调用方的 path 由插件侧用自己的 resolved 填（见 d2["path"]）。
+    _up_call = re.search(r'CMD_UPLOAD,\s*\{(.*?)\}\s*,', _eb_code, re.S)
+    _up_payload = _up_call.group(1) if _up_call else ""
+    r.ok("C16f2 CMD_UPLOAD 不下发本地绝对路径",
+         bool(_up_payload) and '"path"' not in _up_payload,
+         "扩展并不用这个字段读文件；下发它只是暴露路径。"
+         "返回值里的 path 由插件侧自己填（d2[\"path\"] = resolved）")
+    r.ok("C16f3 上传结果里的 path 由插件侧权威填写",
+         'd2["path"] = resolved' in _eb_code,
+         "用 setdefault 的话，扩展回显的文件名会留下 —— 两个后端返回结构不一致")
 
     # ⚠️ 架构不变量：**文件内容只能在页面侧累积，SW 只转发**。
     #    原因：MV3 的 Service Worker 常驻内存紧、最容易被系统回收，
@@ -802,7 +819,12 @@ def run(r) -> None:
     popup_js = set(re.findall(r'src="([\w.]+)"', popup_html))
     _sw = (exm.get("background") or {}).get("service_worker") or ""
     reachable = declared | imported | popup_js | ({_sw} if _sw else set())
-    present = {f.name for f in EXT_DIR.iterdir() if f.suffix == ".js"}
+    # ⚠️ `iterdir()` 在目录缺失时抛 FileNotFoundError → **D 段整个中断**，
+    #    E 段也不会跑，而 E1 恰恰是负责点名"browser-bridge/* 缺了什么"的那条
+    #    —— 最该报出来的状态反而被吞掉。目录不在时按"什么都不存在"处理，
+    #    让 D9 / E1 各自报各自的。
+    present = ({f.name for f in EXT_DIR.iterdir() if f.suffix == ".js"}
+               if EXT_DIR.is_dir() else set())
     orphan = sorted(present - reachable - {"protocol.js"})
     r.ok("D9 扩展里没有游离的 JS 文件", not orphan, f"未引用={orphan or '无'}")
 
@@ -849,7 +871,10 @@ def run(r) -> None:
             continue
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            # 非 JSON 的 .py/.md 之类直接跳过（正常）。但**不要**写成
+            # `except Exception`：那样连"读文件本身的意外错误"也一并跳过，
+            # 这个文件会被**静默漏掉**，而检查看起来还是通过的。
             continue
         if "plugin_id" in data:
             kira_manifests.append((str(f.relative_to(PLUGIN_DIR)), data["plugin_id"]))

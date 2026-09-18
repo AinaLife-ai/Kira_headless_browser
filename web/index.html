@@ -189,9 +189,20 @@ async function api(path, opts) {
 }
 
 // ── 状态轮询 ──────────────────────────────────────────────
+// ⚠️ 轮询是**每 3 秒一次**，而一次 `/status` 可能比 3 秒还慢（桥接卡一下就会）。
+//    这时下一个请求已经发出去了，而 fetch 不保证先发先回 ——
+//    旧请求后到时会把**新的**连接状态 / 策略 / 确认记录**覆盖回去**，
+//    界面上于是显示着过期信息；更糟的是旧请求若失败，还会把已经成功渲染的
+//    内容改成"读取失败"。
+//    只认"最后一次发出"的响应。（`loadToken` 上轮已按同一办法处理 ——
+//    当时漏了这里，这次一起补上。）
+let _refreshSeq = 0;
+
 async function refresh() {
+  const seq = ++_refreshSeq;
   try {
     const s = await api("/status");
+    if (seq !== _refreshSeq) return;   // 已有更新的请求 → 丢弃这次的结果
 
     const b = s.bridge || {};
     const connected = !!b.connected;
@@ -285,6 +296,7 @@ async function refresh() {
       + "（扩展已自动使用）";
 
   } catch (e) {
+    if (seq !== _refreshSeq) return;   // 迟到的失败同样不许覆盖新状态
     $("conn").innerHTML = '<span class="dot off"></span>读取失败';
   }
 }

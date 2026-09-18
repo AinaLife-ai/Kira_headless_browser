@@ -357,9 +357,15 @@ def load_json_safe(rel: str):
     而"到底哪个文件缺了"反而看不出来。
     返回空值让各段各自报各自的失败，信息更全。
     """
+    # ⚠️ 只吞**解析错误**。写成 `except Exception` 的话，权限错误 /
+    #    编码错误（`src_safe` 是**有意**让这两种往外抛的）会被悄悄转成
+    #    `{}`，然后报告上写"JSON 无效" —— 原因被换成了另一个原因，
+    #    排查时会往完全错误的方向找。
+    #    文件缺失由 `src_safe` 返回空串 → `json.loads("")` 抛的就是
+    #    JSONDecodeError，照样走这里。
     try:
         return json.loads(src_safe(rel))
-    except Exception:
+    except json.JSONDecodeError:
         return {}
 
 

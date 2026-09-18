@@ -316,7 +316,8 @@ def run(r) -> None:
     try:
         from ..harness import strip_comments_only as _sco
         _dl_code = _sco(_dl)
-    except Exception:
+    except ImportError:
+        # 只兜"拿不到那个函数"；别的异常说明 harness 真有问题，该冒出来。
         _dl_code = _dl
     r.ok("C8c 下载用浏览器跟随重定向（不用读不到 Location 的 manual）",
          'redirect: "follow"' in _dl_code

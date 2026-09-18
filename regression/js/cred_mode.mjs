@@ -23,7 +23,16 @@ const cap = readFileSync(`${PLUGIN}/browser-bridge/capabilities.js`, "utf8");
 const results = [];
 
 const dlIdx = cap.indexOf("async function downloadViaSession(");
-const seg = dlIdx >= 0 ? cap.slice(dlIdx, dlIdx + 4000) : "";
+// ⚠️ 截取范围要卡在**下一个顶层函数**处，不能用固定的 4000 字符：
+//    这个函数有 3634 字符，固定窗口会**切进后面那个函数**，
+//    于是后一个函数里的声明可能被当成前一个函数的 —— 判据就会给出错的结果
+//    （而且函数变长以后还会继续漂）。
+let seg = "";
+if (dlIdx >= 0) {
+  seg = cap.slice(dlIdx);
+  const nxt = seg.search(/\nasync function |\nfunction /);
+  if (nxt > 0) seg = seg.slice(0, nxt);
+}
 
 if (!seg) {
   results.push({ name: "可定位 downloadViaSession", ok: false,

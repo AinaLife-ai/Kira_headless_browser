@@ -534,7 +534,9 @@ def run(r) -> None:
     #    json.loads("") 会抛 JSONDecodeError → 中断整组。
     try:
         _sch = _json.loads(src_safe("schema.json"))
-    except Exception:
+    except _json.JSONDecodeError:
+        # 只吞解析错误：权限/编码错误由 src_safe 有意抛出，
+        # 再兜在这里会被伪装成"schema 无效"，排查方向就错了。
         _sch = {}
     _dflt_blocked = (_sch.get("blocked_domains") or {}).get("default") or []
     _conflict = [x for x in _dflt_blocked

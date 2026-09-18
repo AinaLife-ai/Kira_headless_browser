@@ -56,12 +56,17 @@ def _judge_configure_world(cap_text: str) -> bool:
     #    strip_js_noise 是状态机（见 harness），能正确区分
     #    "代码态"与"注释/字符串态"，也不会被字符串里的 `//` 骗到。
     code = strip_js_noise(cap_text)
-    if not re.search(r'configureWorld\s*\(', code):
+    # ⚠️ 用**正则的匹配位置**，不要再用 `code.index("configureWorld(")`
+    #    去找一遍：上面那一行是 `configureWorld\s*\(`（容忍空白），
+    #    而 `index` 找的是**字面量** `configureWorld(` ——
+    #    代码写成 `configureWorld (` 时前者找得到、后者抛 ValueError，
+    #    于是**整个检查组中断**（合法的 JS 排版却让检查炸掉）。
+    m_cfg = re.search(r'configureWorld\s*\(', code)
+    if not m_cfg:
         return False
     if "userScripts.execute" not in code:
         return False
-    return code.index("configureWorld(") < \
-        code.rindex("userScripts.execute")
+    return m_cfg.start() < code.rindex("userScripts.execute")
 
 
 def _judge_unsafe_eval(cap_text: str) -> bool:
