@@ -115,6 +115,6 @@ class BackendRouter:
         if self.strategy == "headless":
             return ("当前策略是「只用无头浏览器」，但无头浏览器尚未启动。"
                     "调用一次无头工具（例如 browser_page）就会拉起它；"
-                    "若一直起不来，用 browser_debug 看具体原因。")
+                    "若一直起不来，用 browser_diag(action='status') 看具体原因。")
         return ("当前没有可用的浏览器：扩展未连接，且无头浏览器也未启动。"
                 "可以先在浏览器中启用扩展，或调用一次无头工具触发其启动。")

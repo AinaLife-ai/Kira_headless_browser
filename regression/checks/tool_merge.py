@@ -33,8 +33,8 @@ LEGACY = {
     "browser_download": ("browser_file", "download"),
     "browser_wait": ("browser_wait", "seconds"),
     "browser_list_files": ("browser_file", "list"),
-    "browser_test_visible": ("browser_test_visible", None),
-    "browser_debug": ("browser_debug", None),
+    "browser_test_visible": ("browser_diag", "visible"),
+    "browser_debug": ("browser_diag", "status"),
     # send_file 是「把本地已有文件发给用户」，两个用途分别由
     # screenshot(send) 与 file(download) 覆盖 —— 有意合并，非遗漏。
     # ⚠️ 但**不能直接写 None**（那会被当成"有意合并"直接跳过校验）：
@@ -57,7 +57,9 @@ LEGACY = {
     "browser_extract": ("browser_page", "extract"),
     "browser_wait_for": ("browser_wait", "selector/text"),
     # 补充工具
-    "browser_extension_help": ("browser_extension_help", None),
+    "browser_extension_help": ("browser_diag", "extension"),
+    # 第二轮合并（13 → 10）：4 个零参数诊断类合成 browser_diag
+    "browser_check_vlm": ("browser_diag", "vlm"),
     "browser_cookie": ("browser_cookie", "export/import"),
 }
 
