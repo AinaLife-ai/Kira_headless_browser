@@ -140,6 +140,16 @@ export async function probePort(port, timeoutMs) {
 async function applyPair(hit) {
   const host = hit.host || "127.0.0.1";
   const port = Number(hit.port) || 5267;
+  // ⚠️ 必须写**新格式**（instances 列表），不能只写旧版单实例键。
+  //    原来这里只 `set({kb_host, kb_port, kb_token})`，而 `getConfig()`
+  //    仅在 `kb_instances` **不是数组**时才把旧键迁移成列表 ——
+  //    于是"已经配对过实例"的用户再配一个新的（比如点「自动检测」），
+  //    新实例会被**静默丢弃**：界面看着像成功了，实际什么都没变。
+  await upsertInstance({
+    host, port, token: hit.token, label: hit.label || "",
+  });
+  // 旧键同步写一份：万一用户回滚到老版本还能用（且此时列表已是数组，
+  // migration 不会再拿旧键去覆盖它）。
   await chrome.storage.local.set({
     [STORE.HOST]: host,
     [STORE.PORT]: port,
@@ -187,11 +197,20 @@ export async function discover({ timeoutMs = 1500 } = {}) {
   }
 
   if (hits.length === 0) {
+    // ⚠️ 这条文案必须是**能照做**的。
+    //    原来写的是"去插件面板点「复制接入配置」" —— 面板上**没有这个按钮**
+    //    （它只在页面里 postMessage 自动配对，没做剪贴板那套），
+    //    用户照着找不到，等于把人指到一条不存在的路上。
+    //    这里改成两条**真实存在**的路：
+    //      ① 从 127.0.0.1 / localhost 打开插件面板 → 页面自动把接入信息推过来
+    //      ② 或手动填：服务地址 + 端口 + 令牌（令牌在插件面板上点「复制」拿）
     return {
       ok: false,
-      error: "没有在本机找到 KiraAI 实例。"
-           + "如果 KiraAI 改了端口，可以在插件面板点「复制接入配置」，"
-           + "再粘贴到上面的输入框。",
+      error: "没有在本机找到 KiraAI 实例。可能是它用了不常见的端口 —— "
+           + "两种办法：① 从 127.0.0.1 或 localhost 打开 KiraAI 的"
+           + "「全能浏览器」插件面板，页面会自动把接入信息推过来；"
+           + "② 或者在下面手动填「服务地址 / 端口 / 令牌」"
+           + "（令牌在插件面板上点「复制」拿）。",
     };
   }
   if (hits.length === 1) {
