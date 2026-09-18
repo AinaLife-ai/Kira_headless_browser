@@ -82,6 +82,7 @@ regression/
 │   ├── wiring.py           接线完整性（配置接通 / 数据透传）
 │   ├── contract.py         两后端返回契约一致性
 │   ├── callgraph.py        调用图完整性（未定义方法 / 签名合规）
+│   ├── lifecycle.py        启动/停止生命周期（冒烟：真跑 initialize）
 │   ├── claims.py           声称 ↔ 实际（写了但没改）
 │   ├── spec_compliance.py  KiraAI 规范符合性（包结构 / manifest / 入口 / 路由）
 │   ├── vlm_describe.py     截图 → VLM 描述（bot 看图）
