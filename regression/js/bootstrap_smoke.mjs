@@ -113,6 +113,20 @@ push("upsertInstance() 不抛异常（点手动添加的路径）", upErr === ""
 try { await mod.ensureAlive(); } catch (e) { alive2 = String(e); }
 push("有实例时 ensureAlive() 也不抛异常", alive2 === "", alive2.slice(0, 140));
 
+// ── 端口必须以**探测到的**为准 ────────────────────────────────────────
+//  曾经：存响应里报的 port（插件读 webui.json，缺文件会回落 5267）
+//  → "在 8080 探测成功、却被记成 5267、然后连 5267 失败"。
+const realFetch = globalThis.fetch;
+globalThis.fetch = async () => ({
+  ok: true,
+  json: async () => ({ ok: true, token: "T", port: 5267 }),   // ← 故意报错端口
+});
+const hit = await mod.probePort(8080, 200);
+push("端口以探测到的为准（不采信响应里报的）",
+     !!hit && Number(hit.port) === 8080 && hit.token === "T",
+     `hit=${JSON.stringify(hit)}`);
+globalThis.fetch = realFetch;
+
 console.error = realErr;
 console.log("RESULT:" + JSON.stringify(results));
 // ⚠️ 必须显式退出：bootstrap 会挂重连定时器，node 不会自己结束
