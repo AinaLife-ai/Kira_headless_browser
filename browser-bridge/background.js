@@ -155,6 +155,11 @@ async function applyPair(hit) {
     [STORE.PORT]: port,
     [STORE.TOKEN]: hit.token,
   });
+  // 配对成功就把"重试发现"的退避清零 —— 否则用户手动连上之后，
+  // 那次退避还会让后台的自动重试等很久才开始。
+  await chrome.storage.local.set({
+    [STORE.DISCOVER_TRIES]: 0, [STORE.DISCOVER_AT]: 0,
+  });
   return { host, port, token: hit.token };
 }
 
@@ -206,6 +211,9 @@ export async function discover({ timeoutMs = 1500 } = {}) {
     //      ② 或手动填：服务地址 + 端口 + 令牌（令牌在插件面板上点「复制」拿）
     return {
       ok: false,
+      // 把**试过哪些端口**一起带回去：用户一看就知道"我的端口不在这个列表里"，
+      // 而不是对着一句"没找到"猜。
+      triedPorts: CANDIDATE_PORTS.slice(),
       error: "没有在本机找到 KiraAI 实例。可能是它用了不常见的端口 —— "
            + "两种办法：① 从 127.0.0.1 或 localhost 打开 KiraAI 的"
            + "「全能浏览器」插件面板，页面会自动把接入信息推过来；"
@@ -427,8 +435,9 @@ export async function connectAll({ manual = false } = {}) {
   if (!cfg.instances.length) {
     const d = await discover();
     if (!d.ok) {
-      await setStatus({ connected: false, count: 0, error: d.error });
-      return { ok: false, error: d.error };
+      await setStatus({ connected: false, count: 0, error: d.error,
+                        triedPorts: d.triedPorts || [] });
+      return { ok: false, error: d.error, triedPorts: d.triedPorts };
     }
   }
 
@@ -492,7 +501,7 @@ function scheduleReconnect(link) {
 /** 保活与自愈：alarms 唤醒后调用（对所有连接生效）。 */
 export async function ensureAlive() {
   const cfg = await getConfig();
-  if (!cfg.autoConnect || !cfg.instances.length) return;
+  if (!cfg.autoConnect) return;
   // ⚠️ 必须从 storage 读，不能只看内存里的 state ——
   //    MV3 的 Service Worker 空闲会被回收，保活闹钟（30s）再把它唤醒。
   //    唤醒后内存里的 userDisconnected 又变回 false，
@@ -500,12 +509,60 @@ export async function ensureAlive() {
   //    「自动重连已暂停」就成了假话。
   if (await isUserDisconnected()) return;
 
+  // ⚠️ 没有实例时**主动重试发现**（带退避）。
+  //
+  //    其实顶层 `bootstrap` 每次 Service Worker 被唤醒时都会重跑，里面
+  //    也会调 connect() → discover()，所以**重试本身是一直有的**。
+  //    这里补的是两件事：
+  //      ① **节奏**：原来每次唤醒（30 秒闹钟）都把 15 个候选端口扫一遍，
+  //         "这台机器上根本没有 KiraAI"时要一直白扫。加上退避后前几次
+  //         很快、之后最多 5 分钟一次。
+  //      ② **不依赖顶层脚本**：把"没实例就重试"这件事放在保活路径里显式
+  //         表达出来，而不是靠"顶层代码每次都会重跑"这个隐式前提。
+  if (!cfg.instances.length) {
+    await maybeRediscover();
+    return;
+  }
+
   for (const l of links.values()) {
     if (!l.ws || l.ws.readyState === WebSocket.CLOSED
         || l.ws.readyState === WebSocket.CLOSING) {
       l.reconnectAttempt = 0;
       await l.connect();
     }
+  }
+}
+
+/** 自动发现的退避表（分钟）。前几次很快 —— KiraAI 正在启动的那几十秒里
+ *  就能接上；后面越拉越开，免得"这台机器上根本没有 KiraAI"时一直扫端口。 */
+// 上限**故意压在 5 分钟**：退避太久的话，用户在浏览器开着之后才启动
+// KiraAI，会干等半天才被接上。5 分钟既不至于每 30 秒扫一遍 15 个端口，
+// 也不让人等太久。（用户随时可以点「自动检测」/ 打开面板立刻接上。）
+const REDISCOVER_BACKOFF_MIN = [0.5, 1, 2, 5];
+
+/** 发现失败过就按退避重试；成功过（instances 非空）就不会走到这里。 */
+async function maybeRediscover() {
+  try {
+    const s = await chrome.storage.local.get([STORE.DISCOVER_TRIES, STORE.DISCOVER_AT]);
+    const tries = Math.max(0, Number(s[STORE.DISCOVER_TRIES]) || 0);
+    const lastAt = Number(s[STORE.DISCOVER_AT]) || 0;
+    const waitMs = REDISCOVER_BACKOFF_MIN[
+      Math.min(tries, REDISCOVER_BACKOFF_MIN.length - 1)] * 60_000;
+    if (lastAt && Date.now() - lastAt < waitMs) return;   // 还没到下次
+
+    await chrome.storage.local.set({ [STORE.DISCOVER_AT]: Date.now() });
+    const d = await discover();
+    if (d && d.ok) {
+      // 找到了 —— discover() 只负责"配对并记下来"，**连接要另外发起**。
+      await chrome.storage.local.set({ [STORE.DISCOVER_TRIES]: 0 });
+      await connectAll();
+      return;
+    }
+    await chrome.storage.local.set({
+      [STORE.DISCOVER_TRIES]: Math.min(tries + 1, REDISCOVER_BACKOFF_MIN.length),
+    });
+  } catch (_) {
+    // 重试本身失败不该影响别的（下次闹钟再来）
   }
 }
 

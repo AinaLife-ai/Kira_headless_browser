@@ -18,6 +18,59 @@
   if (window.__kiraBridgeInjected) return;
   window.__kiraBridgeInjected = true;
 
+  // ─── 顺手告诉背景"KiraAI 在哪个端口" ──────────────────────────────────────
+  //
+  // 背景的自动发现只能在一小撮**常见端口**上探测 —— 硬扫 65535 个端口不现实，
+  // 而用户的 KiraAI 完全可能装在别的端口上（那样就永远扫不到）。
+  //
+  // 但用户**总要打开 KiraAI 的页面才能用 bot**，那个页面本身就带着真实的
+  // 主机名和端口。所以：只要当前页面跑在"本机 / 私网"地址上，就同源问一句
+  // "你是不是 KiraAI 的 WebUI"（同源请求，不会被 CORS 拦），
+  // 是的话把 {host, port, token} 递回后台去配对 —— **不用手填、不用扫端口**。
+  //
+  // ⚠️ 只在**本机 / 私网**地址上做：公网站点一次都不会被碰。
+  // ⚠️ 每个 origin 在一个标签页里只试一次（sessionStorage 记着），
+  //    免得在同一台本地服务器上翻页时反复发请求。
+  (function detectKiraOrigin() {
+    try {
+      const h = location.hostname;
+      const isPrivate = /^(127\.|localhost$|\[::1\]$|::1$)/i.test(h)
+        || /^10\./.test(h)
+        || /^192\.168\./.test(h)
+        || /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+        || /\.local$/i.test(h);
+      if (!isPrivate) return;
+      if (location.protocol !== "http:" && location.protocol !== "https:") return;
+
+      const KEY = "__kiraPairTried";
+      let seen = "";
+      try { seen = sessionStorage.getItem(KEY) || ""; } catch (_) {}
+      if (seen === location.origin) return;      // 这个 origin 已经试过了
+      try { sessionStorage.setItem(KEY, location.origin); } catch (_) {}
+
+      // 同源请求：这个路径是浏览器插件在 KiraAI 里注册的配对端点。
+      // 不是 KiraAI 的服务器会 404 —— 那也没关系，什么都不做。
+      fetch("/api/plugin/headless_browser/pair", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => {
+          if (!j || !j.ok || !j.token) return;
+          // 递给后台（走的是和"打开面板即配对"**同一条**消息路径）
+          try {
+            chrome.runtime.sendMessage({
+              action: "page_pair",
+              payload: {
+                host: location.hostname || "127.0.0.1",
+                port: Number(location.port) || 80,
+                token: j.token,
+                instance: j.instance,
+              },
+            });
+          } catch (_) {}
+        })
+        .catch(() => { /* 不是 KiraAI / 网络不通 —— 静默跳过 */ });
+    } catch (_) { /* 任何意外都不该影响页面上的其它功能 */ }
+  })();
+
   // ─── 工具函数 ──────────────────────────────────────────────────────────────
 
   /** 取可见文本：排除 script/style/noscript 与隐藏元素 */
