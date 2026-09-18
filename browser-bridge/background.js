@@ -16,12 +16,13 @@
 import {
   PROTOCOL_VERSION, MSG, CMD, EVT,
   buildWsUrl, KEEPALIVE_ALARM, KEEPALIVE_PERIOD_MINUTES, RECONNECT_DELAYS, STORE,
-  DEFAULT_CONFIRM_TIMEOUT_MS, PAIR_PATH, CANDIDATE_PORTS,
+  DEFAULT_CONFIRM_TIMEOUT_MS, PAIR_PATH, CANDIDATE_PORTS, READ_COMMANDS,
 } from "./protocol.js";
 import { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
          downloadViaSession, cookieGet, cookieSet } from "./capabilities.js";
 import {
-  state, links, sendRaw, sendResult, sendEvent, sendChunk,
+  state, links, activity, otherWriterFor,
+  sendRaw, sendResult, sendEvent, sendChunk,
   resolveTab, assertInjectable, callContent, detectBrowser,
   askUser, confirmTimeoutMs, resolveConfirm,
   NEEDS_CONFIRM_COMMANDS, confirmPromptFor,
@@ -326,10 +327,10 @@ export class Link {
 
 
 
-/** 上次**写**操作来自哪个实例 —— 用于给 bot 提示"页面被谁动过"。 */
-const activity = { lastWriter: "", lastWriteTs: 0, lastUrl: "" };
+// 活动记录与判定都挪到了 shared.js —— 那边能被 node 测试直接 import，
+// 这里只用它。（`activity` / `otherWriterFor`）
 
-export function lastActivity() { return Object.assign({}, activity); }
+
 
 export function getLinks() {
   return Array.from(links.values()).map((l) => l.status());
@@ -568,6 +569,25 @@ async function runCommand(id, name, params, link) {
     if (data && data.__declined) {
       sendResult(id, true, { declined: true }, null, null, link);
     } else {
+      // ── "页面被别的实例动过"的提示（**只在真发生时才带**）──
+      //
+      //  为什么放在这里：这是"一个浏览器两只手"的补偿 —— 不做仲裁（谁都能动），
+      //  但要让 bot **自己知道**页面可能已经变了。否则它会拿旧的 selector
+      //  去点，而页面早被另一个实例换掉了。
+      //
+      //  ⚠️ 平时一个 token 都不花：只有"别的实例在我上次收到结果之后
+      //     写过页面"时才加这一个字段。
+      if (!READ_COMMANDS.has(name)) {
+        activity.lastWriter = link ? link.label : "";
+        activity.lastWriteTs = Date.now();
+      }
+      if (link) {
+        const who = otherWriterFor(link);      // 没发生就返回 ""（零开销）
+        if (who && data && typeof data === "object" && !Array.isArray(data)) {
+          data.other_writer = who;
+        }
+        link.lastResultTs = Date.now();
+      }
       sendResult(id, true, data, null, null, link);
     }
   } catch (e) {

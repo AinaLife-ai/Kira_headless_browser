@@ -11,7 +11,7 @@
  * 所以这里**并发交错**地发两条命令，验证各自的响应确实回到了各自的连接。
  */
 // ESM 的静态 import 只接受字面量路径 → 用动态 import（顶层 await 在 ESM 里可用）
-const { links, sendResult, sendEvent, sendRaw } =
+const { links, sendResult, sendEvent, sendRaw, activity, otherWriterFor } =
   await import(process.env.KIRA_PLUGIN_DIR + "/browser-bridge/shared.js");
 
 const sent = new Map();          // linkKey -> [msg, ...]
@@ -20,7 +20,9 @@ function fakeLink(key) {
   sent.set(key, box);
   return {
     key,
+    label: key.split(":")[0],        // 生产里 label 来自配对响应的 instance 字段
     open: true,
+    lastResultTs: 0,
     ws: { readyState: 1, send: (s) => box.push(JSON.parse(s)) },
   };
 }
@@ -69,7 +71,20 @@ push("指定连接时只发那一条",
      sent.get("kira-a:5267").length === 1 && sent.get("kira-b:8080").length === 0,
      `A=${sent.get("kira-a:5267").length} B=${sent.get("kira-b:8080").length}`);
 
-// ④ 连接已关时返回 false（调用方要靠它判断"其实没发出去"）
+// ④ "页面被别的实例动过"的提示 —— **只在真发生时才给**（省 token 的关键）
+activity.lastWriter = ""; activity.lastWriteTs = 0;
+push("没别的实例写过时不给提示（平时零开销）",
+     otherWriterFor(A) === "" && otherWriterFor(B) === "", "");
+activity.lastWriter = "kira-b"; activity.lastWriteTs = Date.now();
+push("自己写的不提醒自己", otherWriterFor(B) === "", `B=${otherWriterFor(B)}`);
+push("别的实例写过 → 提醒", otherWriterFor(A) === "kira-b",
+     `A=${otherWriterFor(A)}`);
+// 提醒过就更新水位，同一个事实不重复提醒
+A.lastResultTs = Date.now() + 1;
+push("同一个事实不重复提醒（水位线生效）", otherWriterFor(A) === "",
+     `A=${otherWriterFor(A)}`);
+
+// ⑤ 连接已关时返回 false（调用方要靠它判断"其实没发出去"）
 B.open = false;
 push("连接关闭时 sendRaw 返回 false", sendRaw({ x: 1 }, B) === false, "");
 B.open = true;

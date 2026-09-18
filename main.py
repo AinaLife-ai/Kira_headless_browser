@@ -616,7 +616,36 @@ class BrowserPlugin(BasePlugin):
                 f"不装也不影响使用，会继续用插件自带的无头浏览器。）")
 
     def _render(self, method: str, res, backend) -> str:
-        """把后端返回渲染成给模型看的文本（含来源标注）。"""
+        """把后端返回渲染成给模型看的文本（含来源标注）。
+
+        末尾**可能**追加一句"另一个实例刚动过页面"的提醒 ——
+        见 :meth:`_cross_actor_note`。正常情况一个字都不多。
+        """
+        text = self._render_base(method, res, backend)
+        note = self._cross_actor_note(res)
+        return f"{text}{note}" if note else text
+
+    def _cross_actor_note(self, res) -> str:
+        """别的 KiraAI 实例在我上次收到结果之后写过页面 → 提醒一句。
+
+        为什么需要：这个插件现在允许**一个浏览器被多个实例同时操作**
+        （用户有两个 bot，都该能看到同一个页面）。不做仲裁 —— 谁都能动，
+        会抢鼠标 —— 但必须让 bot **自己知道**页面可能已经不是我记忆里的
+        样子了，否则它会拿旧的 selector 去点一个早就被换掉的页面。
+
+        ⚠️ 只在真的发生时才返回非空：平时这条提示**一个 token 都不花**。
+        """
+        try:
+            who = (res.data or {}).get("other_writer")
+        except (AttributeError, TypeError):
+            return ""
+        if not who:
+            return ""
+        return (f"\n\n⚠️ 另一个实例（{who}）在你上次操作之后动过这个页面，"
+                f"内容可能已经变了 —— 建议重新读一次再继续。")
+
+    def _render_base(self, method: str, res, backend) -> str:
+        """真正的渲染（按 method 分支）。"""
         d = res.data or {}
         tag = f"（来源：{backend.display}）"
 

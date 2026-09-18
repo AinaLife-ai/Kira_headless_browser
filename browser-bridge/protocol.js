@@ -271,6 +271,20 @@ export const PAIR_PATH = "/api/plugin/headless_browser/pair";
  *  其余是常见的 Web 端口，覆盖"用户自己改过端口"的大多数情况。
  *  （`http://127.0.0.1/*` 这条 host 权限在 Chrome 里是**端口无关**的，
  *  所以能直接探测任意端口。） */
+/** **只读**命令（不影响页面状态）。
+ *
+ *  其余命令一律当作"写" —— 包括以后新加的：默认按**保守**方向走
+ *  （多提醒一句，比该提醒没提醒安全）。
+ *
+ *  用途只有一个：判断"页面在我上次操作之后有没有被**别的实例**动过"，
+ *  好让 bot 知道它记忆里的页面可能已经变了。
+ *  （和插件侧的「只读模式」是两回事：那边关心的是"能不能操作"，
+ *    这里关心的只是"有没有改到东西"。） */
+export const READ_COMMANDS = new Set([
+  "read_page", "screenshot", "list_tabs", "debug_info",
+  "list_files", "cookie_get", "probe",
+]);
+
 export const CANDIDATE_PORTS = [
   5267,
   8080, 8000, 3000, 5000, 8001, 8081, 8888, 9000, 9090, 10000,

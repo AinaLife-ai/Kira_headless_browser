@@ -29,6 +29,24 @@ export const state = {
  */
 export const links = new Map();
 
+/** 谁最近**写过**页面（跨实例）。
+ *
+ *  这个插件允许一个浏览器被多个 KiraAI 实例同时操作（用户有两个 bot，
+ *  都该看得到同一个页面）。不做仲裁，但要让 bot **自己知道**
+ *  页面可能已经不是我记忆里的样子了。 */
+export const activity = { lastWriter: "", lastWriteTs: 0 };
+
+/** 这次要给这条连接带回"页面被别的实例动过"的提示吗？
+ *
+ *  条件：另一个实例写过，**且**写的时间晚于这条连接上次收到结果的时间。
+ *  → 同一个事实只提醒一次；没发生就返回空串，**一个 token 都不花**。
+ */
+export function otherWriterFor(link) {
+  if (!link) return "";
+  if (!activity.lastWriter || activity.lastWriter === link.label) return "";
+  return activity.lastWriteTs > (link.lastResultTs || 0) ? activity.lastWriter : "";
+}
+
 // ─── 发送 ──────────────────────────────────────────────────────────────
 //
 //  ⚠️ 每个 send* 都必须**显式带上目标连接**（`link`）。
