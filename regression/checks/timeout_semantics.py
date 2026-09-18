@@ -67,8 +67,11 @@ def run(r) -> None:
          "Promise.race 只停止等待，**取消不了**已发出的操作")
     r.ok("A3 sendResult 会带上 error_code 字段",
          "error_code" in shared and "errorCode" in shared)
+    #  ⚠️ 判据里 `e\.code` 后面用 `[,)]` 而不是 `)`：
+    #     扩展改成多连接后 sendResult 多了个 `link` 尾参 ——
+    #     要紧的是"e.code 被传进去了"，不是"它正好是最后一个参数"。
     r.ok("A4 background 把 e.code 传进 sendResult",
-         re.search(r"sendResult\(\s*id\s*,\s*false[^;]*?e\s*&&\s*e\.code\s*\)",
+         re.search(r"sendResult\(\s*id\s*,\s*false[^;]*?e\s*&&\s*e\.code\s*[,)]",
                    bg, re.S) is not None,
          "不传的话类别在入口就丢了")
 

@@ -551,3 +551,35 @@ def run(r) -> None:
                          _i2.get("detail", ""))
         except Exception as e:
             r.ok("I2 面板轮询竞态验证", False, f"{type(e).__name__}: {e}"[:140])
+
+    # ── I3. 多连接下的**响应路由**（这次重构最要命的地方）────────────
+    #  ⚠️ 扩展现在同时连多个 KiraAI 实例，而命令是 async 的。
+    #    若发送时读一个"当前连接"全局变量，A 在 await 期间被 B 改掉，
+    #    A 恢复后就会**把自己的响应发给 B** ——
+    #    现象是"跟 A 说话 A 没反应，B 却收到一堆不属于它的结果"。
+    #    所以这里并发交错地发两条，验证各自回到各自的连接。
+    _ml = PLUGIN_DIR / "regression" / "js" / "multi_link.mjs"
+    if not _ml.is_file():
+        r.ok("I3 多连接路由探测脚本存在", False, f"缺少 {_ml}")
+    elif not _node:
+        r.warn("没有 node，跳过 I3 多连接路由验证", "安装 Node.js 后可启用")
+    else:
+        try:
+            _cm = subprocess.run(
+                [_node, str(_ml)], cwd=str(_ml.parent), capture_output=True,
+                text=True, timeout=60,
+                env={"PATH": os.environ.get("PATH", "") + ":/usr/bin:/bin",
+                     "KIRA_PLUGIN_DIR": str(PLUGIN_DIR)})
+            _im = json.loads((_cm.stdout or "[]").strip().splitlines()[-1])
+            _needm = ("A 的响应发给了 A（没串到 B）", "B 的响应发给了 B",
+                      "事件广播到 A", "事件广播到 B")
+            _missm = [n for n in _needm
+                      if n not in [str(x.get("name", "")) for x in _im]]
+            if _missm:
+                r.ok("I3 多连接路由探测覆盖关键场景", False, f"缺={_missm}")
+            else:
+                for _i3 in _im:
+                    r.ok(f"I3 {_i3['name']}", bool(_i3.get("ok")),
+                         str(_i3.get("detail", ""))[:120])
+        except Exception as e:
+            r.ok("I3 多连接路由验证", False, f"{type(e).__name__}: {e}"[:140])

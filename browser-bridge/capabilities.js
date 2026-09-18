@@ -322,7 +322,9 @@ async function uploadAbort(params) {
 
 const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
-async function downloadViaSession(params, cmdId) {
+// ⚠️ `link` 是**必须**的：分块要发回**发起下载的那条连接**。
+//    多条连接共存时不能靠"当前连接"这类全局（异步交错会发错人）。
+async function downloadViaSession(params, cmdId, link) {
   const { url, max_bytes } = params;
   if (!url) throw new Error("缺少 url");
 
@@ -406,7 +408,7 @@ async function downloadViaSession(params, cmdId) {
       // ⚠️ 发失败（socket 已关）必须中止下载并抛错：
       //    否则会一路走到 return {ok:true}，调用方以为下载成功，
       //    而磁盘上的文件其实缺了后面所有分块。
-      if (!sendChunk(cmdId, slice)) {
+      if (!sendChunk(cmdId, slice, link)) {
         try { await reader.cancel(); } catch (_) {}
         throw new Error("连接已断开，下载分块无法回传，已中止");
       }
@@ -419,7 +421,7 @@ async function downloadViaSession(params, cmdId) {
     if (limit > 0 && total > limit) {
       throw new Error(`文件超过上限 ${limit} 字节，已中止`);
     }
-    if (!sendChunk(cmdId, buf)) {
+    if (!sendChunk(cmdId, buf, link)) {
       throw new Error("连接已断开，下载分块无法回传，已中止");
     }
   }

@@ -58,63 +58,98 @@ async function refresh() {
     return;
   }
 
-  if (r.connected) {
+  const list = r.instances || [];
+  const n = r.count || 0;
+  renderInstances(list);
+  if (n > 0) {
     setDot("on");
-    const ver = r.extension_version ? ` · 扩展 v${r.extension_version}` : "";
-    const br = r.browser ? ` · ${r.browser}` : "";
-    setStatus(`已连接${br}${ver}`);
+    setStatus(`已连接 ${n} 个实例` + (list.length > n ? `（共配对 ${list.length} 个）` : ""));
   } else {
     setDot(r.error ? "err" : "");
-    const label = STATE_LABEL[r.readyState] || "未知";
-    setStatus(r.error || `未连接（${label}）`, !!r.error);
+    setStatus(r.error || "未连接", !!r.error);
   }
+}
+
+/** 渲染实例列表。
+ *
+ *  现在可以**同时连多个** KiraAI —— 它们共用一个浏览器，都看得到同一个页面。
+ *  所以弹窗要列出来"连上了哪几个"，而不是只显示一个状态。 */
+function renderInstances(list) {
+  const box = $("instances");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!list.length) {
+    box.innerHTML = '<div class="hint" style="margin:0">还没有配对任何 KiraAI 实例。</div>';
+    return;
+  }
+  for (const it of list) {
+    const on = it.status === "connected";
+    const row = document.createElement("div");
+    row.className = "inst";
+    const label = it.label && it.label !== it.key ? `${it.label}（${it.key}）` : it.key;
+    row.innerHTML = `<span class="dot ${on ? "on" : (it.error ? "err" : "")}"></span>`
+      + `<span class="nm">${escapeHtml(label)}</span>`
+      + `<span class="st">${on ? "已连接" : escapeHtml(it.error || "未连接")}</span>`;
+    box.appendChild(row);
+  }
+}
+
+function escapeHtml(t) {
+  return String(t == null ? "" : t).replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 // ─── 配置读写 ────────────────────────────────────────────────────────────────
 
 async function loadConfig() {
-  const s = await chrome.storage.local.get([
-    STORE.TOKEN, STORE.HOST, STORE.PORT, STORE.AUTO_CONNECT,
-  ]);
-  $("token").value = s[STORE.TOKEN] || "";
-  $("host").value = s[STORE.HOST] || "127.0.0.1";
-  $("port").value = s[STORE.PORT] || 5267;
+  const s = await chrome.storage.local.get([STORE.INSTANCES, STORE.AUTO_CONNECT]);
+  const first = (s[STORE.INSTANCES] || [])[0] || {};
+  // 手动添加框：回填第一个实例，方便"再加一个"
+  $("host").value = first.host || "127.0.0.1";
+  $("port").value = first.port || "";
+  $("token").value = first.token || "";
   $("autoConnect").checked = s[STORE.AUTO_CONNECT] !== false;
 }
 
-async function saveConfig() {
+/** 手动把一个实例加进列表（自动探测覆盖不到的端口用这个兜底）。 */
+async function addInstance() {
   const token = $("token").value.trim();
   const host = $("host").value.trim() || "127.0.0.1";
-  const port = Number($("port").value) || 5267;
+  const port = Number($("port").value);
   const autoConnect = $("autoConnect").checked;
 
-  const patch = {
-    [STORE.HOST]: host,
-    [STORE.PORT]: port,
-    [STORE.AUTO_CONNECT]: autoConnect,
-  };
-  // ⚠️ 令牌为空时**不要写进去**。
-  //    「自动检测」会把令牌写进存储，而弹窗若还开着、输入框仍是空的，
-  //    这时点「连接」会走到这里 —— 写空值就把刚检测到的令牌**擦掉**了，
-  //    表现为"点了自动检测，一连接又变成未配置"。
-  if (token) patch[STORE.TOKEN] = token;
-
-  await chrome.storage.local.set(patch);
-  setStatus("配置已保存");
-  return token;
+  await chrome.storage.local.set({ [STORE.AUTO_CONNECT]: autoConnect });
+  if (!token || !(port > 0)) {
+    setStatus("要填「端口」和「令牌」才能加实例", true);
+    return false;
+  }
+  let r;
+  try {
+    r = await chrome.runtime.sendMessage({
+      action: "add_instance", inst: { host, port, token, label: "" },
+    });
+  } catch (e) {
+    _renderBackendUnavailable(e);
+    return false;
+  }
+  if (!r || !r.ok) {
+    setStatus((r && r.error) || "添加失败", true);
+    return false;
+  }
+  setStatus(`已添加 ${host}:${port}`);
+  setTimeout(refresh, 600);
+  return true;
 }
 
 // ─── 事件绑定 ────────────────────────────────────────────────────────────────
 
-$("btnSave").addEventListener("click", async () => {
-  await saveConfig();
-  setTimeout(refresh, 300);
+$("btnAdd").addEventListener("click", async () => {
+  await addInstance();
 });
 
 $("btnDiscover").addEventListener("click", async () => {
   setStatus("正在本机寻找 KiraAI…");
   setDot("");
-  $("candidates").style.display = "none";
   let r;
   try {
     r = await chrome.runtime.sendMessage({ action: "discover" });
@@ -126,65 +161,22 @@ $("btnDiscover").addEventListener("click", async () => {
     _renderBackendUnavailable(new Error("扩展后台没有响应"));
     return;
   }
-  if (r.ok && r.single) {
-    applyToForm(r.single);
-    setStatus(`已找到 KiraAI（${r.single.host}:${r.single.port}），`
-              + "端口和令牌都填好了，点「连接」即可。");
-    return;
-  }
-  // ⚠️ 多个实例时**不替用户猜** —— 猜错的后果是
-  //    "我对 A 说话，B 却动了我的浏览器"，比多点一下严重得多。
-  if (r.multiple && r.multiple.length) {
-    renderCandidates(r.multiple);
-    setStatus(`本机找到 ${r.multiple.length} 个 KiraAI 实例，请选一个`
-              + "（选错会连到另一个机器人）。");
+  if (r.ok) {
+    setStatus(`找到 ${r.found} 个实例，已登记并连接。`);
+    setTimeout(refresh, 600);
     return;
   }
   setDot("err");
   setStatus(r.error || "没有找到", true);
 });
 
-/** 把接入信息回填到表单，让用户看得见填了什么。 */
-function applyToForm(u) {
-  $("host").value = u.host;
-  $("port").value = u.port;
-  $("token").value = u.token;
-}
-
-/** 多实例选择列表。 */
-function renderCandidates(list) {
-  const box = $("candidates");
-  box.innerHTML = "";
-  box.style.display = "flex";
-  for (const c of list) {
-    const label = c.instance ? `${c.instance}（端口 ${c.port}）` : `端口 ${c.port}`;
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "cand";
-    b.textContent = label;
-    if (c.data_dir) b.title = c.data_dir;
-    b.addEventListener("click", async () => {
-      let r2;
-      try {
-        r2 = await chrome.runtime.sendMessage({ action: "use_instance", hit: c });
-      } catch (e) {
-        _renderBackendUnavailable(e);
-        return;
-      }
-      if (r2 && r2.ok && r2.single) {
-        applyToForm(r2.single);
-        box.style.display = "none";
-        setStatus(`已选择 ${label}，点「连接」即可。`);
-      }
-    });
-    box.appendChild(b);
-  }
-}
-
 $("btnConnect").addEventListener("click", async () => {
   // ⚠️ 这里**不再要求令牌非空**：没有令牌时后台会先跑「自动检测」，
   //    把端口和令牌找出来再连。首次安装的用户什么都不用填。
-  await saveConfig();
+  // 表单里填了端口/令牌就当作"手动加一个实例"，没填就直接连已登记的
+  if ($("port").value.trim() && $("token").value.trim()) {
+    await addInstance();
+  }
 
   setStatus("正在连接…");
   let r;

@@ -536,7 +536,11 @@ def run(r) -> None:
         #    直接 find("state.probe") 会切在注释里，把真正的守卫代码切没。
         code = re.sub(r'/\*[\s\S]*?\*/', '', seg)
         code = re.sub(r'(?m)//[^\n]*$', '', code)
-        if "state.probe(" not in code:
+        # ⚠️ 探测槽位从全局 `state.probe` 挪到了**每条连接**上
+        #    （`link.probe`）—— 多连接同时探测时互不覆盖。
+        #    判据跟着放宽成"任意对象的 .probe("，强度不变：
+        #    仍然要求那个标识符出现在**条件**里。
+        if not re.search(r"\.probe\(", code):
             return False
         head = code[:code.find("state.probe(")]
         # 该标识符必须出现在 probe 之前的**条件**里
@@ -597,7 +601,11 @@ def run(r) -> None:
         # （窗口要够大：sendMessage 的 try/catch 块本身就占好几行，
         #  窗口太小会把"其实判了空"的地方误报成没判）
         _win = "\n".join(_pop_lines[max(0, _i - 25):_i + 1])
-        if not re.search(r'if\s*\(\s*!\s*r\s*\)', _win):
+        # ⚠️ 判据放宽成 `!r` 后面可以是 `)` **或 `||`**：
+        #    写成 `if (!r || !r.ok)` 同样是正确的判空 ——
+        #    短路求值保证 `r.ok` 只在 r 非空时才取。
+        #    原来只认 `if (!r)` 会把这种写法误报。
+        if not re.search(r'if\s*\(\s*!\s*r\s*(?:\)|\|\|)', _win):
             _no_guard.append(_i + 1)
     r.ok("C16m 读取 sendMessage 结果前先判空（否则 undefined 会抛错卡住界面）",
          not _no_guard, f"未判空的行={_no_guard or '无'}")

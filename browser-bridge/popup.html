@@ -45,13 +45,10 @@
   .check input { width: auto; }
   a { color: #4f46e5; font-size: 11.5px; }
   /* 多实例选择：一台机器上跑了多个 KiraAI 时列出来让用户挑 */
-  .candidates { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-  .candidates .cand {
-    text-align: left; font-size: 12px; padding: 7px 10px;
-    border: 1px solid #d7dbe0; border-radius: 7px; background: #fff; color: #111827;
-    cursor: pointer;
-  }
-  .candidates .cand:hover { background: #f3f4f6; }
+  .instances { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+  .inst { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+  .inst .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inst .st { color: #6b7280; }
 </style>
 </head>
 <body>
@@ -81,7 +78,7 @@
   </div>
 
   <div class="actions">
-    <button id="btnSave" class="ghost">保存</button>
+    <button id="btnAdd" class="ghost">添加</button>
     <button id="btnConnect">连接</button>
   </div>
   <div class="actions" style="margin-top:8px">
@@ -91,7 +88,7 @@
   </div>
 
   <div class="status" id="status">读取中…</div>
-  <div id="candidates" class="candidates" style="display:none"></div>
+  <div id="instances" class="instances"></div>
 
   <div class="divider"></div>
   <div class="hint">
