@@ -10,7 +10,7 @@ v2.1.0 重写双后端架构时，**整段丢掉了三样东西**：
 2. **自动下载内置 Chromium**（`_download_chromium`）——
    原版是启动回退的第 4 级；丢之后只剩一句"请手动安装"的提示，
    **而 README 一直在承诺"全部失败会自动下载"**（文档说有、代码没有）。
-3. **`browser_check_vlm` 工具** —— VLM 配置的自查入口。
+3. **VLM 配置自查入口** —— 原为独立工具 `browser_check_vlm`，v2.1.49 起并进 `browser_diag(action="vlm")`。
 
 这三样当时**没有任何检查会发现**：缺功能不是"报错"，是"静默没有"。
 
@@ -142,9 +142,12 @@ def run(r) -> None:
     r.ok("A9 下载失败时给出手动安装命令（而不是裸报错）",
          "playwright install chromium" in hb)
 
-    # ── ③ browser_check_vlm ──────────────────────────────────────────
-    r.ok("A10 browser_check_vlm 工具在", 'name="browser_check_vlm"' in main,
-         "VLM 配置的自查入口（原版有，重写时丢了）")
+    # ── ③ VLM 自查入口（v2.1.49 起并进 browser_diag(action="vlm")）──────
+    r.ok("A10 VLM 配置自查入口在（browser_diag 的 vlm 动作）",
+         'name="browser_diag"' in main and '"vlm"' in main
+         and "_diag_vlm" in main,
+         "VLM 配置的自查入口（原版有，重写时丢了）；第二轮合并后"
+         "归入 browser_diag，这里同时确认工具、动作、实现三处都在")
     r.ok("A11 它会指出『模型配错组』这个坑",
          "大语言模型" in main and "图像" in main)
 

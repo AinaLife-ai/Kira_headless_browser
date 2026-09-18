@@ -80,11 +80,13 @@ CONFIRM_WAIT_SECONDS = 45
 #      browser_script   —— 执行任意 JS（能做任何事）
 #      browser_cookie   —— 写 cookie（import 动作）
 #      browser_file     —— 上传/下载（会改变页面与本地状态）
-#      browser_test_visible —— 内部会 navigate 打开测试页（**确实改状态**），
-#                              只读模式下不摘掉的话，用户开了只读仍会被导航走
+#  ⚠️ `browser_diag` **不在**这个名单里：它的 status / vlm / extension
+#     是纯查询，只读模式下也该能用；只有 visible 会 navigate 打开测试页，
+#     那条路径内部走 `_call(..., for_write=True)`，由 `_check_write`
+#     在只读模式下拦住（比"整个工具被摘掉"更精确）。
 WRITE_TOOL_NAMES = (
     "browser_interact", "browser_navigate", "browser_script",
-    "browser_cookie", "browser_file", "browser_test_visible",
+    "browser_cookie", "browser_file",
 )
 
 
@@ -202,7 +204,7 @@ class BrowserPlugin(BasePlugin):
         self.op_timeout_follows_framework = _b(cfg.get("op_timeout_follows_framework", False))
         # ⚠️ 在这里就**钳住**合法区间 (0,1)，不要留到使用时才判 ——
         #    留到使用点的话，只有"跟随框架"那条分支会纠正它，
-        #    其它路径（含 browser_debug 的展示）看到的仍是非法原值，
+        #    其它路径（含 browser_diag 的展示）看到的仍是非法原值，
         #    "显示 5.0、实际用 0.8"这种对不上的情况就会一直存在。
         #    ⚠️ schema 里**不能**用 minimum/maximum 表达这个约束：
         #       框架的 create_field_from_schema 只读 type/name/hint/default/
@@ -628,10 +630,9 @@ class BrowserPlugin(BasePlugin):
             # 分页信息：让 bot 知道"还有多少没读、怎么接着读"，
             # 而不是被一个硬上限卡住 —— 它需要更多内容时自己带 offset 再取即可。
             if d.get("has_more"):
-                out += (f"\n\n📄 本次读到第 {d.get('offset')}–{(d.get('offset') or 0) + (d.get('returned') or 0)}"
-                        f" 字符，全文共 {total} 字符，还有 {total - ((d.get('offset') or 0) + (d.get('returned') or 0))} 字符未读。"
-                        f"\n   需要继续就读时，用 browser_get_page(offset={d.get('next_offset')}) 接下去；"
-                        f"也可以直接用 browser_extract 只取你要的那部分。")
+                _read = (d.get('offset') or 0) + (d.get('returned') or 0)
+                out += (f"\n\n📄 {d.get('offset')}–{_read} / 共 {total}，还有 {total - _read} 未读。"
+                        f"续读 browser_page(offset={d.get('next_offset')})。")
             return out
         if method == "extract":
             import json as _json
@@ -823,25 +824,19 @@ class BrowserPlugin(BasePlugin):
     @register.tool(
         name="browser_page",
         description=(
-            "读取页面内容，用 mode 选读什么：\n"
-            "  mode=info    —— 只要标题和网址（最省 token）\n"
-            "  mode=text    —— 正文文本（默认）\n"
-            "  mode=outline —— 标题结构 + 可交互元素 + 主要链接（判断下一步点什么）\n"
-            "  mode=html    —— 原始 HTML（很长，慎用）\n"
-            "  mode=selector—— 只取某个 CSS 选择器内的文本\n"
-            "  mode=extract —— 用选择器抽多条结构化数据（配 attr/limit）\n"
-            "长页面用 offset 续读：返回值会告诉你还有多少没读、下次从哪开始。"
+            "读页面。mode: info=标题+网址 / text=正文(默认) / outline=标题+可交互元素+链接"
+            "/ html=原始HTML(很长) / selector=取选择器内文本 / extract=抽多条数据(配 attr/limit)。"
+            "长页用 offset 续读。"
         ),
         params={"type": "object", "properties": {
             "mode": {"type": "string",
-                     "enum": ["info", "text", "outline", "html", "selector", "extract"],
-                     "description": "读什么，默认 text"},
-            "selector": {"type": "string", "description": "mode=selector/extract 时的 CSS 选择器"},
-            "attr": {"type": "string", "description": "mode=extract：取这个属性（如 href），省略取文本"},
-            "limit": {"type": "integer", "description": "mode=extract：最多几条，默认 50"},
-            "offset": {"type": "integer", "description": "正文从第几个字符开始读，默认 0"},
-            "max_chars": {"type": "integer", "description": "本次最多返回多少字符"},
-            "tab_id": {"type": "integer", "description": "目标标签页 id，可选"}},
+                     "enum": ["info", "text", "outline", "html", "selector", "extract"]},
+            "selector": {"type": "string"},
+            "attr": {"type": "string", "description": "extract 取该属性(如 href)，省略取文本"},
+            "limit": {"type": "integer", "description": "extract 最多几条，默认 50"},
+            "offset": {"type": "integer", "description": "正文起始字符位置"},
+            "max_chars": {"type": "integer"},
+            "tab_id": {"type": "integer"}},
             "required": []},
     )
     async def tool_page(self, event, mode: str = "text", selector: str = "",
@@ -868,7 +863,7 @@ class BrowserPlugin(BasePlugin):
 
     @register.tool(
         name="browser_tabs",
-        description="列出浏览器里打开的所有标签页（标题、网址、哪个是当前页）。",
+        description="列出打开的所有标签页。",
         params={"type": "object", "properties": {}, "required": []},
     )
     async def tool_tabs(self, event, **_):
@@ -879,22 +874,15 @@ class BrowserPlugin(BasePlugin):
     @register.tool(
         name="browser_screenshot",
         description=(
-            "截图。默认把图片发给用户，**并且用 VLM 分析出文字描述回给你**"
-            "（这样你才能「看到」页面：工具结果是文本，图片本身不会进你的上下文）。\n"
-            "  describe=false —— 只要图、不要描述（只想让用户看图时更省）。\n"
-            "  selector  —— 只截某个元素。full_page —— 整页。\n"
-            "  send=false —— 不发给用户，只自己看（describe 默认仍为 true）。"
+            "截图，并用视觉模型描述给你（工具结果是文本，图片不进你的上下文）。"
+            "selector=只截元素；full_page=整页；describe=false 不要描述；send=false 不发用户。"
         ),
         params={"type": "object", "properties": {
-            "full_page": {"type": "boolean", "description": "是否整页截图，默认 false"},
-            "selector": {"type": "string", "description": "只截这个元素"},
-            "send": {"type": "boolean", "description": "是否把图片发给用户，默认 true"},
-            "describe": {
-                "type": "boolean",
-                "description": "是否用 VLM 分析截图并把描述回给你，默认取插件配置"
-                               "（通常为 true）。只想让用户看图、不需要自己理解时"
-                               "设 false 更快。",
-            }},
+            "full_page": {"type": "boolean"},
+            "selector": {"type": "string"},
+            "send": {"type": "boolean"},
+            "describe": {"type": "boolean",
+                         "description": "默认取插件配置（通常 true）"}},
             "required": []},
     )
     async def tool_screenshot(self, event: KiraMessageBatchEvent, full_page: bool = False,
@@ -952,14 +940,13 @@ class BrowserPlugin(BasePlugin):
     @register.tool(
         name="browser_wait",
         description=(
-            "等待。给 selector 或 text 就等它们出现（更准，优先用）；"
-            "什么都没给就单纯等 seconds 秒。"
+            "等待。给 selector/text 就等它们出现（更准）；都没给则等 seconds 秒。"
         ),
         params={"type": "object", "properties": {
-            "selector": {"type": "string", "description": "等待出现的 CSS 选择器"},
-            "text": {"type": "string", "description": "等待出现的文字"},
+            "selector": {"type": "string"},
+            "text": {"type": "string"},
             "timeout": {"type": "integer", "description": "最长等待秒数，默认 10"},
-            "seconds": {"type": "number", "description": "不指定 selector/text 时，单纯等待的秒数"}},
+            "seconds": {"type": "number", "description": "单纯等待的秒数"}},
             "required": []},
     )
     async def tool_wait(self, event, selector=None, text=None, timeout: int = 10,
@@ -977,61 +964,39 @@ class BrowserPlugin(BasePlugin):
     @register.tool(
         name="browser_interact",
         description=(
-            "对页面做操作，用 action 选动作：\n"
-            "【元素类】\n"
-            "  click      点击（selector / text / index 三选一）\n"
-            "  fill       填写输入框（selector + value）\n"
-            "  type       在输入框逐字输入（selector + value），submit=true 会回车提交\n"
-            "  hover      悬停到元素上\n"
-            "  scroll     滚动，direction=up/down/top/bottom\n"
-            "  upload     把本地文件塞进 input[type=file]（selector + file_path）\n"
-            "【导航类】\n"
-            "  go_back    返回上一页\n"
-            "  refresh    刷新页面\n"
-            "【键盘】\n"
-            "  key_press  按键/组合键（key，如 Enter、Control+a）\n"
-            "  key_down / key_up   按住 / 释放某个键（key）\n"
-            "  key_type   键盘输入文本（text）\n"
-            "【鼠标】\n"
-            "  mouse_click  坐标点击（x,y），CSS 定位不到时用\n"
-            "  mouse_move   移动到 x,y\n"
-            "  mouse_down / mouse_up   按下 / 释放（button）\n"
-            "  mouse_wheel  滚轮（delta_y）\n"
-            "  mouse_drag   拖拽（start_x,start_y,end_x,end_y）"
+            "操作页面。action→参数：\n"
+            "click/hover: selector|text|index\n"
+            "fill/type: selector+value（submit=true 回车；clear_first 默认 true）\n"
+            "scroll: direction+amount\n"
+            "upload: selector+file_path\n"
+            "go_back/refresh: 无\n"
+            "key_press: key（Enter / Control+a）；key_type: text\n"
+            "低层鼠标（CSS 定位不到时用）: mouse_click/move(x,y) "
+            "mouse_wheel(delta_x/y) mouse_drag(start_x/y,end_x/y) mouse_down/up(button)"
         ),
         params={"type": "object", "properties": {
             "action": {"type": "string", "enum": [
                 "click", "fill", "type", "hover", "scroll", "upload",
-                "go_back", "refresh",
-                "key_press", "key_down", "key_up", "key_type",
+                "go_back", "refresh", "key_press", "key_down", "key_up", "key_type",
                 "mouse_click", "mouse_move", "mouse_down", "mouse_up",
-                "mouse_wheel", "mouse_drag"],
-                "description": "要做的动作"},
+                "mouse_wheel", "mouse_drag"]},
             "selector": {"type": "string", "description": "CSS 选择器"},
-            "text": {"type": "string", "description": "按可见文字定位 / key_type 要输入的文本"},
-            "index": {"type": "integer", "description": "第几个可点击元素（从 0 开始）"},
-            "value": {"type": "string", "description": "要填/输入的文本"},
-            "file_path": {"type": "string", "description": "action=upload 时要上传的文件绝对路径"},
-            "key": {"type": "string", "description": "按键名，如 Enter / Tab / Control+a"},
-            "direction": {"type": "string", "enum": ["up", "down", "top", "bottom"],
-                          "description": "action=scroll 的方向"},
-            "amount": {"type": "integer", "description": "action=scroll 的滚动像素"},
-            "timeout": {"type": "integer", "description": "动作等待超时秒数"},
-            "x": {"type": "integer", "description": "鼠标坐标 X"},
-            "y": {"type": "integer", "description": "鼠标坐标 Y"},
-            "steps": {"type": "integer", "description": "鼠标移动步数"},
-            "delta_x": {"type": "integer", "description": "滚轮水平量"},
-            "delta_y": {"type": "integer", "description": "滚轮垂直量"},
-            "button": {"type": "string", "enum": ["left", "right", "middle"],
-                       "description": "鼠标键，默认 left"},
-            "click_count": {"type": "integer", "description": "点击次数，默认 1"},
-            "start_x": {"type": "integer", "description": "拖拽起点 X"},
-            "start_y": {"type": "integer", "description": "拖拽起点 Y"},
-            "end_x": {"type": "integer", "description": "拖拽终点 X"},
-            "end_y": {"type": "integer", "description": "拖拽终点 Y"},
-            "submit": {"type": "boolean", "description": "action=type 时是否回车提交"},
-            "clear_first": {"type": "boolean", "description": "action=fill/type 是否先清空，默认 true"},
-            "tab_id": {"type": "integer", "description": "目标标签页 id，可选"}},
+            "text": {"type": "string", "description": "可见文字 / key_type 的文本"},
+            "index": {"type": "integer", "description": "第几个可点击元素，从 0 开始"},
+            "value": {"type": "string", "description": "填入的文本"},
+            "file_path": {"type": "string", "description": "上传文件绝对路径"},
+            "key": {"type": "string", "description": "Enter / Tab / Control+a"},
+            "direction": {"type": "string", "enum": ["up", "down", "top", "bottom"]},
+            "amount": {"type": "integer", "description": "滚动像素"},
+            "timeout": {"type": "integer", "description": "等待超时秒数"},
+            "x": {"type": "integer"}, "y": {"type": "integer"},
+            "delta_x": {"type": "integer"}, "delta_y": {"type": "integer"},
+            "button": {"type": "string", "enum": ["left", "right", "middle"]},
+            "steps": {"type": "integer"}, "click_count": {"type": "integer"},
+            "start_x": {"type": "integer"}, "start_y": {"type": "integer"},
+            "end_x": {"type": "integer"}, "end_y": {"type": "integer"},
+            "submit": {"type": "boolean"}, "clear_first": {"type": "boolean"},
+            "tab_id": {"type": "integer"}},
             "required": ["action"]},
     )
     async def tool_interact(self, event, action: str, **kw):
@@ -1138,10 +1103,10 @@ class BrowserPlugin(BasePlugin):
 
     @register.tool(
         name="browser_navigate",
-        description="让浏览器打开网址。new_tab=true 会新开一个标签页。",
+        description="打开网址。",
         params={"type": "object", "properties": {
             "url": {"type": "string", "description": "完整网址"},
-            "new_tab": {"type": "boolean", "description": "是否新开标签页，默认 false"}},
+            "new_tab": {"type": "boolean"}},
             "required": ["url"]},
     )
     async def tool_navigate(self, event, url: str, new_tab: bool = False, **_):
@@ -1155,13 +1120,10 @@ class BrowserPlugin(BasePlugin):
 
     @register.tool(
         name="browser_script",
-        description=(
-            "在页面里执行 JavaScript 并返回结果（最灵活的能力）。\n"
-            "扩展桥后端需要用户在扩展详情页打开「允许用户脚本」开关（Chrome 138+ 的安全要求）。"
-        ),
+        description="在页面执行 JavaScript 并返回结果。",
         params={"type": "object", "properties": {
             "script": {"type": "string",
-                       "description": "JS 表达式，返回值会被回传。如 document.title 或 [...document.querySelectorAll('a')].map(a=>a.href)"}},
+                       "description": "JS 表达式，如 document.title"}},
             "required": ["script"]},
     )
     async def tool_script(self, event, script: str, **_):
@@ -1177,19 +1139,15 @@ class BrowserPlugin(BasePlugin):
     @register.tool(
         name="browser_file",
         description=(
-            "文件相关操作，用 mode 选：\n"
-            "  mode=download —— 下载一个 URL 到本地并发给用户（会带上浏览器登录态）\n"
-            "  mode=list     —— 列出已下载/截图目录里的文件\n"
-            "上传文件请用 browser_interact(action='upload')。"
+            "文件操作。mode=download 下载 URL 到本地并发给用户（带登录态）；"
+            "mode=list 列已下载/截图文件。上传用 browser_interact(upload)。"
         ),
         params={"type": "object", "properties": {
-            "mode": {"type": "string", "enum": ["download", "list"],
-                     "description": "做什么，默认 download"},
-            "url": {"type": "string", "description": "mode=download 的 http/https 链接"},
-            "filename": {"type": "string", "description": "保存文件名，可选"},
-            "dir_type": {"type": "string", "enum": ["downloads", "screenshots"],
-                         "description": "mode=list 的目录"},
-            "limit": {"type": "integer", "description": "mode=list 最多显示几个"}},
+            "mode": {"type": "string", "enum": ["download", "list"]},
+            "url": {"type": "string"},
+            "filename": {"type": "string"},
+            "dir_type": {"type": "string", "enum": ["downloads", "screenshots"]},
+            "limit": {"type": "integer"}},
             "required": []},
     )
     async def tool_file(self, event: KiraMessageBatchEvent, mode: str = "download",
@@ -1238,16 +1196,13 @@ class BrowserPlugin(BasePlugin):
     @register.tool(
         name="browser_cookie",
         description=(
-            "导出/写入浏览器 cookie，用来把「你浏览器里的登录态」带到另一个后端。\n"
-            "  action=export —— 导出当前站点（或指定 url）的 cookie\n"
-            "  action=import —— 把 cookie 写进当前后端\n"
-            "典型用法：先从扩展桥导出，再写入无头后端，这样降级到无头时也不用重新登录。"
+            "导出/写入 cookie，把「你浏览器里的登录态」带到另一个后端。"
+            "action=export 导出（当前页或指定 url）；action=import 写入。"
         ),
         params={"type": "object", "properties": {
-            "action": {"type": "string", "enum": ["export", "import"],
-                       "description": "导出还是写入"},
-            "url": {"type": "string", "description": "action=export 的目标网址，省略用当前页"},
-            "cookies": {"type": "array", "description": "action=import 时要写入的 cookie 数组"}},
+            "action": {"type": "string", "enum": ["export", "import"]},
+            "url": {"type": "string", "description": "export 目标，省略用当前页"},
+            "cookies": {"type": "array", "description": "import 要写入的数组"}},
             "required": ["action"]},
     )
     async def tool_cookie(self, event, action: str, url: str = "", cookies=None, **_):
@@ -1264,16 +1219,7 @@ class BrowserPlugin(BasePlugin):
 
     # ── 8. 排障 / 帮助 ───────────────────────────────────────────────
 
-    @register.tool(
-        name="browser_check_vlm",
-        description=(
-            "诊断「截图能不能被分析」：显示当前实际用哪个模型看图、是否支持视觉、"
-            "以及系统里有哪些可选的视觉模型。\n"
-            "当 browser_screenshot 返回「未能生成图片描述」时用它自查。"
-        ),
-        params={"type": "object", "properties": {}, "required": []},
-    )
-    async def tool_check_vlm(self, event, **_):
+    async def _diag_vlm(self):
         """检查 VLM 配置。
 
         ⚠️ 这个工具原版有，v2.1.0 重写时被整段丢掉。
@@ -1387,11 +1333,34 @@ class BrowserPlugin(BasePlugin):
         return "\n".join(info)
 
     @register.tool(
-        name="browser_debug",
-        description="查看浏览器后端状态（用哪个后端、profile 模式、超时、空闲多久等）。排障用。",
-        params={"type": "object", "properties": {}, "required": []},
+        name="browser_diag",
+        description=(
+            "查状态 / 排障。action：\n"
+            "status=后端状态（用哪个后端、profile 模式、超时、空闲多久）\n"
+            "vlm=截图分析实际用哪个视觉模型（browser_screenshot 返回「未能生成图片描述」时查）\n"
+            "visible=打开测试页，确认可视模式窗口是否真的显示出来了\n"
+            "extension=扩展装在哪、怎么装、接入令牌（用户问「怎么让你看我的浏览器」时用）"
+        ),
+        params={"type": "object", "properties": {
+            "action": {"type": "string",
+                       "enum": ["status", "vlm", "visible", "extension"]}},
+            "required": ["action"]},
     )
-    async def tool_debug(self, event, **_):
+    async def tool_diag(self, event, action: str, **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        a = (action or "").lower()
+        if a == "status":
+            return await self._diag_status()
+        if a == "vlm":
+            return await self._diag_vlm()
+        if a == "visible":
+            return await self._diag_visible()
+        if a == "extension":
+            return await self._diag_extension()
+        return "action 只能是 status / vlm / visible / extension"
+
+    async def _diag_status(self):
         if not self.enabled:
             return "浏览器插件未启用"
         parts = ["🔍 浏览器插件状态", "",
@@ -1409,12 +1378,7 @@ class BrowserPlugin(BasePlugin):
                 parts.append(f"  {k}: {d.get(k)}")
         return "\n".join(parts)
 
-    @register.tool(
-        name="browser_test_visible",
-        description="打开一个测试页，确认「可视模式」下窗口是否真的显示出来了。",
-        params={"type": "object", "properties": {}, "required": []},
-    )
-    async def tool_test_visible(self, event, **_):
+    async def _diag_visible(self):
         if not self.enabled:
             return "浏览器插件未启用"
         html = ("<!doctype html><meta charset='utf-8'><title>可视模式测试</title>"
@@ -1430,15 +1394,9 @@ class BrowserPlugin(BasePlugin):
         if self._headless is not None and self._headless.headless:
             return r + ("\n\n⚠️ 当前是无头模式，窗口不可见。"
                         "把配置里的「无头模式」关掉并重载插件就能看到窗口。")
-        return r + "\n\n👀 去屏幕上找一下这个测试页面；看不到就用 browser_debug 看状态。"
+        return r + "\n\n👀 去屏幕上找一下这个测试页面；看不到就用 browser_diag(action=\"status\") 看状态。"
 
-    @register.tool(
-        name="browser_extension_help",
-        description=("如何安装配套浏览器扩展，从而让 AI 直接操作你正在使用的浏览器。"
-                     "用户问「怎么让你看我的浏览器」「扩展怎么装」时调用。"),
-        params={"type": "object", "properties": {}, "required": []},
-    )
-    async def tool_extension_help(self, event, **_):
+    async def _diag_extension(self):
         plugin_dir = Path(__file__).resolve().parent
         parts = [setup_guide.compatibility_report(), ""]
         notice = setup_guide.first_run_notice(

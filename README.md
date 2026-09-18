@@ -56,7 +56,7 @@
 
 > 💡 找不到路径或令牌？直接问 AI：
 > **「怎么让你看我现在的浏览器？」**
-> 它会调用 `browser_extension_help`，把路径、步骤、令牌都列出来。
+> 它会调用 `browser_diag(action="extension")`，把路径、步骤、令牌都列出来。
 
 ---
 
@@ -218,7 +218,7 @@
 
 ---
 
-## 工具一览（13 个）
+## 工具一览（10 个）
 
 工具按「**动作 + 传参**」组织：同类操作合并成一个工具，用 `action` 选具体做什么。
 能力没少，但 AI 不用在一堆近义名字里挑。
@@ -234,10 +234,7 @@
 | `browser_script` | 执行 JavaScript，返回表达式的值 |
 | `browser_file` | 下载 URL 到本地（会带上浏览器登录态）、列出下载/截图目录 |
 | `browser_cookie` | 导出 / 写入 cookie，用来在两个后端之间搬登录态 |
-| `browser_debug` | 看当前用哪个后端、profile 模式、超时、开着几张页面。排障用 |
-| `browser_check_vlm` | 自查"截图分析"用哪个模型、支不支持视觉 |
-| `browser_test_visible` | 打开测试页，确认可视模式下窗口真的显示了 |
-| `browser_extension_help` | 告诉你扩展装在哪、怎么装、接入令牌是什么 |
+| `browser_diag` | **查状态 / 排障**（4 个 action）：`status`=后端状态、profile 模式、超时、几张页面；`vlm`=截图分析用哪个模型；`visible`=打开测试页确认可视模式窗口真的显示了；`extension`=扩展装在哪、怎么装、接入令牌 |
 
 <details>
 <summary><b>展开看每个工具的详细参数</b></summary>
@@ -307,10 +304,9 @@
 ### 🔧 其余几个（不需要参数）
 
 - `browser_tabs` —— 不需要参数，列出所有标签页
-- `browser_debug` —— 不需要参数，输出后端状态 / profile 模式 / 超时 / 页数
-- `browser_check_vlm` —— 不需要参数，自查截图分析用的是哪个模型
-- `browser_test_visible` —— 不需要参数，打开测试页确认窗口可见
-- `browser_extension_help` —— 不需要参数，给出扩展路径、安装步骤、接入令牌
+- `browser_diag` —— `status`=后端状态 / profile 模式 / 超时 / 页数；
+  `vlm`=截图分析用的是哪个模型；`visible`=打开测试页确认窗口可见；
+  `extension`=扩展路径、安装步骤、接入令牌
 
 ### ⚡ `browser_script` 需要额外开一个开关
 
@@ -446,7 +442,7 @@ pip install playwright aiohttp
 
 **浏览器启动失败 / 找不到浏览器**
 
-用 `browser_debug` 看状态。它会依次尝试
+用 `browser_diag(action="status")` 看状态。它会依次尝试
 系统默认浏览器 → Chrome → Edge → Chromium → 内置下载。
 网络不通时可以手动装：
 
@@ -456,8 +452,8 @@ python -m playwright install chromium
 
 **可视模式下看不到窗口**
 
-1. 先用 `browser_test_visible` 打开测试页
-2. 用 `browser_debug` 确认 `headless` 是 `false`
+1. 先用 `browser_diag(action="visible")` 打开测试页
+2. 用 `browser_diag(action="status")` 确认 `headless` 是 `false`
 3. 检查窗口是不是被别的窗口挡住了（Windows 上会最大化启动）
 
 **扩展连不上**
@@ -465,11 +461,11 @@ python -m playwright install chromium
 1. 看扩展图标是不是灰的（点一下看状态）
 2. 确认令牌是最新的（插件面板里复制）
 3. 确认 KiraAI 的 WebUI 端口和扩展里填的一致
-4. 用 `browser_debug` 看 `bridge.connected`
+4. 用 `browser_diag(action="status")` 看 `bridge.connected`
 
 **截图没有图片描述**
 
-用 `browser_check_vlm` 自查。最常见的原因是**模型配错了组** ——
+用 `browser_diag(action="vlm")` 自查。最常见的原因是**模型配错了组** ——
 用于描述截图的模型必须放在「大语言模型」组，不能放「图像」组，哪怕它本身支持视觉。
 
 ---
@@ -492,6 +488,96 @@ python -m playwright install chromium
 
 <details>
 <summary><b>2.1.x</b> — 49 个版本　·　最新的一系列：双后端重构、安全加固、以及大量审查修复</summary>
+
+### v2.1.49（2026-09-17）
+
+**工具定义瘦身 40%**：13 个工具 → 10 个，每次请求的工具 schema 从
+**6,984 字符（≈2,757 token）压到 4,740 字符（≈1,656 token）**。
+
+#### 为什么要做
+
+每个工具的名称 + 描述 + 参数 schema 都是**每次请求固定带上**的。
+13 个工具加起来接近 2,800 token —— 对上下文小一点的模型是很大一块，
+而且工具越多，模型选错的机会越大。
+
+审计发现三件事：
+
+1. `browser_interact` **一个就占 34%**（18 个动作、24 个参数）
+2. **参数 JSON 占 59%**，描述文字只占 29% —— 光改描述不够
+3. 描述里塞了大量**「为什么」和背景知识**，那些不该每次请求都带着
+
+#### 做法一：把「为什么」挪出常驻区
+
+工具定义里那些"讲一次就够"的说明，挪到**真正需要它的地方**：
+
+| 原来常驻在描述里 | 挪到哪 |
+|---|---|
+| `browser_script`：「扩展桥需要打开『允许用户脚本』开关（Chrome 138+）」 | **直接删** —— 扩展在失败时**已经返回更详细的原因**（版本低 / 开关没开 / 怎么办），描述里那句是冗余 |
+| `browser_cookie`：「典型用法：先从扩展桥导出，再写入无头后端…」 | export 的**成功返回**（用的时候才出现） |
+| `browser_screenshot`：「（这样你才能『看到』页面：工具结果是文本…）」 | 删掉解释，只留「截图，并用视觉模型描述给你」 |
+
+> ⚠️ 返回文本也不是免费的 —— 它在该工具**被调用后**才进上下文，
+> 并留在会话历史里。所以能挂失败返回的就挂失败返回（最省），
+> 其余的挂成功返回（按调用次数付）。
+
+#### 做法二：合并 4 个「配置/排障」类工具
+
+`browser_debug` / `browser_check_vlm` / `browser_test_visible` /
+`browser_extension_help` —— 四个都是**零参数的"查情况"工具**，合成一个：
+
+```
+browser_diag(action)：
+  status    后端状态（profile 模式、超时、空闲多久）
+  vlm       截图分析用哪个视觉模型
+  visible   打开测试页，确认可视模式窗口真的显示了
+  extension 扩展装在哪、怎么装、接入令牌
+```
+
+判断标准不是"功能重叠"，而是**它们不是干活的工具** ——
+用户说"帮我看看 example.com 写了什么"时，这 4 个永远不该被选中。
+
+**顺带修正了一个只读模式的边界**：`browser_test_visible` 原来在
+`WRITE_TOOL_NAMES` 里（它内部会 `navigate`）。合并后 `browser_diag`
+**不**进那个名单 —— 这样只读模式下 `status`/`vlm`/`extension` 仍然可用
+（纯查询），只有 `visible` 会在内部走 `for_write=True` 被拦住，
+比"整个工具被摘掉"更精确。
+
+#### 做法三：参数描述只留非自明的
+
+`x` / `y` / `steps` / `click_count` / `delta_x` 这些**名字本身就说明问题**的
+参数不再带 description；与 enum 重复的描述也删掉。
+
+#### 效果
+
+| | 工具数 | 字符 | token 估算 |
+|---|---|---|---|
+| 之前 | 13 | 6,984 | ≈2,757 |
+| 之后 | **10** | **4,740** | **≈1,656** |
+| | | **−40%** | **−40%** |
+
+单个工具的降幅：
+
+| 工具 | 之前 | 之后 |
+|---|---|---|
+| `browser_interact` | 3,360 | **2,270** |
+| `browser_page` | 1,255 | 850 |
+| `browser_screenshot` | 925 | 470 |
+| `browser_file` | 874 | 700 |
+| `browser_cookie` | 693 | 620 |
+
+#### 能力零丢失验证
+
+- **枚举值**（所有 action/mode）：旧 37 个，新 41 个，**旧的一个没少**
+- **参数名**：逐工具比对，**无丢失**
+- **被合并的 4 个诊断**：`browser_diag` 的 4 个 action + 4 个实现函数都在
+- `regression/checks/tool_merge.py` 的 LEGACY 映射已更新，能力零丢失检查通过
+- 回归套件 **346/346 全绿**
+
+#### 为什么没有更激进
+
+原方案里还有一档：把 11 个低层鼠标参数拆成独立工具、默认不注册
+（能省到 **−58%**）。**没做**，因为 README 把「键盘鼠标也能模拟」
+列为"全能"的一部分 —— 默认关掉会自相矛盾。
 
 ### v2.1.48（2026-09-17）
 

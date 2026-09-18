@@ -860,7 +860,7 @@ class HeadlessBackend(Backend):
             return None
         return (f"无头后端只有一张页面（tab_id 固定为 0），"
                 f"不支持指定 tab_id={tab_id}。"
-                f"如需操作多标签，请使用扩展桥后端（browser_list_tabs 查看）。")
+                f"如需操作多标签，请使用扩展桥后端（browser_tabs 查看）。")
 
     async def get_page(self, detail: str = "text", tab_id=None,
                        offset: int = 0, max_chars=None,

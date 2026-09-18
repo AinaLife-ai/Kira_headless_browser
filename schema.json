@@ -110,11 +110,11 @@
     "name": "Content Page Size",
     "type": "integer",
     "default": 8000,
-    "hint": "How many characters of page text one browser_get_page call returns by default. This is NOT a hard limit - the bot can pass offset/max_chars to read further, and the return value tells it has_more / next_offset.",
+    "hint": "How many characters of page text one browser_page call returns by default. This is NOT a hard limit - the bot can pass offset/max_chars to read further, and the return value tells it has_more / next_offset.",
     "locales": {
       "zh": {
         "name": "单次返回正文长度",
-        "hint": "browser_get_page 一次默认返回多少字符。**这不是硬上限**——bot 可以带 offset/max_chars 继续读，返回值里会告诉它 has_more 和 next_offset，需要多少自己续读。"
+        "hint": "browser_page 一次默认返回多少字符。**这不是硬上限**——bot 可以带 offset/max_chars 继续读，返回值里会告诉它 has_more 和 next_offset，需要多少自己续读。"
       }
     }
   },

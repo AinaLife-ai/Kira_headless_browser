@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -311,6 +312,76 @@ def run(r) -> None:
                 hard.append(f"{rel}:{i} {ln.strip()[:70]}")
     r.ok("A14 硬编码的插件 id 与 manifest 一致", not hard,
          f"不一致={hard or '无'}（plugin_id={pid}）")
+
+    # ── A15 面向模型/用户的文本里，提到的工具名必须真实存在 ──────────
+    #  ⚠️ 抓这个的由来：`main.py` 的分页提示里写着
+    #    「需要继续就读时，用 `browser_get_page(offset=...)` 接下去」
+    #    —— 那是**工具合并之前**的名字，早就不存在了。模型读到这句会
+    #    照着去调一个没有的工具，然后失败。同类的还有
+    #    `schema.json` 的配置提示、无头后端的 tab 提示。
+    #    这类问题**不会让任何检查变红**：文本里的名字没人核对。
+    #  判据：收集真实注册的工具名，扫**字符串字面量**（注释不算 ——
+    #    注释里讲历史是合理的），凡出现 `browser_xxx` 就必须对得上。
+    _tools = set(re.findall(r'name="(browser_[a-z_]+)"', src_safe("main.py")))
+    #: 合法的**非工具**名（都是别的东西的标识符，不是工具）
+    _NOT_TOOL = {
+        "browser_profile":  "无头后端的数据目录名",
+        "browser_channel":  "配置键（用哪个浏览器通道）",
+        "browser_merged":   "日志器名",
+        "browser_bridge":   "旧插件名 kira_browser_bridge 的片段（历史叙述）",
+    }
+    _stale = {}
+    _scan_py = ["main.py", "bridge.py", "tokens.py", "vlm.py", "cookies.py",
+                "protocol.py", "setup_guide.py", "backends/base.py",
+                "backends/router.py", "backends/extension_backend.py",
+                "backends/headless_backend.py"]
+    for _rel in _scan_py:
+        if not exists(_rel):
+            continue
+        try:
+            _tree = ast.parse(src_safe(_rel))
+        except SyntaxError:
+            continue
+        for _n in ast.walk(_tree):
+            # 只看**字符串字面量** —— 注释和变量名都不算
+            if not (isinstance(_n, ast.Constant) and isinstance(_n.value, str)):
+                continue
+            for _nm in re.findall(r'\bbrowser_[a-z_]+', _n.value):
+                if _nm not in _tools and _nm not in _NOT_TOOL:
+                    _stale.setdefault(_nm, []).append(f"{_rel}:{_n.lineno}")
+    # schema.json 的 hint（中英都看）
+    try:
+        _schp = json.loads(src_safe("schema.json"))
+        _hints = []
+        for _k, _v in (_schp or {}).items():
+            if not isinstance(_v, dict):
+                continue
+            _hints.append((_k, str(_v.get("hint", ""))))
+            for _lang, _d in (_v.get("locales") or {}).items():
+                if isinstance(_d, dict):
+                    _hints.append((_k, str(_d.get("hint", ""))))
+        for _k, _h in _hints:
+            for _nm in re.findall(r'\bbrowser_[a-z_]+', _h):
+                if _nm not in _tools and _nm not in _NOT_TOOL:
+                    _stale.setdefault(_nm, []).append(f"schema.json[{_k}]")
+    except (ValueError, AttributeError):
+        pass
+    # 扩展与面板里给用户看的文案
+    for _rel in ("browser-bridge/capabilities.js", "browser-bridge/background.js",
+                 "browser-bridge/content.js", "web/index.html"):
+        if not exists(_rel):
+            continue
+        _body = re.sub(r'//[^\n]*|/\*.*?\*/', "", src_safe(_rel), flags=re.S)
+        for _i, _ln in enumerate(_body.splitlines(), 1):
+            for _nm in re.findall(r'\bbrowser_[a-z_]+', _ln):
+                if _nm not in _tools and _nm not in _NOT_TOOL:
+                    _stale.setdefault(_nm, []).append(f"{_rel}:{_i}")
+    _stale_txt = {k: v[:2] for k, v in _stale.items()}
+    r.ok("A15 文本里提到的工具名都真实存在（不能再出现已删工具名）",
+         not _stale_txt,
+         f"幽灵工具名={_stale_txt or '无'}"
+         f"（真实工具 {len(_tools)} 个：{sorted(_tools)[:3]}…）"
+         " —— 模型会照着提示去调这些不存在的工具")
 
     # ══════════════════════════════════════════════════════════════
     section("B. README 与代码一致性")
