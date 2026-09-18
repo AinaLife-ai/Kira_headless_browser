@@ -583,3 +583,32 @@ def run(r) -> None:
                          str(_i3.get("detail", ""))[:120])
         except Exception as e:
             r.ok("I3 多连接路由验证", False, f"{type(e).__name__}: {e}"[:140])
+
+    # ── I4. Service Worker **启动路径**冒烟 ─────────────────────────
+    #  ⚠️ 这条是被一次线上事故逼出来的：重构时 `getConfig()` 忘了改成列表版，
+    #    返回的对象里没有 `instances`，而调用方直接读 `cfg.instances.length`
+    #    → 整个扩展**启动就炸**（`Cannot read properties of undefined`）。
+    #    静态正则扫源码看不出"函数之间的形状不匹配"——只有真跑才会现形。
+    _bs = PLUGIN_DIR / "regression" / "js" / "bootstrap_smoke.mjs"
+    if not _bs.is_file():
+        r.ok("I4 启动冒烟脚本存在", False, f"缺少 {_bs}")
+    elif not _node:
+        r.warn("没有 node，跳过 I4 启动冒烟", "安装 Node.js 后可启用")
+    else:
+        try:
+            _cb = subprocess.run(
+                [_node, str(_bs)], cwd=str(_bs.parent), capture_output=True,
+                text=True, timeout=90,
+                env={"PATH": os.environ.get("PATH", "") + ":/usr/bin:/bin",
+                     "KIRA_PLUGIN_DIR": str(PLUGIN_DIR)})
+            _line = next((x for x in (_cb.stdout or "").splitlines()
+                          if x.startswith("RESULT:")), "")
+            if not _line:
+                r.ok("I4 扩展启动冒烟可运行", False,
+                     f"exit={_cb.returncode} {( _cb.stderr or '')[-160:]}")
+            else:
+                for _i4 in json.loads(_line[len("RESULT:"):]):
+                    r.ok(f"I4 {_i4['name']}", bool(_i4.get("ok")),
+                         str(_i4.get("detail", ""))[:120])
+        except Exception as e:
+            r.ok("I4 启动冒烟", False, f"{type(e).__name__}: {e}"[:140])

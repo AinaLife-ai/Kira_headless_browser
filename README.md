@@ -489,6 +489,52 @@ python -m playwright install chromium
 <details>
 <summary><b>2.1.x</b> — 49 个版本　·　最新的一系列：双后端重构、安全加固、以及大量审查修复</summary>
 
+### v2.1.55（2026-09-18）
+
+**紧急修复：扩展启动即崩。**
+`[KiraBridge] bootstrap 失败 TypeError: Cannot read properties of undefined
+(reading 'length')`
+
+#### 怎么回事
+
+v2.1.53 重构"多连接"时，把配置从"一份 host/port/token"改成"实例列表"。
+但 `getConfig()` 本体**忘了同步改**——它仍然返回旧形状（没有 `instances`），
+而新调用方直接读 `cfg.instances.length` → `undefined.length` → 抛异常。
+
+而且这个异常发生在 **bootstrap 阶段**，所以表现是"扩展装上去就没反应"。
+
+#### 为什么所有检查都没抓到
+
+改动过程中我在第一次尝试里改过 `getConfig()`，但后来把那版**回退**了
+（因为发现重构范围比预估大），重新做时**漏掉了这一步**。
+
+而更根本的问题是：**套件里没有任何东西真的启动过这个 Service Worker**。
+静态检查（正则扫源码）看不出"函数之间的形状不匹配"——
+`getConfig()` 返回什么、调用方读什么，两边各自看都没毛病。
+
+#### 修法
+
+1. 补上 `getConfig()` 的列表版 + 老配置一次性迁移
+2. 补上 `upsertInstance()` 与 `STORE.INSTANCES`
+3. **新增 I4「Service Worker 启动冒烟」**：stub 掉 chrome API，
+   **真 import 一遍 background.js**、真跑 bootstrap，然后断言
+   - 启动过程不报错
+   - `getConfig()` 返回的是 **instances 数组**
+   - 没配对时是**空数组**（不是 undefined）
+   - 老的单份配置能迁移成列表
+   - 空配置下 `connect()` 不抛异常
+
+**反向验证**：把 `getConfig()` 换回出事的版本 → I4 **原样复现**用户的报错
+（`Cannot read properties of undefined (reading 'length')`）。
+
+> 这是这几天第一条"**真的把扩展跑起来**"的检查。之前覆盖的多是
+> Python 侧（生命周期冒烟）和纯逻辑（多连接路由），
+> **扩展的启动路径一直是空的**。
+
+#### 结果
+
+回归套件 **378/378 全绿**（新增 I4 的 5 条）。版本 2.1.54 → 2.1.55。
+
 ### v2.1.54（2026-09-18）
 
 **跨实例提示**：让 bot 知道"页面在我操作期间被另一个实例动过了"。
