@@ -67,7 +67,29 @@ async function refresh() {
   } else {
     setDot(r.error ? "err" : "");
     setStatus(r.error || "未连接", !!r.error);
+    // 发现失败时把**试过哪些端口**列出来 —— 用户一眼就能看出
+    // "我的端口压根不在这个列表里"，而不是对着一句"没找到"干猜。
+    // （这是最常见的失败原因：KiraAI 用了不常见的端口。）
+    if (r.triedPorts && r.triedPorts.length) {
+      setTriedPorts(r.triedPorts);
+    }
   }
+}
+
+/** 在状态下面补一行"试过的端口"（只在发现失败时出现）。 */
+function setTriedPorts(ports) {
+  let el = $("tried");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "tried";
+    el.className = "hint tried";
+    const st = $("status");
+    if (st && st.parentNode) st.parentNode.insertBefore(el, st.nextSibling);
+    else document.body.appendChild(el);
+  }
+  el.innerHTML = "已试过的端口（都不通）：" + escapeHtml(ports.join(", "))
+    + "<br>KiraAI 的端口不在这里？在 KiraAI 数据目录的 <code>webui.json</code> "
+    + "里能看到 <code>port</code>；把它填到上面的「端口」框里即可。";
 }
 
 /** 渲染实例列表。

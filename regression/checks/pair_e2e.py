@@ -109,6 +109,11 @@ try {
     //    前置条件全绕过去了。这是个假的绿灯。
   } else if (scenario.action === "discover") {
     out.result = await mod.discover({ timeoutMs: 400 });
+  } else if (scenario.action === "alive") {
+    // 模拟"保活闹钟把 Service Worker 唤醒"之后跑的那一步。
+    // 场景 4 靠它验证：首次发现失败之后，后台会不会**再试**。
+    await mod.ensureAlive();
+    await new Promise((r) => setTimeout(r, 2500));
   } else if (scenario.action === "page_pair") {
     // 模拟 KiraAI 面板页那一路：content script(`pairing-page.js`) 收到
     // 页面的 postMessage 后，用 runtime.sendMessage 把接入信息递给后台。
@@ -399,6 +404,36 @@ def run(r) -> None:
             server2.close()
             await server2.wait_closed()
 
+        # ── 场景 4：**首次发现失败之后会不会再试** ──────────────────────
+        #    这是用户实际撞到的那个死局：
+        #      扩展装好那一刻 KiraAI 还没起来（或端口不常见）→ 发现失败 →
+        #      什么都没记住 → 之后保活闹钟醒来时 `!instances.length` 直接
+        #      return → **永远不会再试**。表现就是"扩展装了、也启用了，
+        #      但一直未连接"，而 edge://extensions 里服务工作进程显示"(不活动)"
+        #      （它确实醒来过，只是每次都原样睡回去了）。
+        #    这里：先把退避状态设成"上次尝试是很久以前"，让 ensureAlive
+        #    该重试；服务器在这一步是**开着**的（模拟"KiraAI 后来起来了"）。
+        state["reported_port"] = port
+        server4 = await websockets.serve(
+            holder["handler"], "127.0.0.1", port,
+            process_request=holder["process_request"])
+        try:
+            _seen4, _stop4 = [], asyncio.Event()
+            _task4 = asyncio.create_task(_sample(_seen4, _stop4))
+            results["retry"] = await _run_node(node, client_path, {
+                "action": "alive", "settle_ms": 2500,
+                "storage": {
+                    # 模拟"首次发现失败过一次、而且已经过了退避时间"
+                    "kb_discover_tries": 1, "kb_discover_at": 1,
+                },
+            })
+            _stop4.set()
+            _task4.cancel()
+            results["retry_bridge_connected"] = bool(_seen4)
+        finally:
+            server4.close()
+            await server4.wait_closed()
+
         holder["results"] = results
 
     try:
@@ -600,6 +635,34 @@ def run_results(r, holder, results) -> None:
          'id="ver"' in src_safe("browser-bridge/popup.html")
          and "getManifest().version" in src_safe("browser-bridge/popup.js"),
          "没有版本号的话，用户报问题时分不清是新版还是没更新")
+
+    # ── P14b：发现失败时要把"试过哪些端口"带出来（否则用户只能干猜）──
+    #    最常见的失败原因就是"KiraAI 用了候选列表之外的端口"，
+    #    把试过的端口列出来，用户一眼就知道该去填端口。
+    _nc = nc.get("result") or {}
+    r.ok("P14b 发现失败时带回 triedPorts（让用户看得出是不是端口不在列表里）",
+         isinstance(_nc.get("triedPorts"), list) and len(_nc.get("triedPorts") or []) > 0,
+         f"triedPorts={_nc.get('triedPorts')}")
+    r.ok("P14c 弹窗会把试过的端口显示出来",
+         'triedPorts' in src_safe("browser-bridge/popup.js")
+         and "webui.json" in src_safe("browser-bridge/popup.js"),
+         "要顺便告诉用户去哪儿看真实端口（data/webui.json 的 port）")
+
+    # ── P14：保活路径里，没有实例时也要**主动重试发现** ──────────────
+    #    ⚠️ 先说清楚**旧代码到底哪里有问题**，免得判据名不副实：
+    #       顶层 bootstrap 在每次 SW 唤醒时都会重跑，里面也会 connect() →
+    #       discover()，所以"重试"其实一直有 ✗ 不存在"永远不再试"。
+    #       旧代码真正的毛病是**节奏**：每次 30 秒闹钟都把 15 个候选端口
+    #       扫一遍，"这台机器上根本没有 KiraAI"时就是一直白扫。
+    #       这条判据验的是：保活路径自己也能（按退避）重试并连上。
+    rt = results.get("retry") or {}
+    if rt.get("fatal"):
+        r.ok("P14 首次发现失败后，后台还会再试（不是死局）", False, rt["fatal"][:300])
+    else:
+        rt_st = rt.get("status") or {}
+        r.ok("P14 保活路径在没有实例时会按退避重试发现并连上",
+             bool(rt_st.get("connected")) and bool(results.get("retry_bridge_connected")),
+             f"状态={rt_st} 桥侧={results.get('retry_bridge_connected')}")
 
     r.ok("P11 探不到时给的指引和真实功能对得上",
          "插件面板" in _err and "手动填" in _err,

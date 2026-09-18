@@ -91,6 +91,7 @@ regression/
 │   └── execjs_gates.py     扩展执行 JS 的两道关口（USER_SCRIPT world CSP / 端口值域）
 │   └── paths_default.py    默认目录基准（截图 temp / 下载 files；data/xxx 按数据目录解释）
 │   └── pair_e2e.py         零配置接入端到端（真 bridge + 扩展真 background.js）
+│   └── origin_detect.py    页面来源识别（扩展从 KiraAI 页面自己问出端口）
 ├── stubs/                  让插件能被 import 的最小替身（不需要真的 KiraAI）
 │   ├── core/               框架接口的最小实现
 │   └── playwright/         **语义忠实的**假 Playwright（见下）
