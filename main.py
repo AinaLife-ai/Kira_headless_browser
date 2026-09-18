@@ -630,10 +630,9 @@ class BrowserPlugin(BasePlugin):
             # 分页信息：让 bot 知道"还有多少没读、怎么接着读"，
             # 而不是被一个硬上限卡住 —— 它需要更多内容时自己带 offset 再取即可。
             if d.get("has_more"):
-                out += (f"\n\n📄 本次读到第 {d.get('offset')}–{(d.get('offset') or 0) + (d.get('returned') or 0)}"
-                        f" 字符，全文共 {total} 字符，还有 {total - ((d.get('offset') or 0) + (d.get('returned') or 0))} 字符未读。"
-                        f"\n   需要继续就读时，用 browser_get_page(offset={d.get('next_offset')}) 接下去；"
-                        f"也可以直接用 browser_extract 只取你要的那部分。")
+                _read = (d.get('offset') or 0) + (d.get('returned') or 0)
+                out += (f"\n\n📄 {d.get('offset')}–{_read} / 共 {total}，还有 {total - _read} 未读。"
+                        f"续读 browser_page(offset={d.get('next_offset')})。")
             return out
         if method == "extract":
             import json as _json
@@ -965,16 +964,15 @@ class BrowserPlugin(BasePlugin):
     @register.tool(
         name="browser_interact",
         description=(
-            "操作页面。action 与所需参数：\n"
-            "click|hover→selector 或 text 或 index\n"
-            "fill|type→selector+value（submit=true 回车提交；clear_first 默认 true）\n"
-            "scroll→direction+amount\n"
-            "upload→selector+file_path\n"
-            "go_back|refresh→无\n"
-            "key_press→key（Enter / Control+a）；key_type→text\n"
-            "低层鼠标（CSS 定位不到时用）→ mouse_click(x,y) mouse_move(x,y) "
-            "mouse_wheel(delta_x/delta_y) mouse_drag(start_x,start_y,end_x,end_y) "
-            "mouse_down|mouse_up(button)"
+            "操作页面。action→参数：\n"
+            "click/hover: selector|text|index\n"
+            "fill/type: selector+value（submit=true 回车；clear_first 默认 true）\n"
+            "scroll: direction+amount\n"
+            "upload: selector+file_path\n"
+            "go_back/refresh: 无\n"
+            "key_press: key（Enter / Control+a）；key_type: text\n"
+            "低层鼠标（CSS 定位不到时用）: mouse_click/move(x,y) "
+            "mouse_wheel(delta_x/y) mouse_drag(start_x/y,end_x/y) mouse_down/up(button)"
         ),
         params={"type": "object", "properties": {
             "action": {"type": "string", "enum": [
