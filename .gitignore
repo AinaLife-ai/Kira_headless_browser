@@ -1,3 +1,36 @@
 # Cookie 目录包含用户会话凭证，禁止提交到版本库
 # 已在 manifest.json 的 exclude 字段中声明打包排除
 data/files/cookie/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 插件运行时数据
+# 框架在插件目录下写的运行日志（导入插件时会自动生成）
+data/log.log
+data/*.log
+screenshots/
+downloads/
+browser_profile/
+inherited_profile/
+data/plugins/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 回归测试产物
+regression/js/node_modules/
+regression/__pycache__/
+regression/checks/__pycache__/
+regression/stubs/**/__pycache__/
+regression/_ext_client.mjs
+regression/kira_ext_client_*.mjs
+regression/**/kira_ext_client_*.mjs
+regression/js/_click_runner_*.mjs

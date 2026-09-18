@@ -1,0 +1,466 @@
+"""工具合并：31 个旧工具 → 12 个动作式工具，逐条核对**能力零丢失**。
+
+不数工具个数，数能力：每个旧工具都要能在新接口里找到出口。
+"""
+
+from __future__ import annotations
+
+import re
+
+import json
+import os as _os
+import shutil as _shutil
+import subprocess as _subprocess
+
+from ..harness import JS_DIR, PLUGIN_DIR, section, src_safe, tool_names
+
+TITLE = "工具合并零丢失"
+
+#: 旧工具 → 新出口。``None`` 表示**有意合并**（能力由其它工具覆盖）
+LEGACY = {
+    "browser_navigate": ("browser_navigate", None),
+    "browser_screenshot": ("browser_screenshot", None),
+    "browser_click": ("browser_interact", "click"),
+    "browser_fill": ("browser_interact", "fill"),
+    "browser_type": ("browser_interact", "fill/type"),
+    "browser_upload_file": ("browser_interact", "upload"),
+    "browser_get_text": ("browser_page", "text/selector"),
+    "browser_get_info": ("browser_page", "info"),
+    "browser_scroll": ("browser_interact", "scroll"),
+    "browser_go_back": ("browser_interact", "go_back"),
+    "browser_refresh": ("browser_interact", "refresh"),
+    "browser_execute_js": ("browser_script", None),
+    "browser_download": ("browser_file", "download"),
+    "browser_wait": ("browser_wait", "seconds"),
+    "browser_list_files": ("browser_file", "list"),
+    "browser_test_visible": ("browser_test_visible", None),
+    "browser_debug": ("browser_debug", None),
+    # send_file 是「把本地已有文件发给用户」，两个用途分别由
+    # screenshot(send) 与 file(download) 覆盖 —— 有意合并，非遗漏。
+    # ⚠️ 但**不能直接写 None**（那会被当成"有意合并"直接跳过校验）：
+    #    两个替代出口哪天被删掉/改名，能力就真丢了却查不出来。
+    #    这里登记成"必须存在的出口清单"，由 C1 逐项验证（见下）。
+    # （登记为下面的 SEND_FILE_EXITS 单独校验 —— 它有两个出口，不是一个）
+    "browser_send_file": None,
+    "browser_keyboard_type": ("browser_interact", "key_type"),
+    "browser_keyboard_press": ("browser_interact", "key_press"),
+    "browser_keyboard_down_up": ("browser_interact", "key_down/key_up"),
+    "browser_mouse_move": ("browser_interact", "mouse_move"),
+    "browser_mouse_click": ("browser_interact", "mouse_click"),
+    "browser_mouse_down_up": ("browser_interact", "mouse_down/mouse_up"),
+    "browser_mouse_wheel": ("browser_interact", "mouse_wheel"),
+    "browser_mouse_drag": ("browser_interact", "mouse_drag"),
+    "browser_hover": ("browser_interact", "hover"),
+    # 桥接插件原有
+    "browser_list_tabs": ("browser_tabs", None),
+    "browser_get_page": ("browser_page", "text/outline/html"),
+    "browser_extract": ("browser_page", "extract"),
+    "browser_wait_for": ("browser_wait", "selector/text"),
+    # 补充工具
+    "browser_extension_help": ("browser_extension_help", None),
+    "browser_cookie": ("browser_cookie", "export/import"),
+}
+
+def _tool_enum(src: str, tool: str) -> set[str]:
+    """取出某个工具 **params 里 action/mode 的 enum**。
+
+    ⚠️ 只取 schema 段（`@register.tool` 装饰器内部），**不含函数体** ——
+    函数体里会出现同样的字面量（比如 `if a == "hover"`），
+    带上它就会让"enum 里删了 action"检测不出来。
+    """
+    i = src.find(f'name="{tool}"')
+    if i < 0:
+        return set()
+    start = src.rfind("@register.tool", 0, i)
+    if start < 0:
+        start = i
+    # 装饰器参数到右括号结束（这里用"到 async def"作为上界更稳）
+    fn = src.find("async def ", i)
+    seg = src[start:fn if fn > 0 else i + 3000]
+    # ⚠️ 只取 **action / mode 属性自己的** enum。
+    #    原先把这个工具段里**所有** enum 并起来，于是某个被删掉的 action
+    #    只要还留在别的参数 enum 里，C1 就检测不出这次删除。
+    out = set()
+    for prop in ("action", "mode"):
+        mm = re.search(rf'"{prop}":\s*\{{[^}}]*?"enum":\s*\[([^\]]*)\]', seg)
+        if mm:
+            out |= set(re.findall(r'"([a-z_]+)"', mm.group(1)))
+    return out
+
+
+def _tool_segment(main_src: str, tool: str) -> str:
+    """取出某个工具**自己**的 @register.tool(...) 段落。
+
+    从 ``name="<tool>"`` 开始，到**它自己的**装饰器结束
+    （即紧跟其后的 ``async def`` / ``def`` 行）为止。
+
+    ⚠️ 不能像以前那样切固定的 1600 字符 —— 那个窗口会
+    **越界切进函数体，甚至切进下一个工具的定义**：
+      · 切进函数体 → 具名参数检查会把函数内部的字符串当成"参数还在"（假通过）；
+      · 切进下一个工具 → A 工具缺的参数被 B 工具的同名参数满足（同样假通过）。
+    两者都是"看起来在检查、实际没检查"。
+    """
+    i = main_src.find(f'name="{tool}"')
+    if i < 0:
+        return ""
+    seg = main_src[i:]
+    # 到下一个顶层 def/async def 为止（工具方法都定义在类里，缩进为 4 空格）
+    m = re.search(r'\n    (?:async )?def ', seg)
+    return seg[:m.start()] if m else seg
+
+
+#: 非 action 式工具的关键参数（丢了就是能力丢失，单靠 enum 查不出来）
+LEGACY_PARAMS = {
+    "browser_wait": ("selector", "text", "seconds", "timeout"),
+    # ⚠️ text 必须算进来：这个工具的主要用法就是"等某段文字出现"，
+    #    漏掉它的话，参数被删掉也查不出来（能力静默丢失）。
+    "browser_wait_for": ("selector", "text", "timeout"),
+}
+
+#: `browser_send_file`（把本地已有文件发给用户）的**两个**替代出口。
+#  ⚠️ 它被合并进两个工具而不是一个，所以不能用 LEGACY 的单出口格式表达 ——
+#    但那**不等于"不需要校验"**：任一出口被删/改名，能力就真丢了。
+#    这里显式列出，由 C1b 逐项验证"工具在 **且** 出口参数/动作在"。
+SEND_FILE_EXITS = (
+    # (工具名, 判定方式, 关键字, 说明)
+    ("browser_screenshot", "param", "send",
+     "截图后把图片发给用户（send 参数）"),
+    ("browser_file", "action", "download",
+     "下载并发给用户（mode=download）"),
+)
+
+
+NEED_ACTIONS = {
+    "click", "fill", "type", "hover", "scroll", "upload",
+    "go_back", "refresh",
+    "key_press", "key_down", "key_up", "key_type",
+    "mouse_click", "mouse_move", "mouse_down", "mouse_up",
+    "mouse_wheel", "mouse_drag",
+}
+
+
+def run(r) -> None:
+    # ⚠️ 前置读取一律用 **src_safe**，且**不要 return** ——
+    #    main.py 缺失时 `return` 会把本组**全部**检查（20+ 条）一起跳过，
+    #    报告上只剩一条"读取失败"，完全看不出后面还有什么问题。
+    #    空值让各段自己判空并报各自的失败。
+    main = src_safe("main.py")
+    if not main:
+        r.ok("B0 能读到 main.py（否则本组多数检查无从判定）", False,
+             "文件缺失或为空")
+    hb = src_safe("backends/headless_backend.py")
+    eb = src_safe("backends/extension_backend.py")
+    now = tool_names(main) if main else set()
+
+    section("旧工具 → 新出口")
+    missing, intentional = [], []
+    for old, dest in LEGACY.items():
+        if dest is None:
+            intentional.append(old)
+            r.note(f"🔀 {old:<28} → 有意合并（能力由其它工具覆盖）")
+            continue
+        newtool, action = dest
+        # ⚠️ 只验"工具名存在"是不够的 —— 工具存在但 action 不存在的话，
+        #    模型照文档传 `action=xxx` 会直接被拒绝，功能等于丢了。
+        #    所以这里把 action 也逐条验一遍。
+        ok = newtool in now
+        if ok and action:
+            # ⚠️ 必须在**目标工具自己的 schema 段**里找 action，
+            #    不能全文搜 —— 全文搜会命中别处的同名动作，
+            #    导致"目标工具删了这个 action"也照样 PASS。
+            enums = _tool_enum(main, newtool)
+            # 有些目标工具本来就**不是** action 式的（browser_wait / browser_tabs
+            # 等），没有 enum 是正常的，不该要求 action 存在。
+            # 判据：它的参数里声明了 action/mode 吗？声明了才要求 enum。
+            _seg = _tool_segment(main, newtool)
+            _has_sel = bool(re.search(r'"(action|mode)":\s*\{"type"', _seg))
+            if _has_sel and not enums:
+                ok = False
+                missing.append(f"{old}({newtool} 声明了 action/mode 但没有可解析的 enum)")
+            elif enums:
+                for a in [x.strip() for x in action.split("/") if x.strip()]:
+                    if a not in enums:
+                        ok = False
+                        missing.append(f"{old}({newtool}.enum 里没有 {a})")
+            else:
+                # ⚠️ 目标工具**不是** action 式（如 browser_wait）时，
+                #    上面整段都会被跳过 —— 于是"browser_wait 丢了
+                #    seconds/selector 参数"这种能力丢失检测不出来。
+                #    这里按**具名参数**再校验一遍：LEGACY 里登记的必要
+                #    参数名必须仍出现在该工具的 params 里。
+                _need = LEGACY_PARAMS.get(old, ())
+                for _pn in _need:
+                    if f'"{_pn}"' not in _seg:
+                        ok = False
+                        missing.append(f"{old}({newtool} 缺参数 {_pn})")
+        if not ok and (newtool not in now):
+            missing.append(old)
+        r.note(f"{'✅' if ok else '❌'} {old:<28} → {newtool}"
+               + (f"(action={action})" if action else ""))
+
+    r.ok("C1 每个旧工具都有新出口（零能力丢失）", not missing,
+         f"缺失={missing or '无'}；有意合并={len(intentional)} 个；"
+         f"{len(LEGACY)} 个旧工具 → {len(now)} 个新工具名")
+
+    # ── C1b：browser_send_file 的两个出口都要在 ────────────────────
+    _sfe_bad = []
+    for _tn, _kind, _key, _desc in SEND_FILE_EXITS:
+        _seg = _tool_segment(main, _tn)
+        if not _seg:
+            _sfe_bad.append(f"{_tn}（工具不存在）")
+            continue
+        if _kind == "param":
+            if f'"{_key}"' not in _seg:
+                _sfe_bad.append(f"{_tn}（缺参数 {_key}）")
+        else:
+            if _key not in _tool_enum(main, _tn):
+                _sfe_bad.append(f"{_tn}（缺动作 {_key}）")
+    r.ok("C1b browser_send_file 的两个替代出口都存在",
+         not _sfe_bad,
+         f"缺失={_sfe_bad or '无'}；出口="
+         + "；".join(f"{t}.{k}（{d}）" for t, _, k, d in SEND_FILE_EXITS))
+
+    # 交互动作齐全
+    # ⚠️ 用 _tool_enum() 而不是全仓正则：后者会命中**别的工具**里的 enum，
+    #    于是 browser_interact 自己少了个动作也照样通过。
+    actions = _tool_enum(main, "browser_interact")
+    r.ok("C2 browser_interact 的 action 覆盖全部交互动作",
+         NEED_ACTIONS <= actions,
+         f"{len(actions)} 个动作；缺={sorted(NEED_ACTIONS - actions) or '无'}")
+
+    # 插件调用的后端方法，两个后端都要实现
+    called = set(re.findall(r'await self\._call\("([a-z_]+)"', main))
+    hb_m = set(re.findall(r'async def ([a-z_]+)\(', hb))
+    eb_m = set(re.findall(r'async def ([a-z_]+)\(', eb))
+    local = {"get_text"}
+    r.ok("C3 无头后端实现所有被调用的方法",
+         not (called - hb_m - local), f"缺={sorted(called - hb_m - local) or '无'}")
+    r.ok("C4 扩展后端实现所有被调用的方法",
+         not (called - eb_m - local), f"缺={sorted(called - eb_m - local) or '无'}")
+
+    # 协议两端 + 扩展实现
+    proto_py = src_safe("protocol.py")
+    proto_js = src_safe("browser-bridge/protocol.js")
+    py_cmds = set(re.findall(r'^CMD_[A-Z_]+ = "([a-z_]+)"', proto_py, re.M))
+    # ⚠️ 先确认标记存在再 split：否则 IndexError 会逃出 run()，
+    #    整组变成一条笼统失败、后面所有检查都不执行。
+    _MARK = "export const CMD = {"
+    if _MARK not in proto_js:
+        # ⚠️ 记失败但**不要 return**：一 return，后面的 C5b~C9 全都不执行了，
+        #    报告上看不出"后面那些检查其实没跑"。用空集合继续走完。
+        r.ok("C5a 协议命令两端一致", False,
+             f"protocol.js 里找不到 `{_MARK}`（被改名或删了？）")
+        js_cmds = set()
+    else:
+        cmd_section = proto_js.split(_MARK)[1].split("};")[0]
+        js_cmds = set(re.findall(r'^\s+[A-Z_]+: "([a-z_]+)",', cmd_section, re.M))
+        r.ok("C5a 协议命令两端一致", py_cmds == js_cmds,
+             f"仅 Python={sorted(py_cmds - js_cmds) or '无'}；"
+             f"仅 JS={sorted(j for j in js_cmds - py_cmds) or '无'}")
+
+    bg = src_safe("browser-bridge/background.js")
+    impl = set(re.findall(r'async function (\w+)\(', bg))
+    cap = src_safe("browser-bridge/capabilities.js")
+    cmds = src_safe("browser-bridge/commands.js")
+    impl |= set(re.findall(r'async function (\w+)\(', cap + cmds))
+    r.ok("C5b 补齐的命令都有实现",
+         all(f"async function {f}(" in (cap + cmds) for f in
+             ("getInfo", "goBack", "refresh", "hover", "keyPress", "keyDownUp",
+              "mouseMove", "mouseClick", "mouseDownUp", "mouseWheel",
+              "mouseDrag", "listFiles", "debugInfo")),
+         "13 个补齐命令")
+
+    # ⚠️ 必须限定在 **execJs 函数体内部**：只查"cap 里出现过
+    #    chrome.userScripts.execute"是不够的 —— 别处（比如 ensureUserScripts）
+    #    也可能提到它，execJs 自己改成别的方式实现照样能通过。
+    # ⚠️ 边界要卡在**下一个顶层函数**，不能用写死的 `async function upload(`
+    #    —— 那个名字一旦被改/被挪到前面，截取就会一路延伸到文件末尾，
+    #    于是**后面任意函数**里出现的 `chrome.userScripts.execute` 都会算数，
+    #    而"作用域"正是这条断言存在的理由。
+    _ej = ""
+    if "async function execJs(" in cap:
+        _ej = cap.split("async function execJs(")[-1]
+        _ej_end = _ej.find("\nasync function ")
+        if _ej_end > 0:
+            _ej = _ej[:_ej_end]
+    r.ok("C6 扩展侧实现 exec_js（execJs 函数体内走 chrome.userScripts.execute）",
+         bool(_ej) and "chrome.userScripts.execute" in _ej,
+         "必须在 execJs 自己的实现里出现")
+    r.ok("C7 扩展侧实现 upload（DataTransfer）",
+         "async function upload(" in cap and "DataTransfer" in src_safe("browser-bridge/content.js"))
+    # 看**意图**而不是写死的字面量：现在凭据是按协议条件携带的
+    # （HTTPS 才带，防止明文泄漏），所以断言"用用户会话"这一点。
+    # ⚠️ 只看"有三个子串"是不够的：即使 credentials 被改成无条件
+    #    `"include"`（HTTP 也带会话 Cookie → 明文泄漏），只要这三个词
+    #    还在，断言照样通过。
+    #    必须**限定在 downloadViaSession 内**，并且要求凭据表达式
+    #    **带 HTTPS 条件 + 有 omit 分支**。
+    # ⚠️ 不要用**定长切片**（原来是 `[:2000]`）—— 函数一变长，
+    #    后半段（含 `sendChunk`）就被切掉，检查无缘无故报红
+    #    （"函数实现没了"的假象）。这里切到**下一个顶层 async function** 为止。
+    _dl = ""
+    if "async function downloadViaSession(" in cap:
+        _dl = cap.split("async function downloadViaSession(")[-1]
+        _nxt = _dl.find("\nasync function ")
+        if _nxt > 0:
+            _dl = _dl[:_nxt]
+    _creds = re.search(r'credentials\s*:\s*([^,\n]+)', _dl)
+    _expr = (_creds.group(1) if _creds else "")
+    _cond_ok = (":" in _expr) and ('"include"' in _expr) and ('"omit"' in _expr)
+    r.ok("C8 扩展侧实现 download（用户会话 + 分块）",
+         bool(_dl) and _cond_ok and "sendChunk" in _dl,
+         "凭据必须是按协议条件的表达式（HTTPS->include, 否则 omit），"
+         f"且 sendChunk 在 downloadViaSession 内；实际 credentials={_expr!r}")
+    # ⚠️ 反向陷阱：`redirect:"manual"` 在浏览器里**读不到 Location**
+    #    （manual 返回 opaqueredirect：status=0、响应头全空），
+    #    所以"自己跟重定向"的思路根本走不通 —— 会变成"重定向全失败"。
+    #    曾经这么写过一版，属于**看着更安全、实际是坏的**。
+    #    这里明确守住：不许退回 manual。
+    #    ⚠️ 判据要**剥掉注释**再查：注释里正 解释 "为什么不用 manual"，
+    #       裸文本匹配会被自己的说明文字命中（自我误报）。
+    #    ⚠️ 要用 **strip_comments_only**（只剥注释、**保留**字符串字面量）——
+    #       `strip_js_noise` 会把字符串内容清空（它是为"找标识符"设计的），
+    #       `"follow"` 会被清成 `""` 从而匹配不到（我刚这么错过一次）。
+    try:
+        from ..harness import strip_comments_only as _sco
+        _dl_code = _sco(_dl)
+    except ImportError:
+        # 只兜"拿不到那个函数"；别的异常说明 harness 真有问题，该冒出来。
+        _dl_code = _dl
+    r.ok("C8c 下载用浏览器跟随重定向（不用读不到 Location 的 manual）",
+         'redirect: "follow"' in _dl_code
+         and 'redirect: "manual"' not in _dl_code,
+         "manual 返回 opaqueredirect（status=0、无响应头）—— 自己跟根本读不到下一跳")
+
+    # ── 凭据模式的**行为**验证（HTTP/HTTPS 各跑一次）──────────────
+    # 语法检查只能证明"表达式里有 include 和 omit"；把条件写反
+    # （HTTPS→omit、HTTP→include）或者条件恒真，语法检查照样通过，
+    # 但**会话 Cookie 会在明文 HTTP 上被发出去**。
+    _cred_js = JS_DIR / "cred_mode.mjs"
+    # ⚠️ 不能"文件不在就静默跳过" —— 那样回归套件会**通过但没执行 C8b**，
+    #    看起来一切正常，实际凭据模式没有任何行为验证。
+    #    探测脚本是仓库文件，缺了就是回归不完整 → 记 FAIL。
+    #    node 不在是环境问题 → 记 warning（不算失败）。
+    _node = _shutil.which("node")
+    if not _cred_js.is_file():
+        r.ok("C8b 凭据探测脚本存在", False,
+             f"缺少 {_cred_js} —— 凭据模式将没有任何行为验证")
+    elif not _node:
+        r.warn("没有 node，跳过 C8b 凭据模式行为验证",
+               "安装 Node.js 后可启用")
+    else:
+        try:
+            _env = {
+                "PATH": _os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/local/bin",
+                "KIRA_PLUGIN_DIR": str(PLUGIN_DIR),
+            }
+            # ⚠️ 用 which 解析出的路径跑，不用裸 "node" ——
+            #    这里给子进程换了 env，裸名字会在**子进程里**重新查 PATH。
+            _cp = _subprocess.run([_node, str(_cred_js)], cwd=str(JS_DIR),
+                                  capture_output=True, text=True, env=_env,
+                                  timeout=60)
+            # ⚠️ 必须判退出码 + 结果完整性：脚本崩了/少打一项时，
+            #    逐项断言会"少报"（少报 = 漏检），甚至一项都不报。
+            if _cp.returncode != 0:
+                r.ok("C8b 凭据探测脚本正常退出", False,
+                     f"exit={_cp.returncode}；{(_cp.stderr or '')[:150]}")
+            else:
+                _data = json.loads((_cp.stdout or "[]").strip().splitlines()[-1])
+                # 至少要覆盖：1 条 isHttps 来源 + HTTPS/HTTP 两种协议
+                # （现在还会多测大小写不敏感与本机 HTTP）
+                _names = [str(x.get("name", "")) for x in _data]
+                _need = ("凭据表达式引用了由 URL 推导出的 isHttps",
+                         "HTTPS 下载带凭据", "HTTP 下载不带凭据")
+                _miss = [n for n in _need if n not in _names]
+                if _miss:
+                    r.ok("C8b 凭据探测覆盖必要场景", False,
+                         f"缺少={_miss}；实际={_names}")
+                else:
+                    for _it in _data:
+                        r.ok(f"C8b {_it['name']}", bool(_it.get("ok")),
+                             _it.get("detail", ""))
+        except Exception as e:
+            r.ok("C8b 凭据模式行为验证", False, f"{type(e).__name__}: {e}"[:140])
+
+    # ── C8b2：凭据探测**自身**要能被证明有效（反向自检）──────────────
+    #  ⚠️ 补一个"两个声明共存"的陷阱：`const isHttps = true`（坏的，恒真）
+    #     + `const hopIsHttps = <正确>` + `credentials` 用 **isHttps**。
+    #     探测脚本若按 `mHop ? mHop[1] : httpsExpr` 选表达式，就会拿**正确的
+    #     hop 表达式**去喂 `isHttps`，把坏掉的那个**掩盖**过去 —— 全绿。
+    #    实测：旧写法在该夹具上 5/5 全绿（被骗），改成"按 credentials 引用的
+    #    变量名选"后正确报出 2 条红。这条检查保证它**一直**能报出来。
+    if _cred_js.is_file() and _node:
+        try:
+            import tempfile as _tf
+            _fixt = _tf.mkdtemp(prefix="kira_cred_selfcheck_")
+            try:
+                _bd = _os.path.join(_fixt, "browser-bridge")
+                _os.makedirs(_bd, exist_ok=True)
+                with open(_os.path.join(_bd, "capabilities.js"), "w",
+                          encoding="utf-8") as _f:
+                    _f.write(
+                        'const MAX_DOWNLOAD_BYTES = 1024;\n'
+                        'async function downloadViaSession(params, cmdId) {\n'
+                        '  const { url, max_bytes } = params;\n'
+                        '  // 坏：恒为真（HTTP 也会带凭据）\n'
+                        '  const isHttps = true;\n'
+                        '  // 好：逐跳判断\n'
+                        '  const hopIsHttps ='
+                        ' new URL(url).protocol === "https:";\n'
+                        '  const resp = await fetch(url, {\n'
+                        '    credentials: isHttps ? "include" : "omit",\n'
+                        '  });\n'
+                        '  return resp;\n'
+                        '}\n')
+                _e6 = {"PATH": _os.environ.get("PATH", "") + ":/usr/bin:/bin",
+                       "KIRA_PLUGIN_DIR": _fixt}
+                _cp6 = _subprocess.run([_node, str(_cred_js)], cwd=str(JS_DIR),
+                                       capture_output=True, text=True, env=_e6,
+                                       timeout=60)
+                _d6 = json.loads((_cp6.stdout or "[]").strip().splitlines()[-1])
+                _caught = [x for x in _d6 if not x.get("ok")]
+                r.ok("C8b2 凭据探测能识破「hop 表达式掩盖坏 isHttps」",
+                     len(_caught) >= 1,
+                     "夹具里 isHttps 恒真、hopIsHttps 正确、credentials 用 "
+                     "isHttps；探测必须报红，否则它会被正确的那条骗过"
+                     f"（实际报红 {len(_caught)} 条）")
+            finally:
+                _shutil.rmtree(_fixt, ignore_errors=True)
+        except Exception as e:
+            r.ok("C8b2 凭据探测自检", False, f"{type(e).__name__}: {e}"[:140])
+
+    # ── 重定向流程的**行为**验证（真实 302 服务器）──────────────────
+    #  ⚠️ 这条补的是"选项选对了没有"——上一版用 `redirect:"manual"`
+    #     自己跟，看起来更保守，**在浏览器里却根本读不到 Location**
+    #     （opaqueredirect：status=0、响应头全空），必然失败。
+    #     注意：**Node 测不出那个浏览器差异**（undici 不做那层过滤），
+    #     所以浏览器语义靠 B2.5/C8c 的静态守卫，这里测"跟得到底"。
+    _rf = JS_DIR / "redirect_flow.mjs"
+    if not _rf.is_file():
+        r.ok("C8d 重定向流程探测脚本存在（redirect_flow.mjs）", False,
+             "缺少 " + str(_rf) + " —— 重定向链路将没有行为验证")
+    elif not _node:
+        r.warn("没有 node，跳过 C8d 重定向流程验证", "安装 Node.js 后可启用")
+    else:
+        try:
+            _e5 = {
+                "PATH": _os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/local/bin",
+                "KIRA_PLUGIN_DIR": str(PLUGIN_DIR),
+            }
+            _cp5 = _subprocess.run([_node, str(_rf)], cwd=str(JS_DIR),
+                                   capture_output=True, text=True, env=_e5,
+                                   timeout=120)
+            if _cp5.returncode != 0:
+                r.ok("C8d 重定向流程探测脚本正常退出", False,
+                     f"exit={_cp5.returncode}；{(_cp5.stderr or '')[:180]}")
+            else:
+                _d5 = json.loads((_cp5.stdout or "[]").strip().splitlines()[-1])
+                for _it in _d5:
+                    r.ok(f"C8d {_it['name']}", _it.get("ok"),
+                         str(_it.get("detail", ""))[:160])
+        except Exception as _e:
+            r.ok("C8d 重定向流程验证可运行", False, f"{type(_e).__name__}: {_e}"[:150])
+
+
+    r.ok("C9 扩展侧实现 cookie 导出/写入",
+         "async function cookieGet(" in cap and "async function cookieSet(" in cap)

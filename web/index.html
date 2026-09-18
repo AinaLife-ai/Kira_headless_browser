@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>浏览器桥 · KiraAI</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --border: #e3e6ea;
+    --text: #1f2328;
+    --muted: #6b7280;
+    --accent: #4f46e5;
+    --ok: #16a34a;
+    --warn: #d97706;
+    --err: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text);
+    font-size: 14px; line-height: 1.6;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 20px; font-size: 13px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .stat { background: var(--bg); border-radius: 8px; padding: 12px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-weight: 600; margin-top: 2px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot.on { background: var(--ok); }
+  .dot.off { background: #cbd5e1; }
+  code, .mono {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 12.5px;
+  }
+  .token-box {
+    display: flex; gap: 8px; align-items: stretch; margin-top: 8px;
+  }
+  .token-box input {
+    flex: 1; padding: 9px 11px; border: 1px solid var(--border);
+    border-radius: 7px; background: var(--bg); color: var(--text);
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  }
+  button {
+    padding: 9px 16px; border: none; border-radius: 7px;
+    background: var(--accent); color: #fff; font-size: 13px;
+    cursor: pointer; white-space: nowrap;
+  }
+  button:hover { opacity: .9; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button.danger { background: var(--err); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+  ol { padding-left: 20px; margin: 8px 0; }
+  ol li { margin-bottom: 6px; }
+  .tag {
+    display: inline-block; padding: 1px 8px; border-radius: 4px;
+    font-size: 12px; margin-right: 6px;
+  }
+  .tag.ro { background: #eef2ff; color: var(--accent); }
+  .tag.rw { background: #fef2f2; color: var(--err); }
+  .warnbox {
+    background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+    border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-top: 10px;
+  }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: #1f2328; color: #fff; padding: 10px 18px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>浏览器桥</h1>
+  <div class="sub">让 KiraAI 感知并操作用户本地浏览器</div>
+
+  <!-- ── 连接状态 ─────────────────────────────────────────── -->
+  <div class="card">
+    <h2>连接状态</h2>
+    <div class="grid">
+      <div class="stat">
+        <div class="k">扩展连接</div>
+        <div class="v" id="conn"><span class="dot off"></span>未连接</div>
+      </div>
+      <div class="stat">
+        <div class="k">浏览器</div>
+        <div class="v" id="browser">—</div>
+      </div>
+      <div class="stat">
+        <div class="k">扩展版本</div>
+        <div class="v" id="extver">—</div>
+      </div>
+      <div class="stat">
+        <div class="k">当前策略</div>
+        <div class="v" id="policy">—</div>
+      </div>
+      <div class="stat">
+        <div class="k">已发送命令</div>
+        <div class="v" id="sent">0</div>
+      </div>
+      <div class="stat">
+        <div class="k">失败命令</div>
+        <div class="v" id="failed">0</div>
+      </div>
+    </div>
+    <div id="laststate" class="hint"></div>
+  </div>
+
+  <!-- ── 接入令牌 ─────────────────────────────────────────── -->
+  <div class="card">
+    <h2>接入令牌</h2>
+    <div class="hint">
+      扩展需要一枚令牌才能连接。令牌与 KiraAI 的鉴权状态绑定：重启、轮换 access_token
+      之后需要重新生成。<br>
+      「重新生成」会<strong>让所有旧令牌立即失效</strong>（当场作废，不是等它过期），
+      然后签出一枚新令牌 —— 你必须把它重新粘贴到扩展里。
+    </div>
+    <div class="token-box">
+      <input id="token" readonly value="加载中…">
+      <button class="ghost" onclick="copyToken()">复制</button>
+      <button id="regen-btn" onclick="regen()">重新生成</button>
+    </div>
+    <div class="hint" id="fingerprint"></div>
+    <div class="hint" id="expires"></div>
+  </div>
+
+  <!-- ── 使用步骤 ─────────────────────────────────────────── -->
+  <div class="card">
+    <h2>如何接入</h2>
+    <ol>
+      <li>在 Chrome / Edge 打开 <code>chrome://extensions</code>，打开右上角「开发者模式」</li>
+      <li>点「加载已解压的扩展程序」，选择 <code>browser-bridge</code> 文件夹</li>
+      <li>点扩展图标，把上面这枚令牌粘贴进去，保存</li>
+      <li>扩展会自动连接，本页状态变为「已连接」</li>
+    </ol>
+    <div class="hint" id="wspath"></div>
+  </div>
+
+  <!-- ── 安全说明 ─────────────────────────────────────────── -->
+  <div class="card">
+    <h2>安全边界</h2>
+    <div id="domains"></div>
+    <div id="safety" class="warnbox" style="display:none"></div>
+  </div>
+
+  <!-- ── 操作确认记录 ─────────────────────────────────────── -->
+  <div class="card">
+    <h2>操作确认记录</h2>
+    <div class="hint">仅当「需要用户确认」开启时才有内容。你在浏览器里点「允许/拒绝」都会记在这里。</div>
+    <div id="conflog"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ⚠️ 这里的插件 id 必须与 manifest.json 的 plugin_id 一致。
+//    框架把插件 API 挂在 /api/plugin/{plugin_id}/... 下，
+//    id 对不上就是 404（面板"令牌读取失败"，且重载也不会有反应）。
+const API = "/api/plugin/headless_browser";
+
+function $(id) { return document.getElementById(id); }
+
+function toast(msg) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  setTimeout(() => el.classList.remove("show"), 1800);
+}
+
+async function api(path, opts) {
+  const res = await fetch(API + path, Object.assign({
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",   // 带上 kira_token cookie
+  }, opts || {}));
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+// ── 状态轮询 ──────────────────────────────────────────────
+// ⚠️ 轮询是**每 3 秒一次**，而一次 `/status` 可能比 3 秒还慢（桥接卡一下就会）。
+//    这时下一个请求已经发出去了，而 fetch 不保证先发先回 ——
+//    旧请求后到时会把**新的**连接状态 / 策略 / 确认记录**覆盖回去**，
+//    界面上于是显示着过期信息；更糟的是旧请求若失败，还会把已经成功渲染的
+//    内容改成"读取失败"。
+//    只认"最后一次发出"的响应。（`loadToken` 上轮已按同一办法处理 ——
+//    当时漏了这里，这次一起补上。）
+let _refreshSeq = 0;
+
+async function refresh() {
+  const seq = ++_refreshSeq;
+  try {
+    const s = await api("/status");
+    if (seq !== _refreshSeq) return;   // 已有更新的请求 → 丢弃这次的结果
+
+    const b = s.bridge || {};
+    const connected = !!b.connected;
+    $("conn").innerHTML = connected
+      ? '<span class="dot on"></span>已连接'
+      : '<span class="dot off"></span>未连接';
+    $("browser").textContent = b.browser || "—";
+    $("extver").textContent = b.extension_version ? ("v" + b.extension_version) : "—";
+    $("sent").textContent = b.commands_sent ?? 0;
+    $("failed").textContent = b.commands_failed ?? 0;
+
+    const p = s.policy || {};
+    $("policy").innerHTML = p.read_only
+      ? '<span class="tag ro">只读</span>'
+      : '<span class="tag rw">可写</span>';
+
+    const ls = s.last_state || {};
+    $("laststate").textContent = ls.tab_url
+      ? ("最近浏览：" + (ls.tab_title || "") + " — " + ls.tab_url)
+      : "暂无浏览记录";
+
+    // ⚠️ allowed_domains / blocked_domains 同样来自配置，可能含任意字符，
+    //    一律用 DOM 节点渲染（见下方 _renderDomains），不再拼 HTML 字符串。
+    $("domains").innerHTML = "";
+    _renderDomains($("domains"), p.allowed_domains, p.blocked_domains,
+      p.local_access !== false);
+    // （白名单条数在下面 warn 判定里用 allowedCount）
+
+    let warn = "";
+    // ⚠️ 必须是**局部变量**：上一轮我把 `const ad = p.allowed_domains || [];`
+    //    删掉、改走 _renderDomains 时漏了这里仍要判"白名单是否为空"，
+    //    于是可写模式下每次 refresh() 都抛 ReferenceError（只读模式因短路
+    //    不会触发，所以很容易漏看）→ 后面的安全提示/确认记录/WS 路径
+    //    全部停止更新。
+    const allowedCount = Array.isArray(p.allowed_domains)
+      ? p.allowed_domains.length : 0;
+    if (!p.read_only && !allowedCount) {
+      warn = "⚠️ 当前为可写模式且白名单为空 —— AI 可以操作任意网站。建议至少配置白名单，或开启「写操作需用户确认」。";
+    } else if (!p.read_only && !p.require_confirm) {
+      warn = "⚠️ 可写模式下未开启二次确认 —— AI 的点击和输入会立即生效。";
+    }
+    $("safety").style.display = warn ? "block" : "none";
+    $("safety").textContent = warn;
+
+    // 确认记录
+    // ⚠️ 这些字段（action/command/reason）来自 bridge 上报的**事件数据**，
+    //    持有 bridge token 的一方可以自由构造。原先直接拼进 innerHTML →
+    //    注入 <img onerror=...> 之类即可在已认证的面板里执行脚本（CWE-79）。
+    //    → 一律用 DOM 节点 + textContent 渲染，绝不再拼字符串。
+    const clog = Array.isArray(s.confirm_log) ? s.confirm_log : [];
+    const clogBox = $("conflog");
+    clogBox.textContent = "";
+    if (!clog.length) {
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "暂无记录";
+      clogBox.appendChild(hint);
+    } else {
+      clog.forEach(function (c) {
+        const row = document.createElement("div");
+        row.style.margin = "4px 0";
+
+        const tag = document.createElement("span");
+        tag.className = c.allowed ? "tag rw" : "tag ro";
+        tag.textContent = c.allowed ? "允许" : "拒绝";
+        row.appendChild(tag);
+
+        const time = document.createElement("code");
+        time.textContent = new Date((c.ts || 0) * 1000).toLocaleTimeString();
+        row.appendChild(document.createTextNode(" "));
+        row.appendChild(time);
+
+        const what = document.createTextNode(
+          " " + String(c.action || c.command || ""));
+        row.appendChild(what);
+
+        if (c.reason && c.reason !== "approved" && c.reason !== "denied") {
+          const why = document.createElement("span");
+          why.className = "hint";
+          why.textContent = " (" + String(c.reason) + ")";
+          row.appendChild(why);
+        }
+        clogBox.appendChild(row);
+      });
+    }
+
+    // ⚠️ ws_path 是固定回退值、非攻击者可控，但仍统一走 textContent
+    const wspathBox = $("wspath");
+    wspathBox.textContent = "WebSocket 路径："
+      + (b.ws_path || "/ws/plugin/headless_browser/bridge")
+      + "（扩展已自动使用）";
+
+  } catch (e) {
+    if (seq !== _refreshSeq) return;   // 迟到的失败同样不许覆盖新状态
+    $("conn").innerHTML = '<span class="dot off"></span>读取失败';
+  }
+}
+
+// ── 令牌 ──────────────────────────────────────────────────
+// 重新生成的「两段式确认」状态（第一下变确认态，第二下才真签）
+let _regenArmed = false;
+let _regenTimer = null;
+
+/**
+ * 渲染域名白/黑名单 —— **全程用 DOM 节点与 textContent**。
+ *
+ * 这些值来自配置、内容不受控（可能含 `<` `&` 或引号），
+ * 拼进 innerHTML 就是一个注入口（CWE-79）。
+ */
+function _renderDomains(box, allowedRaw, blockedRaw, localAccess) {
+  const allowed = Array.isArray(allowedRaw) ? allowedRaw : [];
+  const blocked = Array.isArray(blockedRaw) ? blockedRaw : [];
+
+  function listRow(label, items, emptyText) {
+    const row = document.createElement("div");
+    const b = document.createElement("b");
+    b.textContent = label + "：";
+    row.appendChild(b);
+    if (items.length) {
+      items.forEach(function (item, idx) {
+        if (idx) row.appendChild(document.createTextNode(", "));
+        const code = document.createElement("code");
+        code.textContent = String(item);
+        row.appendChild(code);
+      });
+    } else {
+      row.appendChild(document.createTextNode(emptyText));
+    }
+    return row;
+  }
+
+  box.appendChild(listRow("白名单", allowed, "（空，不限制）"));
+  const r2 = listRow("黑名单", blocked, "（空）");
+  r2.style.marginTop = "6px";
+  box.appendChild(r2);
+
+  // ⚠️ 本机地址不再是"永久拦截"：插件定位就是让 AI 帮你操作浏览器，
+  //    本地开发服务器与 KiraAI 面板都是正常目标，默认放开。
+  //    是否拦截由配置项「允许访问本机 / 内网」决定。
+  const r3 = document.createElement("div");
+  r3.style.marginTop = "6px";
+  const b3 = document.createElement("b");
+  b3.textContent = "本机 / 内网地址：";
+  const c3 = document.createElement("code");
+  // localAccess 由 refresh() 传入（读的是插件配置）
+  c3.textContent = localAccess ? "允许（默认）" : "已拒绝（配置已关闭）";
+  r3.appendChild(b3);
+  r3.appendChild(c3);
+  box.appendChild(r3);
+
+  const hint = document.createElement("div");
+  hint.className = "hint";
+  hint.textContent =
+    "黑名单优先级最高，读和写都会被拒绝。白名单非空时，写操作仅限白名单域名。"
+    + (localAccess
+        ? "本机 / 内网地址默认允许 —— 包括 localhost、127.0.0.1、"
+          + "[::1]、十进制 IP 等写法，以及你自己的本地开发服务器。"
+          + "如果不想让 AI 碰这些（例如担心它打开 KiraAI 面板改配置），"
+          + "把配置里的「允许访问本机 / 内网」关掉即可。"
+        : "「允许访问本机 / 内网」已关闭：本机、内网与链路本地地址"
+          + "（含云厂商元数据端点 169.254.169.254）一律拒绝。");
+  box.appendChild(hint);
+}
+
+function _resetRegenBtn(quiet) {
+  _regenArmed = false;
+  clearTimeout(_regenTimer);
+  const btn = $("regen-btn");
+  if (btn) {
+    btn.textContent = "重新生成";
+    btn.classList.remove("danger");
+  }
+  // 超时自动回落时清掉"再点一次"的提示，避免留着误导
+  if (quiet) {
+    const fp = $("fingerprint");
+    if (fp) fp.textContent = "";
+  }
+}
+
+// 令牌指纹：JWT 是 base64 拼的，前 ~93 个字符（header + payload 开头
+// {"sub":"admin","auth_mode":"enabled","tv":"...","src":"browser_bridge"...）
+// 对**所有**令牌都一样，真正的差异（jti）在 ~270 字符处 ——
+// 而只读输入框只显示得下 60~90 个字符。所以"重新生成后看起来一模一样"
+// 是必然的，跟有没有生效无关。把尾部指纹单独显示出来，一眼可辨。
+function tokenFingerprint(tok) {
+  if (!tok || tok.length < 20) return "";
+  return tok.slice(-10);
+}
+
+// ⚠️ 每次令牌请求带一个**递增序号**，只认"最后一次发出"的那条的响应。
+//    原因：定期轮询 `loadToken(false)` 和用户点「重新生成」触发的
+//    `loadToken(true)` 是**并发**的，而 fetch 不保证先发先回。
+//    `/token` 处理器可能在强制请求轮换**之前**就把旧令牌给了轮询那条，
+//    它再晚一点返回 —— 面板上于是又显示回那枚**已经作废**的旧令牌，
+//    用户看到的像是"重新生成没生效"，甚至复制到一枚连不上的令牌。
+let _tokenSeq = 0;
+
+// 返回 true 表示这次确实换了一枚新令牌
+async function loadToken(force) {
+  const seq = ++_tokenSeq;
+  try {
+    const r = await api("/token" + (force ? "?force=true" : "?force=false"), { method: "POST" });
+    if (seq !== _tokenSeq) return false;   // 已有更新的请求 → 丢弃这次的结果
+    if (!r.ok) {
+      $("token").value = "生成失败：" + (r.error || "未知错误");
+      $("fingerprint").textContent = "";
+      return false;
+    }
+    $("token").value = r.token;
+    const genAt = new Date().toLocaleTimeString();
+    $("fingerprint").innerHTML =
+      "指纹 <code>…" + tokenFingerprint(r.token) + "</code>（末尾 10 位，用于确认是不是同一枚）" +
+      (force ? " · <b>本次已重新生成于 <code>" + genAt + "</code>，旧令牌已作废</b>" : "");
+    $("expires").textContent = r.never_expires
+      ? "不设过期：一直有效，直到你点「重新生成」（旧令牌当场作废）"
+      : ("有效期至 " + r.expires);
+    return !!r.changed;
+  } catch (e) {
+    if (seq !== _tokenSeq) return false;
+    $("token").value = "读取失败：" + e.message;
+    $("fingerprint").textContent = "";
+    return false;
+  }
+}
+
+async function regen() {
+  // ⚠️ 绝对不要用 confirm() / alert() / prompt()。
+  // KiraAI 的插件面板跑在 iframe 里，sandbox 只有
+  // "allow-scripts allow-same-origin allow-forms allow-popups" —— 没有 allow-modals，
+  // 于是 confirm() 不弹窗、直接返回 false，整个函数静默 return，
+  // 用户看到的就是"点了按钮一点反应都没有"（连提示都没有）。
+  // 这里改用「按钮两段式确认」：第一下变成确认态，第二下才执行。
+  if (!_regenArmed) {
+    _regenArmed = true;
+    const btn = $("regen-btn");
+    btn.textContent = "确认重新生成";
+    btn.classList.add("danger");
+    $("fingerprint").innerHTML =
+      "再点一次「<b>确认重新生成</b>」：旧令牌会<b>立即作废</b>，扩展需要重新粘贴";
+    clearTimeout(_regenTimer);
+    _regenTimer = setTimeout(() => { _resetRegenBtn(true); }, 10000);
+    return;
+  }
+
+  _resetRegenBtn();
+  const changed = await loadToken(true);
+  toast(changed ? "已生成新令牌（旧令牌已作废），请复制并粘贴到扩展里" : "令牌未变化（请再试一次）");
+}
+
+function copyToken() {
+  const v = $("token").value;
+  if (!v || v === "加载中…") return;
+  navigator.clipboard.writeText(v).then(
+    () => toast("已复制到剪贴板"),
+    () => toast("复制失败，请手动选中复制")
+  );
+}
+
+// ── 启动 ──────────────────────────────────────────────────
+loadToken(false);
+refresh();
+setInterval(refresh, 3000);
+// 令牌过期或 access_token 轮换后，插件会重新签发 —— 面板定期拉一次，
+// 免得页面一直挂着一枚已经连不上的旧令牌（force=false：没问题就原样返回）
+setInterval(() => loadToken(false), 10 * 60 * 1000);
+</script>
+</body>
+</html>

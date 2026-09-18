@@ -1,15 +1,15 @@
 {
-    "display_name": "Headless Browser",
-    "plugin_id": "headless_browser",
-    "version": "1.2.1",
-    "icon": "icon.png",
-    "author": "nyx+znq19",
-    "description": "A headless browser plugin that allows AI to control a browser for web browsing, screenshots, downloads, uploads, and more. It defaults to taking over the local real browser (inheriting login state), with fallback options to plugin persistent profile / system browser / auto-download built-in Chromium.",
-    "repo": "https://github.com/Qixuan112/Kira_headless_browser",
-    "locales": {
-        "zh": {
-            "display_name": "无头浏览器",
-            "description": "让 AI 能够控制浏览器进行网页浏览、截图、下载、上传等操作。默认接管本地真实浏览器（继承登录态），逐级回退到插件持久 profile / 系统浏览器 / 自动下载内置 Chromium"
-        }
+  "display_name": "Browser",
+  "plugin_id": "headless_browser",
+  "version": "2.1.48",
+  "icon": "icon.png",
+  "author": "nyx+znq19+萧洋",
+  "description": "One browser plugin, two fully-symmetric backends, 12 action-based tools. Drives YOUR browser through the extension (real login state, zero conflict) or a plugin-owned headless Chromium. Both backends support read/click/type/JS/upload/download/cookies/keyboard/mouse. CPU/memory guarded, idle auto-close, page self-healing.",
+  "repo": "https://github.com/Qixuan112/Kira_headless_browser",
+  "locales": {
+    "zh": {
+      "display_name": "浏览器",
+      "description": "一个插件、两个能力完全对称的后端、12 个动作式工具。扩展连上就用你自己的浏览器（真实登录态、零冲突），没连上自动用插件自带的无头 Chromium。两个后端都支持 读/点击/输入/执行JS/上传/下载/Cookie/键盘鼠标 全套能力。含 CPU 内存防护、空闲自动关闭、页面自愈。"
     }
+  }
 }

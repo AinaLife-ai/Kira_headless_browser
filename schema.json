@@ -1,13 +1,160 @@
 {
+  "enabled": {
+    "name": "Enabled",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "启用插件"
+      }
+    }
+  },
+  "backend_strategy": {
+    "name": "Backend Strategy",
+    "type": "string",
+    "options": [
+      "auto",
+      "extension",
+      "headless"
+    ],
+    "default": "auto",
+    "hint": "auto = prefer the extension (your own browser, zero conflict) and fall back to a plugin-owned headless browser when the extension is not connected. extension = only your browser; never silently downgrade. headless = only the plugin's own browser.",
+    "locales": {
+      "zh": {
+        "name": "后端策略",
+        "hint": "auto=优先扩展（用你自己的浏览器，零冲突），扩展没连上就自动回退到插件自己的无头浏览器；extension=只用你的浏览器，连不上也不偷偷降级；headless=只用插件自己的无头浏览器。"
+      }
+    }
+  },
+  "extension_enabled": {
+    "name": "Enable Extension Bridge",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "启用扩展桥（用你自己的浏览器）"
+      }
+    }
+  },
+  "headless_enabled": {
+    "name": "Enable Headless Fallback",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "启用无头回退",
+        "hint": "扩展没连上时，是否允许插件自己拉起一个无头浏览器。它使用插件自己的 profile，不会占用你的真实浏览器。"
+      }
+    }
+  },
+  "read_only": {
+    "name": "Read Only",
+    "type": "switch",
+    "default": false,
+    "hint": "Read-only mode removes all write tools from the model's tool list entirely. Default OFF so the bot has full read/write browser control.",
+    "locales": {
+      "zh": {
+        "name": "只读模式",
+        "hint": "【默认关】让 bot 拥有完整的读写能力（点击/输入/跳转）。打开后写工具会从模型可见的工具表里整个摘掉。"
+      }
+    }
+  },
+  "require_confirm": {
+    "name": "Require User Confirmation",
+    "type": "switch",
+    "default": false,
+    "locales": {
+      "zh": {
+        "name": "写操作需用户确认",
+        "hint": "每次写操作前在浏览器里弹通知让你点「允许/拒绝」。仅扩展桥后端支持。"
+      }
+    }
+  },
+  "allowed_domains": {
+    "name": "Allowed Domains",
+    "type": "list",
+    "default": [],
+    "locales": {
+      "zh": {
+        "name": "域名白名单",
+        "hint": "留空=不限制写操作。填写后，写操作只允许命中这些规则的域名。支持 *.example.com、*bank* 等写法。"
+      }
+    }
+  },
+  "blocked_domains": {
+    "name": "Blocked Domains",
+    "type": "list",
+    "default": [
+      "*.bank*",
+      "*.pay*"
+    ],
+    "locales": {
+      "zh": {
+        "name": "域名黑名单",
+        "hint": "域名黑名单（读和写都会被拦）。**不要把 127.0.0.1 / localhost 写进来**：本机是否允许访问由单独的「允许访问本机 / 内网」开关决定；写在这里会因为黑名单优先级最高而让那个开关失效。"
+      }
+    },
+    "hint": "Domain blocklist (matched for reads AND writes). Leave loopback entries out of here: whether the AI may reach localhost / 127.0.0.1 is controlled by the separate 「Allow Local / Intranet Access」 switch, so that this list does not silently override it (blocklist has the highest priority)."
+  },
+  "max_content_chars": {
+    "name": "Max Content Chars",
+    "type": "integer",
+    "default": 8000,
+    "locales": {
+      "zh": {
+        "name": "页面正文最大字符数"
+      }
+    }
+  },
+  "content_page_size": {
+    "name": "Content Page Size",
+    "type": "integer",
+    "default": 8000,
+    "hint": "How many characters of page text one browser_get_page call returns by default. This is NOT a hard limit - the bot can pass offset/max_chars to read further, and the return value tells it has_more / next_offset.",
+    "locales": {
+      "zh": {
+        "name": "单次返回正文长度",
+        "hint": "browser_get_page 一次默认返回多少字符。**这不是硬上限**——bot 可以带 offset/max_chars 继续读，返回值里会告诉它 has_more 和 next_offset，需要多少自己续读。"
+      }
+    }
+  },
+  "inject_page_state": {
+    "name": "Inject Browser State",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "注入当前浏览状态到提示词"
+      }
+    }
+  },
+  "panel_auth_required": {
+    "name": "Panel Auth Required",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "配置面板需要登录"
+      }
+    }
+  },
+  "command_timeout": {
+    "name": "Command Timeout (s)",
+    "type": "float",
+    "default": 20,
+    "locales": {
+      "zh": {
+        "name": "命令超时（秒）"
+      }
+    }
+  },
   "headless": {
     "name": "Headless Mode",
     "type": "switch",
     "default": true,
-    "hint": "Whether to run the browser in headless mode (background or visible window)",
     "locales": {
       "zh": {
-        "name": "无头模式",
-        "hint": "是否以无头模式运行浏览器（后台运行 or 窗口可见）"
+        "name": "无头模式（关闭则显示窗口）"
       }
     }
   },
@@ -22,47 +169,38 @@
       "bundled"
     ],
     "default": "auto",
-    "hint": "Browser source: auto=automatic detection (prefer system default browser, try Chrome→Edge→Chromium→built-in download in order); chrome/msedge/chromium=specify system browser; bundled=use only built-in Chromium",
     "locales": {
       "zh": {
         "name": "浏览器来源",
-        "hint": "浏览器来源：auto=自动探测（优先系统默认浏览器，依次尝试 Chrome→Edge→Chromium→内置下载）；chrome/msedge/chromium=指定系统浏览器；bundled=只用内置 Chromium"
+        "hint": "auto=依次尝试系统 Chrome→Edge→Chromium→内置；bundled=只用 Playwright 自带 Chromium。"
       }
     }
   },
-  "use_real_browser_profile": {
-    "name": "Use Real Browser Profile",
-    "type": "switch",
-    "default": true,
-    "hint": "[Default ON] Directly use your real browser's user data directory, inheriting all data such as login status/bookmarks. Note: You must completely exit the browser before using (otherwise it will prompt that the user data directory is occupied and automatically roll back); automated operations will be executed in your real account identity, please be aware of the risks.",
+  "headless_profile_mode": {
+    "name": "Headless Profile Mode",
+    "type": "string",
+    "options": [
+      "inherit",
+      "persistent",
+      "temp"
+    ],
+    "default": "inherit",
+    "hint": "inherit = COPY your real browser's user data into the plugin folder and run on that copy, so logins/cookies/bookmarks are all there while your own browser keeps working (the copy means no ProcessSingleton lock). persistent = plugin-owned profile. temp = throwaway.",
     "locales": {
       "zh": {
-        "name": "使用真实浏览器配置文件",
-        "hint": "【默认开】直接使用你真实浏览器的用户数据目录，继承登录状态/书签等全部数据。注意：使用前需完全退出该浏览器（否则会提示用户数据目录被占用并自动回退）；自动化操作将以你的真实账号身份执行，请知悉风险"
+        "name": "无头 profile 模式",
+        "hint": "【默认 inherit】**复制**你真实浏览器的用户数据到插件目录，然后跑在那个副本上——登录态/Cookie/书签全都在，而因为用的是副本，**不会持有你浏览器的占用锁**，你自己的浏览器照常能用。persistent=插件自己的 profile；temp=用完即弃。"
       }
     }
   },
   "custom_user_data_dir": {
-    "name": "Custom User Data Directory",
+    "name": "Custom Profile Dir",
     "type": "string",
     "default": "",
-    "hint": "Advanced option: Manually specify the browser user data directory (User Data directory), leave empty to automatically locate based on system and browser type. Only effective when real browser mode is enabled.",
     "locales": {
       "zh": {
-        "name": "自定义用户数据目录",
-        "hint": "高级选项：手动指定浏览器用户数据目录（User Data 目录），留空则按系统和浏览器类型自动定位。仅在开启真实浏览器模式时生效"
-      }
-    }
-  },
-  "use_persistent_profile": {
-    "name": "Use Persistent Profile",
-    "type": "switch",
-    "default": true,
-    "hint": "Secondary option: When the real browser is unavailable, use the plugin's dedicated persistent profile (login once and retain across restarts, without polluting the real browser). If turned off, it will revert to a new session each time.",
-    "locales": {
-      "zh": {
-        "name": "使用持久化配置文件",
-        "hint": "次级方案：真实浏览器不可用时，使用插件专用持久化 profile（登录一次后跨重启保留，不污染真实浏览器）。关闭则回退为每次全新会话"
+        "name": "自定义 profile 目录",
+        "hint": "留空则用插件数据目录下的 browser_profile。⚠️ 请不要填你真实浏览器的 User Data 目录 —— 那会导致互相抢锁。"
       }
     }
   },
@@ -70,87 +208,297 @@
     "name": "Default Viewport",
     "type": "string",
     "default": "1920x1080",
-    "hint": "Default viewport size, format: widthxheight, e.g., 1920x1080",
     "locales": {
       "zh": {
-        "name": "默认视口大小",
-        "hint": "默认视口大小，格式：宽度x高度，例如 1920x1080"
-      }
-    }
-  },
-  "screenshot_dir": {
-    "name": "Screenshot Directory",
-    "type": "string",
-    "default": "",
-    "hint": "Screenshot save directory (leave empty to use default directory)",
-    "locales": {
-      "zh": {
-        "name": "截图目录",
-        "hint": "截图保存目录（留空使用默认目录）"
-      }
-    }
-  },
-  "download_dir": {
-    "name": "Download Directory",
-    "type": "string",
-    "default": "",
-    "hint": "File download directory (leave empty to use default directory)",
-    "locales": {
-      "zh": {
-        "name": "下载目录",
-        "hint": "文件下载目录（留空使用默认目录）"
+        "name": "默认视口大小"
       }
     }
   },
   "user_agent": {
-    "name": "Custom User-Agent",
+    "name": "User Agent",
     "type": "string",
     "default": "",
-    "hint": "Custom User-Agent (leave empty to use default)",
     "locales": {
       "zh": {
-        "name": "自定义 User-Agent",
-        "hint": "自定义 User-Agent（留空使用默认）"
+        "name": "自定义 User-Agent"
       }
     }
   },
   "timeout": {
-    "name": "Page Load Timeout",
+    "name": "Page Load Timeout (s)",
     "type": "integer",
-    "default": 60,
-    "hint": "Page load timeout (seconds), recommended 60 seconds or more",
+    "default": 45,
     "locales": {
       "zh": {
-        "name": "页面加载超时",
-        "hint": "页面加载超时时间（秒），建议60秒以上"
+        "name": "页面加载超时（秒）"
       }
     }
   },
-  "auto_send_screenshot": {
-    "name": "Auto Send Screenshot",
+  "default_wait_until": {
+    "name": "Default Wait Until",
     "type": "string",
     "options": [
-      "auto",
-      "manual"
+      "domcontentloaded",
+      "load",
+      "networkidle"
     ],
-    "default": "auto",
-    "hint": "Screenshot send method after capture: auto=automatically send to user, manual=decide by AI when to send (AI can view screenshot before deciding whether to send)",
+    "default": "domcontentloaded",
+    "hint": "domcontentloaded (recommended) returns as soon as the DOM is ready. load waits for all subresources. networkidle is DISCOURAGED by Playwright: modern pages with polling/keepalive may never go idle, so it just burns the full timeout while the page keeps running.",
     "locales": {
       "zh": {
-        "name": "截图发送方式",
-        "hint": "截图后发送方式：auto=自动发送给用户，manual=由AI决定何时发送（AI可在决定是否发送前查看截图）"
+        "name": "默认等待策略",
+        "hint": "domcontentloaded（推荐）=DOM 就绪即返回；load=等所有子资源；networkidle 官方已标注**不推荐**——带轮询/长连接的现代页面可能永远不空闲，只会白等到超时，同时页面还在持续跑（烧 CPU）。"
+      }
+    }
+  },
+  "op_timeout": {
+    "name": "Operation Timeout (s)",
+    "type": "integer",
+    "default": 120,
+    "hint": "Per-operation timeout, DECOUPLED from the framework's tool_call_timeout by default. The framework's timeout force-cancels our coroutine, which leaves Playwright in an undefined state - so the plugin manages its own deadline instead. Turn on op_timeout_follows_framework if you want it clamped.",
+    "locales": {
+      "zh": {
+        "name": "页面操作超时（秒）",
+        "hint": "【默认与框架脱钩】单个页面操作的超时。框架那个 tool_call_timeout 是**到点直接取消我们的协程**，中途取消会让 Playwright 留下状态不明的页面，所以默认由插件自己管。想让插件不超过框架上限，打开下面的「跟随框架」。"
+      }
+    }
+  },
+  "op_timeout_follows_framework": {
+    "name": "Operation Timeout Follows Framework",
+    "type": "switch",
+    "default": false,
+    "hint": "ON: clamp op_timeout to tool_call_timeout × op_timeout_ratio. OFF (default): fully decoupled.",
+    "locales": {
+      "zh": {
+        "name": "操作超时跟随框架",
+        "hint": "打开：把 op_timeout 限制在「框架工具超时 × 比例」以内。关闭（默认）：完全脱钩，由插件自己决定何时收手。"
+      }
+    }
+  },
+  "op_timeout_ratio": {
+    "name": "Timeout Ratio",
+    "type": "float",
+    "default": 0.8,
+    "locales": {
+      "zh": {
+        "name": "跟随框架时的比例",
+        "hint": "仅在「操作超时跟随框架」打开时生效。"
+      }
+    }
+  },
+  "action_timeout": {
+    "name": "Interaction Timeout (s)",
+    "type": "integer",
+    "default": 20,
+    "locales": {
+      "zh": {
+        "name": "交互操作超时（秒）"
+      }
+    }
+  },
+  "idle_close_seconds": {
+    "name": "Idle Close Seconds",
+    "type": "integer",
+    "default": 300,
+    "hint": "Close the headless browser after this many seconds of inactivity, releasing its CPU and memory. 0 = never close.",
+    "locales": {
+      "zh": {
+        "name": "空闲自动关闭（秒）",
+        "hint": "空闲这么多秒后自动关掉无头浏览器，把 CPU 和内存一起释放。0=不关（会一直常驻）。建议 300。"
+      }
+    }
+  },
+  "screenshot_dir": {
+    "name": "Screenshot Dir",
+    "type": "string",
+    "default": "",
+    "locales": {
+      "zh": {
+        "name": "截图目录（留空用 data/temp）"
+      }
+    }
+  },
+  "download_dir": {
+    "name": "Download Dir",
+    "type": "string",
+    "default": "",
+    "locales": {
+      "zh": {
+        "name": "下载目录"
+      }
+    }
+  },
+  "screenshot_max_count": {
+    "name": "Max Screenshots",
+    "type": "integer",
+    "default": 50,
+    "locales": {
+      "zh": {
+        "name": "截图最大保留数"
+      }
+    }
+  },
+  "screenshot_auto_clean": {
+    "name": "Auto Clean Screenshots",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "自动清理旧截图"
+      }
+    }
+  },
+  "download_auto_clean": {
+    "name": "Auto Clean Downloads",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "自动清理下载目录"
+      }
+    }
+  },
+  "download_max_count": {
+    "name": "Max Downloads Kept",
+    "type": "integer",
+    "default": 100,
+    "locales": {
+      "zh": {
+        "name": "下载文件最大保留数"
+      }
+    }
+  },
+  "download_timeout": {
+    "name": "Download Timeout (Seconds)",
+    "type": "integer",
+    "default": 600,
+    "hint": "How long a single download may take before it is aborted. Downloads run in the background while the tool call returns immediately, so this is a safety net against hanging connections rather than a per-call deadline. Default 600s (10 minutes).",
+    "locales": {
+      "zh": {
+        "name": "下载超时（秒）",
+        "hint": "单次下载最长允许多久，超时即中止。下载是在后台进行的（工具调用会立刻返回），所以这个是**防止连接卡死**的兜底，而不是单次调用的截止时间。默认 600 秒（10 分钟）。"
+      }
+    }
+  },
+  "download_max_bytes": {
+    "name": "Max Download Size (Bytes)",
+    "type": "integer",
+    "default": 2147483648,
+    "hint": "Reject downloads larger than this. Downloads are streamed to disk in 64KB chunks, so this is NOT a memory guard - memory stays flat no matter the size. Default 2GB.",
+    "locales": {
+      "zh": {
+        "name": "单个下载大小上限（字节）",
+        "hint": "超过该大小会被拒绝。下载是**流式落盘**（64KB 一块），**无论多大都不占内存**——这个上限只用来拦异常的超大文件。默认 2GB。"
+      }
+    }
+  },
+  "upload_max_bytes": {
+    "name": "Max Upload Size (Bytes)",
+    "type": "integer",
+    "default": 268435456,
+    "hint": "Max file size for browser upload. Default 256MB. Uploads are streamed as MULTIPLE messages and the chunks are accumulated in the PAGE context (content script), never in the service worker — so neither the WebSocket frame size nor the SW memory is a constraint. Peak memory is about 1x the file size (measured 1.0-1.1x).",
+    "locales": {
+      "zh": {
+        "name": "上传文件大小上限（字节）",
+        "hint": "通过扩展上传文件时的大小上限。默认 256MB。上传走**分块流式**（多条消息），且分块累积在**页面上下文**（内容脚本），**不在 service worker** —— 所以单帧尺寸和 SW 内存都不是约束。峰值内存约等于文件大小（实测 1.0～1.1×）。"
+      }
+    }
+  },
+  "upload_allow_any_path": {
+    "name": "Allow Any Upload Path",
+    "type": "switch",
+    "default": true,
+    "hint": "ON (default): any readable local file can be uploaded - this plugin is meant to give the bot full browser capability. OFF: only files under upload_allowed_dirs.",
+    "locales": {
+      "zh": {
+        "name": "允许上传任意路径",
+        "hint": "【默认开】允许上传任意可读文件 —— 本插件的定位是给 bot 完整的浏览能力。关掉后只允许 upload_allowed_dirs 里的目录，可防止本机敏感文件被外传。"
+      }
+    }
+  },
+  "upload_allowed_dirs": {
+    "name": "Upload Allowed Dirs",
+    "type": "list",
+    "default": [
+      "data/files",
+      "data/temp"
+    ],
+    "locales": {
+      "zh": {
+        "name": "上传目录白名单",
+        "hint": "仅当「允许上传任意路径」关闭时生效。用 realpath 归一，可防 ../ 穿越。"
+      }
+    }
+  },
+  "local_access": {
+    "name": "Allow Local / Intranet Access",
+    "type": "switch",
+    "default": true,
+    "hint": "ON (default): the AI may open localhost, 127.0.0.1 and intranet addresses - including your own dev servers (e.g. http://localhost:3000) AND KiraAI's own web panel. This plugin exists to let the AI operate a browser for you, so local pages are normal work targets, not an attack surface. OFF: block loopback / private / link-local / CGNAT entirely - that covers the cloud metadata endpoints used by AWS/Azure/GCP (169.254.169.254) and Alibaba Cloud (100.100.100.200), and it also resolves hostnames to see whether they land on an intranet address. Note: in a fake-IP proxy setup hostnames resolve to the proxy's placeholder range, so that last step can't tell - in that setup the browser goes through the proxy too, so it can't reach the intranet anyway. Worth knowing before turning it OFF: if you keep it ON while the panel has no auth, the AI could open the panel and change plugin settings.",
+    "locales": {
+      "zh": {
+        "name": "允许访问本机 / 内网",
+        "hint": "开启（默认）：AI 可以打开 localhost / 127.0.0.1 / 内网地址 -- 包括你自己的本地开发服务器（如 http://localhost:3000）以及 KiraAI 自身的面板。本插件的定位就是「让 AI 帮你操作浏览器」，本机页面是正常的工作目标，不是攻击面，所以默认放开。关闭：本机 / 内网 / 链路本地 / CGNAT 一律拒绝 —— 覆盖 AWS/Azure/GCP 的元数据端点 169.254.169.254 与**阿里云的 100.100.100.200**；同时会把主机名真解析一次，看它是不是落到内网地址。注意：fake-IP 代理环境里主机名会解析到代理的占位段，这一步判不出来（但那种环境下浏览器也走代理，实际到不了内网）。关闭前值得知道：如果保持开启、而面板又没有认证，AI 理论上可以打开面板并修改插件配置。"
+      }
+    }
+  },
+  "load_cookies_on_start": {
+    "name": "Auto-load Cookies",
+    "type": "switch",
+    "default": true,
+    "hint": "On startup, load every .json in the cookie directory into the headless browser, so saved logins survive reinstalls / profile changes / a different machine. Pair with browser_cookie(action=\"export\") to save a site's cookies here. Failures never block the browser from starting.",
+    "locales": {
+      "zh": {
+        "name": "启动时自动加载 Cookie",
+        "hint": "启动无头浏览器时，把 cookie 目录下的所有 .json 灌回去 —— 这样重装插件、换 profile、换机器之后，登录态还能找回来。配合 browser_cookie(action=\"export\") 把某个站点的 cookie 导出到这里即可。任何文件有问题都只跳过它，**不会影响浏览器启动**。"
+      }
+    }
+  },
+  "cookies_dir": {
+    "name": "Cookie Directory",
+    "type": "string",
+    "default": "data/files/cookie",
+    "hint": "Where per-site cookie JSON files live (one file per site, e.g. chatgpt.json). Loaded automatically on startup when the switch above is on.",
+    "locales": {
+      "zh": {
+        "name": "Cookie 目录",
+        "hint": "各个站点的 cookie JSON 存放目录（一个站点一个文件，如 chatgpt.json）。上面的开关打开时会在启动时自动加载。"
+      }
+    }
+  },
+  "auto_download_browser": {
+    "name": "Auto-download Browser",
+    "type": "switch",
+    "default": true,
+    "hint": "If every browser source fails to start, download Playwright's bundled Chromium and use that. This is the last fallback; the usual cause of reaching it is that playwright is installed but `playwright install chromium` was never run. Turn off to fail fast instead of downloading.",
+    "locales": {
+      "zh": {
+        "name": "自动下载浏览器",
+        "hint": "所有浏览器来源都启动失败时，自动下载 Playwright 自带的内置 Chromium 来用。这是最后一级回退 —— 通常走到这一步的原因是「装了 playwright 但没跑过 playwright install chromium」。关掉则直接报错、不下载。"
+      }
+    }
+  },
+  "auto_download_timeout": {
+    "name": "Browser Download Timeout",
+    "type": "integer",
+    "default": 600,
+    "hint": "Seconds to allow for the automatic browser download. On timeout the startup fails with a manual command to run instead of hanging forever.",
+    "locales": {
+      "zh": {
+        "name": "浏览器下载超时（秒）",
+        "hint": "自动下载浏览器的超时时间。超时会失败并给出手动安装命令，而不是无限等下去。"
       }
     }
   },
   "auto_describe_screenshot": {
-    "name": "Auto Describe Screenshot",
-    "type": "boolean",
+    "name": "Describe Screenshot (VLM)",
+    "type": "switch",
     "default": true,
-    "hint": "Whether to automatically describe the screenshot content using VLM (only effective when auto_send is set to auto)",
+    "hint": "Use a VLM to turn screenshots into TEXT so the bot can actually see the page. Needed because tool results are plain text - an image never enters the model's context by itself. The bot can override this per call with the describe parameter (set it false when it only wants to show the picture to you). Works with BOTH backends.",
     "locales": {
       "zh": {
-        "name": "自动描述截图",
-        "hint": "是否使用VLM自动描述截图内容（仅在auto_send为auto时生效）"
+        "name": "用 VLM 分析截图",
+        "hint": "开启后，截图会交给 VLM 转成文字描述回给 bot —— 这样它才能「看到」页面。为什么需要：工具结果是以文本进模型的，图片本身不会自动进入它的上下文。bot 每次也能自己决定：给 browser_screenshot 传 describe=false 就只截图不描述（只想让你看图时更省）。两个后端都适用（扩展 / 无头都行）。"
       }
     }
   },
@@ -159,11 +507,11 @@
     "type": "model_select",
     "model_type": "llm",
     "default": "",
-    "hint": "Select the visual model (VLM) used to analyze screenshots, choose from the configured large language models. Must select a model that supports vision (e.g., Qwen-VL, GPT-4o, Claude-3, etc.)",
+    "hint": "Which model to use for screenshot analysis. Leave EMPTY to use the default VLM configured in KiraAI's model settings - that is the normal choice unless you want this plugin to use a different one. Must be a vision-capable model.",
     "locales": {
       "zh": {
         "name": "VLM 模型",
-        "hint": "选择用于分析截图的视觉模型（VLM），从已配置的大语言模型中选择。必须选择支持视觉的模型（如 Qwen-VL、GPT-4o、Claude-3 等）"
+        "hint": "用哪个模型分析截图。留空即可 —— 留空会使用 KiraAI 模型设置里的默认 VLM（这是通常该选的）。只有想让本插件单独指定一个模型时才需要在这里选。必须选支持视觉的模型。"
       }
     }
   },
@@ -171,11 +519,11 @@
     "name": "VLM Describe Prompt",
     "type": "string",
     "default": "",
-    "hint": "Custom VLM prompt (optional). If filled, it will override the default prompt. Recommended to include: 1. Page basic information 2. Interactable elements list 3. Current status 4. Key content 5. Suggested next steps 6. Coordinate reference",
+    "hint": "Custom prompt for screenshot analysis. Empty uses the built-in web-page-oriented prompt (which asks for page type, interactive elements, current state, key content and suggested next actions).",
     "locales": {
       "zh": {
         "name": "VLM 描述提示词",
-        "hint": "自定义VLM提示词（可选）。如果填写，将覆盖默认提示词。建议包含：1.页面基本信息 2.可交互元素清单 3.当前状态 4.关键内容 5.建议的下一步操作 6.坐标参考"
+        "hint": "自定义截图分析提示词。留空则使用内置的网页分析提示词（会要求输出：页面类型 / 可交互元素清单 / 当前状态 / 关键内容 / 建议的下一步操作），这样描述能直接用于后续操作。"
       }
     }
   },
@@ -183,74 +531,11 @@
     "name": "VLM Timeout",
     "type": "integer",
     "default": 10,
-    "hint": "VLM description timeout (seconds), if exceeded, the description will be skipped",
+    "hint": "Seconds to wait for the VLM description. On timeout the description is skipped - the screenshot itself still succeeds and is still sent.",
     "locales": {
       "zh": {
-        "name": "VLM 超时时间",
-        "hint": "VLM描述超时时间（秒），超过此时间将跳过描述"
-      }
-    }
-  },
-  "screenshot_max_count": {
-    "name": "Screenshot Max Count",
-    "type": "integer",
-    "default": 50,
-    "hint": "Maximum number of screenshot files to retain, older screenshots will be automatically deleted (default is 50)",
-    "locales": {
-      "zh": {
-        "name": "截图最大数量",
-        "hint": "截图文件最大保留数量，超出后会自动删除最旧的截图（默认50张）"
-      }
-    }
-  },
-  "screenshot_auto_clean": {
-    "name": "Screenshot Auto Clean",
-    "type": "boolean",
-    "default": true,
-    "hint": "Whether to automatically clean up old screenshot files (true=enable auto clean, false=disable)",
-    "locales": {
-      "zh": {
-        "name": "截图自动清理",
-        "hint": "是否自动清理旧截图文件（true=开启自动清理，false=关闭）"
-      }
-    }
-  },
-  "cookies_dir": {
-    "name": "Cookies Directory",
-    "type": "string",
-    "default": "data/files/cookie",
-    "hint": "Cookie file storage directory, stores cookie JSON files for each website. The plugin automatically loads all .json format cookie files in this directory when starting (e.g., chatgpt.json, claude.json, etc.). If the directory does not exist, it will be created automatically. When sharing the plugin, this directory is kept separate and not packaged with the plugin for security isolation.",
-    "locales": {
-      "zh": {
-        "name": "Cookie目录",
-        "hint": "Cookie文件存放目录，存放各网站的cookie JSON文件。插件启动时自动加载此目录下所有.json格式的cookie文件（如 chatgpt.json、claude.json 等）。目录不存在会自动创建，分享插件时此目录独立在外，不随插件打包，安全隔离。"
-      }
-    }
-  },
-  "upload_allow_any_path": {
-    "name": "Upload Any Path",
-    "type": "switch",
-    "default": true,
-    "hint": "Whether to allow uploading files from any directory (true=allow uploading files from any path, false=only allow uploading files from directories configured in upload_allowed_dirs)",
-    "locales": {
-      "zh": {
-        "name": "上传任意路径",
-        "hint": "是否允许上传任意目录的文件（true=允许上传任何路径的文件，false=仅允许上传upload_allowed_dirs中配置的目录内的文件）"
-      }
-    }
-  },
-  "upload_allowed_dirs": {
-    "name": "Upload Allowed Directories",
-    "type": "list",
-    "default": [
-      "data/files",
-      "data/temp"
-    ],
-    "hint": "Allowed directories for file uploads (one per line, relative paths based on the plugin's working directory), only effective when upload_allow_any_path is false",
-    "locales": {
-      "zh": {
-        "name": "上传允许的目录",
-        "hint": "允许上传的目录白名单（每行一个，相对路径基于插件运行目录），仅在upload_allow_any_path为false时生效"
+        "name": "VLM 超时（秒）",
+        "hint": "等待 VLM 描述的超时时间。超时会跳过描述 —— 截图本身仍然成功、也仍然会发给你，只是 bot 这次没拿到描述。"
       }
     }
   }
