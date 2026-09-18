@@ -253,6 +253,9 @@ export const STORE = {
   /** 用户是否手动点过「断开」—— 必须持久化：
    *  MV3 的 Service Worker 会被回收，内存标记撑不过一次回收。 */
   USER_DISCONNECTED: "kb_user_disconnected",
+  /** 已配对的 KiraAI 实例列表（可以同时有多个 —— 扩展会**全部连上**）。
+   *  老版本存的是单个 HOST/PORT/TOKEN，读取时会自动迁移成这个列表。 */
+  INSTANCES: "kb_instances",
 };
 
 // ─── 零配置接入（自动发现 KiraAI 实例）────────────────────────────────────

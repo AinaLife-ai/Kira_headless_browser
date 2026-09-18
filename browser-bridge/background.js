@@ -59,16 +59,46 @@ async function setStatus(patch) {
   await chrome.storage.local.set({ [STORE.LAST_STATUS]: next });
 }
 
-async function getConfig() {
+/** 已配对的实例列表（扩展会**全部连上**，不是挑一个）。
+ *
+ *  ⚠️ 老版本只存单个 host/port/token —— 这里做一次性迁移，
+ *     否则升级上来的用户会突然"一个都连不上"。
+ *  ⚠️ 这个函数**必须**返回 `instances` 数组：调用方直接读 `.length`，
+ *     返回 undefined 会在 bootstrap 阶段就抛异常、整个扩展起不来。
+ */
+// 导出给**冒烟测试**用：`getConfig()` 的返回形状是调用方直接依赖的
+// （`cfg.instances.length`），漏了就会在 bootstrap 阶段炸掉整个扩展。
+export async function getConfig() {
   const s = await chrome.storage.local.get([
-    STORE.TOKEN, STORE.HOST, STORE.PORT, STORE.AUTO_CONNECT,
+    STORE.INSTANCES, STORE.AUTO_CONNECT, STORE.HOST, STORE.PORT, STORE.TOKEN,
   ]);
+  let list = s[STORE.INSTANCES];
+  if (!Array.isArray(list)) {
+    list = [];
+    if (s[STORE.TOKEN]) {
+      list.push({
+        host: s[STORE.HOST] || "127.0.0.1",
+        port: Number(s[STORE.PORT]) || 5267,
+        token: s[STORE.TOKEN],
+        label: "",
+      });
+    }
+  }
   return {
-    token: s[STORE.TOKEN] || "",
-    host: s[STORE.HOST] || "127.0.0.1",
-    port: s[STORE.PORT] || 5267,
+    instances: list.filter((x) => x && x.token && Number(x.port) > 0),
     autoConnect: s[STORE.AUTO_CONNECT] !== false,
   };
+}
+
+/** 把一个实例写进列表（按 host:port 去重，已存在就更新令牌与标签）。 */
+export async function upsertInstance(inst) {
+  const cfg = await getConfig();
+  const key = (x) => `${x.host || "127.0.0.1"}:${Number(x.port)}`;
+  const list = cfg.instances.filter((x) => key(x) !== key(inst));
+  list.push(Object.assign({ host: "127.0.0.1", label: "" }, inst,
+                          { port: Number(inst.port) }));
+  await chrome.storage.local.set({ [STORE.INSTANCES]: list });
+  return list;
 }
 
 // ─── 零配置接入：自动发现本机的 KiraAI 实例 ──────────────────────────────────
@@ -435,7 +465,7 @@ function scheduleReconnect(link) {
 }
 
 /** 保活与自愈：alarms 唤醒后调用（对所有连接生效）。 */
-async function ensureAlive() {
+export async function ensureAlive() {
   const cfg = await getConfig();
   if (!cfg.autoConnect || !cfg.instances.length) return;
   // ⚠️ 必须从 storage 读，不能只看内存里的 state ——
