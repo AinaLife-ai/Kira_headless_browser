@@ -534,6 +534,22 @@ class BrowserBridge:
         else:
             self._event_listeners.setdefault(name, []).append(callback)
 
+    def clear_event_listeners(self) -> None:
+        """清空所有已注册的事件回调。
+
+        为什么需要：框架**热重载插件**时会重新走一遍 ``initialize()``，
+        而 ``on_event`` 是**追加**语义 —— 不清的话回调会一次次累积，
+        同一个事件被重复处理（`_on_user_confirmed` 这类还会重复推进状态）。
+
+        ⚠️ 这个方法名是被 `main.py` 的 ``initialize()`` 调用的：写漏了就是
+        **插件直接起不来**（``AttributeError``，日志里只有一行
+        "Failed to initialize plugin"）。而它是在**协作者对象**上调用
+        （``self.bridge.xxx()``），当时的调用图检查只扫 ``self.xxx()``，
+        所以没抓到 —— 现在检查已经补上那一类（callgraph B1）。
+        """
+        self._event_listeners.clear()
+        self._any_listener.clear()
+
     async def _dispatch_event(self, name: str, data: dict) -> None:
         callbacks = list(self._event_listeners.get(name, [])) + list(self._any_listener)
         for cb in callbacks:

@@ -489,6 +489,49 @@ python -m playwright install chromium
 <details>
 <summary><b>2.1.x</b> — 49 个版本　·　最新的一系列：双后端重构、安全加固、以及大量审查修复</summary>
 
+### v2.1.50（2026-09-18）
+
+**紧急修复：插件起不来。**
+`Failed to initialize plugin headless_browser: 'BrowserBridge' object has no
+attribute 'clear_event_listeners'`
+
+#### 怎么回事
+
+`main.py` 的 `initialize()` 里有一行：
+
+```python
+# 事件回调（先清再注册，热重载不会重复累积）
+self.bridge.clear_event_listeners()      # ← 这个方法从来没实现过
+```
+
+`BrowserBridge` 只有 `on_event` / `_dispatch_event` —— **没有
+`clear_event_listeners`**。于是 `initialize()` 一跑到这行就
+`AttributeError`，插件**整个起不来**（不是某个功能坏了，是插件加载失败）。
+
+#### 为什么所有检查都没抓到
+
+仓库里本来就有 **A1「`self.xxx()` 调用了但类里没定义」** 这条检查 ——
+正是为这类"语法合法、一跑就崩"的问题准备的。但它只扫 **`self.xxx()`**，
+而这一行是 **`self.bridge.xxx()`**（在**协作者对象**上调用），不在它的覆盖范围。
+
+#### 修法
+
+1. **补上方法**：`BrowserBridge.clear_event_listeners()` 清空
+   `_event_listeners` 与 `_any_listener`（就是那行注释说的语义）
+2. **补上检查 B1**：把调用图检查扩到**协作者对象上的调用** ——
+   先收集 `self.X = SomeClass(...)` 的绑定，再验证 `self.X.method()`
+   里的 `method` 在 `SomeClass` 上真的存在。
+   反向验证：把 `clear_event_listeners` 删掉 → B1 立刻报红并点名到行：
+   `main.py:270 BrowserPlugin.self.bridge.clear_event_listeners() ——
+   BrowserBridge 里没有 clear_event_listeners()`
+
+> 只有**插件自己定义的类**会被查（`Lock` 这类框架对象跳过），
+> 避免误报。
+
+#### 结果
+
+回归套件 **348/348 全绿**（新增 B1 后）。版本 2.1.49 → 2.1.50。
+
 ### v2.1.49（2026-09-17）
 
 **工具定义瘦身 40%**：13 个工具 → 10 个，每次请求的工具 schema 从
