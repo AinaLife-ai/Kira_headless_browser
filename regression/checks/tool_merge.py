@@ -273,8 +273,16 @@ def run(r) -> None:
     # ⚠️ 必须限定在 **execJs 函数体内部**：只查"cap 里出现过
     #    chrome.userScripts.execute"是不够的 —— 别处（比如 ensureUserScripts）
     #    也可能提到它，execJs 自己改成别的方式实现照样能通过。
-    _ej = cap.split("async function execJs(")[-1].split("async function upload(")[0] \
-        if "async function execJs(" in cap else ""
+    # ⚠️ 边界要卡在**下一个顶层函数**，不能用写死的 `async function upload(`
+    #    —— 那个名字一旦被改/被挪到前面，截取就会一路延伸到文件末尾，
+    #    于是**后面任意函数**里出现的 `chrome.userScripts.execute` 都会算数，
+    #    而"作用域"正是这条断言存在的理由。
+    _ej = ""
+    if "async function execJs(" in cap:
+        _ej = cap.split("async function execJs(")[-1]
+        _ej_end = _ej.find("\nasync function ")
+        if _ej_end > 0:
+            _ej = _ej[:_ej_end]
     r.ok("C6 扩展侧实现 exec_js（execJs 函数体内走 chrome.userScripts.execute）",
          bool(_ej) and "chrome.userScripts.execute" in _ej,
          "必须在 execJs 自己的实现里出现")

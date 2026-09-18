@@ -278,6 +278,15 @@ def run(r) -> None:
     # A14 硬编码的插件 id 必须与 manifest 一致
     #     （面板 API 路径 / WS 路径 / 扩展路径都依赖它，
     #      对不上就是 404 或连不上，而且"看起来都写对了"）
+    #
+    #  ⚠️ 原来只扫 `web/index.html` 与 `browser-bridge/protocol.js`，
+    #     于是**文档字符串里的路由**漏了 —— 实测 `bridge.py` 的文件头一直
+    #     写着 `/ws/plugin/kira_browser_bridge/bridge`（旧 id），
+    #     而真正的代码、扩展、面板早就都是 `headless_browser`。
+    #     文档里的错路径危害在于"照着它去配就 404"。
+    #     这里把 `.py` 的文本也纳入扫描（只认**路由形态**的引用，
+    #     不把 `plugin_data/<旧id>` 这类目录名算进来 —— 那是另一回事，
+    #     见 tokens.py 的说明）。
     pid = man.get("plugin_id") or ""
     hard = []
     if not pid:
@@ -286,7 +295,9 @@ def run(r) -> None:
         r.ok("A14 硬编码的插件 id 与 manifest 一致", False,
              "manifest 缺 plugin_id，无法比对")
         pid = "headless_browser"
-    for rel in ("web/index.html", "browser-bridge/protocol.js"):
+    for rel in ("web/index.html", "browser-bridge/protocol.js",
+                "bridge.py", "main.py", "setup_guide.py", "backends/base.py",
+                "backends/extension_backend.py", "backends/headless_backend.py"):
         if not exists(rel):
             continue
         body = src_safe(rel)
@@ -590,8 +601,15 @@ def run(r) -> None:
     #    SW 峰值 ≈0.3MB（恒定），页面侧峰值 ≈1.0× 文件大小。
     _cap3 = ext_file("capabilities.js")
     _content3 = ext_file("content.js")
-    _cap_up = _cap3.split("async function upload(")[-1].split("async function uploadAbort(")
-    _cap_up = _cap_up[0] if len(_cap_up) > 1 else _cap3
+    # ⚠️ 边界卡在**下一个顶层函数**处，不要写死 `async function uploadAbort(`
+    #    —— 那个名字一旦被改/被挪走，回退分支会把**整个文件**当成 upload 的实现，
+    #    于是任意函数里的 `parts.push` 都会算进来 → 误报"SW 在累积"。
+    _cap_up = ""
+    if "async function upload(" in _cap3:
+        _cap_up = _cap3.split("async function upload(")[-1]
+        _up_end = _cap_up.find("\nasync function ")
+        if _up_end > 0:
+            _cap_up = _cap_up[:_up_end]
     _accum = ("parts.push" in _cap_up or ".push(data)" in _cap_up
               or "chunks.push" in _cap_up or "join(" in _cap_up)
     r.ok("C16h SW 侧上传只转发、不累积文件内容（内存不随文件增长）",

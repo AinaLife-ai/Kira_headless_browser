@@ -3,7 +3,7 @@
 设计要点：
 
 1. **扩展主动连出**。浏览器扩展无法监听端口，所以由扩展作为 WebSocket 客户端
-   连到 KiraAI 的 ``/ws/plugin/kira_browser_bridge/bridge``。
+   连到 KiraAI 的 ``/ws/plugin/headless_browser/bridge``。
 
 2. **请求/应答配对**。插件下发 ``cmd``（带唯一 ``id``），为每个 id 建一个
    ``asyncio.Future``，扩展返回 ``result`` 时按 id 唤醒。这样 Tool 调用可以

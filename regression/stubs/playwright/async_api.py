@@ -352,7 +352,14 @@ class _Chromium:
     async def launch_persistent_context(self, user_data_dir, **kw):
         if ALL_LAUNCHES_FAIL:
             raise RuntimeError("fake: persistent launch failed")
-        return FakeContext(browser=None, **kw)
+        # ⚠️ 真实的 `launch_persistent_context` 返回的上下文里**已经有一张
+        #    页面**（初始 about:blank）。桩原来给的是空 pages，于是
+        #    `_replace_page()` 在"复用现有标签"和"新建"之间走了**另一条分支**
+        #    —— 生产上第一次是**复用初始页**，桩里却是新建，
+        #    "页面复用/回收"相关的检查就在一个假世界里验。
+        context = FakeContext(browser=None, **kw)
+        context.pages.append(FakePage(context))
+        return context
 
 
 class _Playwright:

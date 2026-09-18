@@ -67,6 +67,20 @@ async def main():
     got = await ctx.cookies()
     got[0]["value"] = "MUTATED"
     out["copy"] = all(c["value"] != "MUTATED" for c in await ctx.cookies())
+
+    # 持久化上下文必须带**一张初始页** —— 真实的
+    # `launch_persistent_context` 就是这样，而插件默认走的就是这条路
+    # （profile 恒为真）。桩里给空 pages 的话，`_replace_page()` 在
+    # "复用现有标签"和"新建"之间会走**另一条分支**，
+    # 页面复用/回收相关的检查就在一个假世界里验。
+    from playwright.async_api import async_playwright
+    _pw = await async_playwright().start()
+    _pc = await _pw.chromium.launch_persistent_context("/tmp/fake-profile")
+    out["persistent_has_initial_page"] = len(_pc.pages) == 1
+    _br = await _pw.chromium.launch()
+    _plain = await _br.new_context()
+    out["plain_context_starts_empty"] = len(_plain.pages) == 0
+    await _pw.stop()
     print("RESULT:" + json.dumps(out))
 
 asyncio.run(main())
@@ -395,6 +409,11 @@ def run(r) -> None:
         ("subdomain", "子域命中父域 cookie"),
         ("no_match", "不相关域名不返回"),
         ("no_url", "不传 url 时返回全部"),
+        # H4：桩与真实 Playwright 的**结构**差异（启动形态 / 页面集合）
+        ("persistent_has_initial_page",
+         "持久化上下文带一张初始页（真实行为）"),
+        ("plain_context_starts_empty",
+         "普通 new_context() 初始没有页面（两者不能混为一谈）"),
     ]:
         r.ok(f"H3.{_k} {_desc}",
              _res.get(_k) is True,

@@ -215,8 +215,15 @@ def run(r) -> None:
     #      **事后检查最终 URL**：起始是 HTTPS 却落在 HTTP 上就中止。
     #    所以这里守两条：凭据按协议条件 + 有"最终落在 HTTP 就中止"的检查。
     cap = src_safe("browser-bridge/capabilities.js")
-    _dl = cap.split("async function downloadViaSession(")[-1].split("// ───")[0] \
-        if "async function downloadViaSession(" in cap else ""
+    # ⚠️ 边界卡在**下一个顶层函数**处 —— 原来切到 `// ───` 这个注释分隔符，
+    #    分隔符一旦被删/被改，截取就会一路延伸到文件末尾，
+    #    后面任意函数里出现的 `resp.url` 之类都会算数。
+    _dl = ""
+    if "async function downloadViaSession(" in cap:
+        _dl = cap.split("async function downloadViaSession(")[-1]
+        _dl_end = _dl.find("\nasync function ")
+        if _dl_end > 0:
+            _dl = _dl[:_dl_end]
     # 只剥注释（保留字符串，判据要看选项字面量）
     _dl_code = strip_comments_only(_dl)
     _no_manual = 'redirect: "manual"' not in _dl_code

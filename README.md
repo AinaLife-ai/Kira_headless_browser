@@ -1,4 +1,4 @@
-# 浏览器插件 (Browser Plugin) 2.1.46
+# 浏览器插件 (Browser Plugin) 2.1.47
 
 > 让 KiraAI 拥有**完全真实、全能**的浏览器操作能力。
 
@@ -510,6 +510,81 @@ python -m playwright install chromium
 ---
 
 ## 更新日志
+
+### v2.1.47（2026-09-17）
+
+**CodeRabbit 第四十七轮：4 条（3 条采纳、1 条部分不采纳）+ 同类自查 2 处。**
+
+#### ① 陈旧的路由引用：`bridge.py` 的文件头（采纳）
+
+`bridge.py` 的模块文档写着扩展连到
+``/ws/plugin/kira_browser_bridge/bridge`` —— 那是**旧插件 id**。
+真正的代码、扩展、面板早就是 `headless_browser` 了。危害不在运行
+（那只是注释），而在**照着它去配就是 404**。
+
+→ 改成 `headless_browser`；`extension_backend` 的类文档里那句
+"包装 kira_browser_bridge 的 BrowserBridge" 一并改成"与浏览器扩展之间的
+BrowserBridge"（说的是**当前**这个类，用旧插件名会误导）。
+
+**⚠️ 但不采纳的部分**：`main.py` 顶部那段历史叙述里的
+`kira_browser_bridge` **保留** —— 它写的是"**原来的两个插件**"（合并前的
+`headless_browser` 和 `kira_browser_bridge`），是**准确的历史**，
+改掉反而会让合并的来龙去脉讲不通。README 里那条同类注记同理。
+
+**顺带补了检查的洞**：A14（"硬编码的插件 id 必须与 manifest 一致"）
+原来**只扫 `web/index.html` 和 `browser-protocol.js`** ——
+所以 `bridge.py` 文档里这个错路径一直没被抓住。
+→ 扫描范围扩到 `.py`（`bridge.py` / `main.py` / `setup_guide.py` /
+`backends/*.py`）。反向验证：把旧路径写回去，A14 立刻报红并点名到行。
+
+#### ② 注释与实现不符（`regression/checks/__init__.py`）（采纳）
+
+注释写着 `#: (模块, 是否默认启用)`，但 `ALL_CHECKS` 里的元素**就是模块**，
+`run_all.py` 直接取 `m.TITLE` / 调 `m.run(report)`。
+照着注释加一个元组进去，跑到那里就是 `AttributeError`。
+→ 注释改正，并写明"要新增检查：import 进来，加到这个列表里即可"。
+
+#### ③ `execJs` 的截取边界写死了 `upload`（`tool_merge`）（采纳）
+
+`cap.split("async function execJs(")[-1].split("async function upload(")[0]`
+—— 边界依赖"`upload` 恰好排在 `execJs` 后面"。一旦 `upload` 改名或换位置，
+截取就**延伸到文件末尾**，于是后面**任意**函数里的
+`chrome.userScripts.execute` 都会算数 —— 而"作用域"正是这条断言存在的理由。
+
+→ 改成卡在**下一个顶层函数**处。
+**实测**：把 `upload` 改名后，旧边界从 4341 字符暴涨到 **13186**
+（= 整段剩余的 100%），新边界稳定不变。
+
+#### ④ 桩的持久化上下文缺初始页（`regression/stubs/playwright`）（采纳）
+
+真实的 `launch_persistent_context` 返回的上下文里**已经有一张页面**，
+而桩给的是空 `pages`。这不只是"少了张页"——**插件默认走的就是这条路**
+（profile 恒为真），于是"复用现有标签 vs 新建"这条分支在测试里
+**和生产走了不同的路**。
+
+→ 桩里补上初始页。
+**但我要说清楚：这一条我给不出强的行为判别**（两种写法下
+`pages_created` 与 `_page is pages[0]` 都相同），所以没写那种
+"怎么改都能过"的弱断言，而是直接在 **H3 探针**里断言桩的**结构事实**：
+持久化上下文带 1 张初始页、普通 `new_context()` 初始为空
+（反向验证：去掉初始页 → 前者报红、后者仍绿）。
+
+#### 同类自查（抓 2 处）
+
+按 ③ 的模式扫所有"按函数名切分函数体"的写法：
+
+| 位置 | 问题 |
+|---|---|
+| `static_audit` 的 upload 切片 | 边界写死 `uploadAbort`，找不到时**回退成整个文件** → 误报"SW 在累积" |
+| `security_rules` 的 download 切片 | 边界是注释分隔符 `// ───`，被删就延伸到文件末尾 |
+
+两处都改成"下一个顶层函数"。
+（另两处 `tool_merge` / `runtime_behavior` 的同类写法**已经有正确边界**，未动。）
+
+#### 结果
+
+`regression/run_all.py` → **345/345，16 组全绿**；`pyflakes` 干净。
+版本 2.1.46 → 2.1.47。
 
 ### v2.1.46（2026-09-17）
 

@@ -25,7 +25,11 @@ from . import (
     execjs_gates,
 )
 
-#: (模块, 是否默认启用)
+#: 检查**模块**列表（按顺序执行）。
+#  ⚠️ 元素就是模块本身，不是 `(模块, 是否启用)` 元组 ——
+#    `run_all.py` 直接取 `m.TITLE` / 调 `m.run(report)`，
+#    写成元组会在跑的时候抛 AttributeError。
+#    要新增检查：import 进来，加到这个列表里即可。
 ALL_CHECKS = [
     static_audit,        # 静态一致性 / README / 历史回归 / 运行时坑 / 打包
     tool_merge,          # 工具合并零丢失

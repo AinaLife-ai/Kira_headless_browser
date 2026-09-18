@@ -23,7 +23,7 @@ logger = get_logger("browser_merged", "cyan")
 
 
 class ExtensionBackend(Backend):
-    """包装 kira_browser_bridge 的 BrowserBridge。"""
+    """包装与浏览器扩展之间的 BrowserBridge。"""
 
     name = "extension"
     is_user_browser = True
