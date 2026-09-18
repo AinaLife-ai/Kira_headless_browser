@@ -140,6 +140,16 @@ export async function probePort(port, timeoutMs) {
 async function applyPair(hit) {
   const host = hit.host || "127.0.0.1";
   const port = Number(hit.port) || 5267;
+  // ⚠️ 必须写**新格式**（instances 列表），不能只写旧版单实例键。
+  //    原来这里只 `set({kb_host, kb_port, kb_token})`，而 `getConfig()`
+  //    仅在 `kb_instances` **不是数组**时才把旧键迁移成列表 ——
+  //    于是"已经配对过实例"的用户再配一个新的（比如点「自动检测」），
+  //    新实例会被**静默丢弃**：界面看着像成功了，实际什么都没变。
+  await upsertInstance({
+    host, port, token: hit.token, label: hit.label || "",
+  });
+  // 旧键同步写一份：万一用户回滚到老版本还能用（且此时列表已是数组，
+  // migration 不会再拿旧键去覆盖它）。
   await chrome.storage.local.set({
     [STORE.HOST]: host,
     [STORE.PORT]: port,
