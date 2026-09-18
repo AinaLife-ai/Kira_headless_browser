@@ -100,6 +100,13 @@ try {
 
   if (scenario.action === "connect") {
     out.result = await mod.connect({ manual: true });
+  } else if (scenario.action === "auto_only") {
+    // ⚠️ **什么都不调** —— 只加载模块，让顶层的 bootstrap 自己跑。
+    //    这才是"安装即用"的真路径：真实用户装上扩展后，没有任何人
+    //    会去调 connect({manual:true})。
+    //    之前的场景全都显式调了 connect({manual:true})，而 manual
+    //    会**强制清掉 userDisconnected 闸门**再连 —— 等于把自动路径的
+    //    前置条件全绕过去了。这是个假的绿灯。
   } else if (scenario.action === "discover") {
     out.result = await mod.discover({ timeoutMs: 400 });
   } else if (scenario.action === "page_pair") {
@@ -311,6 +318,21 @@ def run(r) -> None:
                     out.append(True)
                 await asyncio.sleep(0.05)
 
+        # ── 场景 0：**纯自动**（真·安装即用）──────────────────────────
+        #    只加载模块、什么都不调 —— 顶层 bootstrap 自己应当完成
+        #    "发现 → 配对 → 连上"。前面所有场景都显式调了
+        #    `connect({manual:true})`，而 manual 会**强制清掉 userDisconnected
+        #    闸门**再连，等于把自动路径的前置条件绕过去了 —— 那是假绿灯。
+        _seen0, _stop0 = [], asyncio.Event()
+        _task0 = asyncio.create_task(_sample(_seen0, _stop0))
+        results["auto"] = await _run_node(node, client_path, {
+            "action": "auto_only", "storage": {}, "settle_ms": 4000,
+        })
+        _stop0.set()
+        _task0.cancel()
+        results["auto_bridge_connected"] = bool(_seen0)
+        await bridge.close()
+
         # ── 场景 1：全新安装（chrome.storage 全空）→ 自动发现 → 连上 ──
         state["reported_port"] = port          # 第一次：正常报端口
         _seen, _stop = [], asyncio.Event()
@@ -437,6 +459,22 @@ async def _run_node(node: str, script: Path, scenario: dict) -> dict:
 def run_results(r, holder, results) -> None:
     port = holder.get("port")
 
+    # ── 场景 0：**纯自动**（真·安装即用）────────────────────────────
+    #    这条是这一组里最重要的：真实用户装上扩展后，**没有任何人**会去调
+    #    `connect({manual:true})`。而必须靠顶层 bootstrap 自己完成
+    #    "自动发现 → 配对 → 连上"。
+    #    ⚠️ 之前的场景全都显式调了 `connect({manual:true})`，而 manual 会
+    #       **强制清掉 userDisconnected 闸门**再连 —— 把自动路径的前置条件
+    #       全绕过去了，属于假绿灯。这条补上。
+    auto = results.get("auto") or {}
+    if auto.get("fatal"):
+        r.ok("P1 纯自动：装载扩展后无需任何调用即可连上", False, auto["fatal"][:300])
+    else:
+        a_st = auto.get("status") or {}
+        r.ok("P1 纯自动路径：装载后无人调用 connect()，扩展自己完成发现→配对→连上",
+             bool(a_st.get("connected")) and bool(results.get("auto_bridge_connected")),
+             f"状态={a_st} 桥侧 connected={results.get('auto_bridge_connected')}")
+
     # ── 场景 1：全新安装 ──────────────────────────────────────────────
     fresh = results.get("fresh") or {}
     if fresh.get("fatal"):
@@ -525,6 +563,44 @@ def run_results(r, holder, results) -> None:
     # ── P11：探不到时给的两条路**都真的存在** ────────────────────────
     _err = _bg[_bg.find("没有在本机找到 KiraAI 实例"):][:260] \
         if "没有在本机找到 KiraAI 实例" in _bg else ""
+    # ── P12：插件侧引导文案不能停在**手动粘贴令牌**的老流程上 ─────────
+    #    ⚠️ 老文案是"点扩展图标 → 把「接入令牌」粘进去 → 点连接" ——
+    #       那是手动流程，早就不是主路径了（现在装完自己连；扫不到也能靠
+    #       "打开面板即配对"）。照老文案做，用户会以为"必须手填令牌"，
+    #       还跟扩展弹窗里写的"点「自动检测」即可，不用手填"**自相矛盾**。
+    #    ⚠️ 要查**渲染出来的文本**，不是源码 —— `strip_comments_only` 是给
+    #       JS 写的（认 // 和 /*），剥不掉 Python 的 `#` 注释，
+    #       于是判据会被注释里"以前那句老话"命中（首跑就是这么误报的）。
+    #       而渲染后的文本正是用户真正看到的东西，比对源码更贴近事实。
+    _bad12 = []
+    try:
+        # runtime_behavior 已经用同一套桩把 setup_guide 载进 sys.modules 了
+        from . import runtime_behavior as _rb
+        _rb._load_plugin()
+        _sg_mod = sys.modules.get("kirabrowser_rt.setup_guide")
+        if _sg_mod is None:
+            raise RuntimeError("setup_guide 没被加载进 sys.modules")
+        _sg = _sg_mod.first_run_notice(
+            PLUGIN_DIR, connected=False,
+            browsers=[{"name": "edge", "path": "x"}]) or ""
+    except Exception as _e:
+        _sg = ""
+        _bad12.append(f"渲染引导失败: {type(_e).__name__}: {_e}")
+    if "粘进去" in _sg or "复制接入令牌" in _sg:
+        _bad12.append("还在教用户手动粘令牌")
+    if "打开就会自动配对" not in _sg:
+        _bad12.append("没提'打开面板即自动配对'这条主路径")
+    if "自动检测" not in _sg:
+        _bad12.append("没提弹窗的「自动检测」")
+    r.ok("P12 安装引导与当前流程一致（不是老的手动粘贴流程）", not _bad12,
+         f"问题={_bad12 or '无'}")
+
+    # ── P13：扩展弹窗要显示版本号（排查"你装的是哪一版"）────────────
+    r.ok("P13 扩展弹窗显示版本号",
+         'id="ver"' in src_safe("browser-bridge/popup.html")
+         and "getManifest().version" in src_safe("browser-bridge/popup.js"),
+         "没有版本号的话，用户报问题时分不清是新版还是没更新")
+
     r.ok("P11 探不到时给的指引和真实功能对得上",
          "插件面板" in _err and "手动填" in _err,
          f"当前指引={_err[:150]}")

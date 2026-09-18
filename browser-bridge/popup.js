@@ -246,5 +246,13 @@ document.addEventListener("keydown", (e) => {
 
 // ─── 启动 ────────────────────────────────────────────────────────────────────
 
+// 版本号：装在弹窗标题旁。
+// ⚠️ 用户报"装了还是连不上"时，第一件要问清楚的就是**他装的是哪一版** ——
+//    以前弹窗不显示版本，没法确认他是没更新、还是新版真有 bug。
+try {
+  const v = chrome.runtime.getManifest().version;
+  if (v) $("ver").textContent = "v" + v;
+} catch (_) { /* 拿不到就不显示，不影响其它功能 */ }
+
 loadConfig().then(refresh);
 setInterval(refresh, 2000);
