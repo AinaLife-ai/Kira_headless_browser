@@ -1,15 +1,15 @@
 {
-  "display_name": "Browser",
+  "display_name": "All-in-One Browser",
   "plugin_id": "headless_browser",
   "version": "2.1.48",
   "icon": "icon.png",
   "author": "nyx+znq19+萧洋",
-  "description": "One browser plugin, two fully-symmetric backends, 12 action-based tools. Drives YOUR browser through the extension (real login state, zero conflict) or a plugin-owned headless Chromium. Both backends support read/click/type/JS/upload/download/cookies/keyboard/mouse. CPU/memory guarded, idle auto-close, page self-healing.",
+  "description": "Does almost everything you can do in a browser: open pages, read content, click, type, upload and download files, run JavaScript, carry logins across, and even drive the keyboard and mouse. With the bundled extension it works inside the browser you already have open (your logins, no conflict); without it, it spins up its own headless browser - both paths do exactly the same things.",
   "repo": "https://github.com/Qixuan112/Kira_headless_browser",
   "locales": {
     "zh": {
-      "display_name": "浏览器",
-      "description": "一个插件、两个能力完全对称的后端、12 个动作式工具。扩展连上就用你自己的浏览器（真实登录态、零冲突），没连上自动用插件自带的无头 Chromium。两个后端都支持 读/点击/输入/执行JS/上传/下载/Cookie/键盘鼠标 全套能力。含 CPU 内存防护、空闲自动关闭、页面自愈。"
+      "display_name": "全能浏览器",
+      "description": "人在浏览器里能做的事，它基本都能做：打开网页、读懂内容、点击、输入、上传下载、执行 JavaScript、搬运登录状态，键盘鼠标也能模拟。装了配套扩展就用你自己开着的浏览器（登录状态现成、互不打扰），没装就用它自带的无头浏览器 —— 两条路能力完全一样。"
     }
   }
 }

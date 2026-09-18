@@ -55,10 +55,17 @@ def main() -> int:
         return 1
 
     print("=" * 76)
-    print("KiraAI 浏览器插件 · 回归测试")
+    print("KiraAI 全能浏览器 · 回归测试")
     # ⚠️ 打印**检查实际用的**目录（可能被 KIRA_PLUGIN_DIR 覆盖），
     #    写死 HERE.parent 会在多副本/反向验证时把人误导到别的树。
     from regression.harness import PLUGIN_DIR as _PD
+    # ⚠️ 确保 `data/` 存在。
+    #    框架启动时会自己建这个目录，而几个**行为探针**是直接 import 框架的
+    #    片段来跑的、绕过了那一步 —— 于是框架的日志 handler 打不开
+    #    `data/log.log` 而抛 FileNotFoundError，探针非零退出、两条 B0 报红。
+    #    全新克隆里 `data/` 不存在（它没被跟踪），所以一 clone 就是红的，
+    #    看着像"项目坏了"。这里补上，等价于框架本来就会做的那一步。
+    (_PD / "data").mkdir(parents=True, exist_ok=True)
     print(f"插件目录: {_PD}")
     print(f"检查项  : {len(selected)} 组")
     print("=" * 76)
