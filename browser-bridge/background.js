@@ -91,7 +91,7 @@ export async function getConfig() {
 }
 
 /** 把一个实例写进列表（按 host:port 去重，已存在就更新令牌与标签）。 */
-async function upsertInstance(inst) {
+export async function upsertInstance(inst) {
   const cfg = await getConfig();
   const key = (x) => `${x.host || "127.0.0.1"}:${Number(x.port)}`;
   const list = cfg.instances.filter((x) => key(x) !== key(inst));
@@ -465,7 +465,7 @@ function scheduleReconnect(link) {
 }
 
 /** 保活与自愈：alarms 唤醒后调用（对所有连接生效）。 */
-async function ensureAlive() {
+export async function ensureAlive() {
   const cfg = await getConfig();
   if (!cfg.autoConnect || !cfg.instances.length) return;
   // ⚠️ 必须从 storage 读，不能只看内存里的 state ——

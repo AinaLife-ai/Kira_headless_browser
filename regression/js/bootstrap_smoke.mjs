@@ -85,10 +85,33 @@ push("老配置能迁移成列表",
      && cfg2.instances[0].token === "T1",
      JSON.stringify(cfg2.instances));
 
-// 空配置下 connect 也不能炸（会走自动发现）
+// ── 三条**入口**各跑一遍 ────────────────────────────────────────────────
+//  出事的报错是三个不同的入口（bootstrap / oninstalled / keepalive），
+//  但根因同一个：都读 `cfg.instances.length`。
+//  所以这里逐个把它们跑一遍，而不是只看 getConfig 的形状。
 let connectErr = "";
 try { await mod.connect({ manual: true }); } catch (e) { connectErr = String(e); }
-push("空配置下 connect() 不抛异常", connectErr === "", connectErr.slice(0, 140));
+push("空配置下 connect() 不抛异常（bootstrap 路径）", connectErr === "",
+     connectErr.slice(0, 140));
+
+let aliveErr = "";
+try { await mod.ensureAlive(); } catch (e) { aliveErr = String(e); }
+push("空配置下 ensureAlive() 不抛异常（keepalive 路径）", aliveErr === "",
+     aliveErr.slice(0, 140));
+
+let discErr = "";
+try { await mod.discover({ timeoutMs: 30 }); } catch (e) { discErr = String(e); }
+push("discover() 不抛异常（自动发现路径）", discErr === "", discErr.slice(0, 140));
+
+// ensureAlive 在**有**配对实例时也不能炸
+let upErr = "", alive2 = "";
+try {
+  await mod.upsertInstance({ host: "127.0.0.1", port: 6000, token: "T1", label: "" });
+} catch (e) { upErr = String(e); }
+push("upsertInstance() 不抛异常（点手动添加的路径）", upErr === "",
+     upErr.slice(0, 140));
+try { await mod.ensureAlive(); } catch (e) { alive2 = String(e); }
+push("有实例时 ensureAlive() 也不抛异常", alive2 === "", alive2.slice(0, 140));
 
 console.error = realErr;
 console.log("RESULT:" + JSON.stringify(results));
