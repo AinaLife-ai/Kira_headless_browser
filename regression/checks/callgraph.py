@@ -125,6 +125,68 @@ def run(r) -> None:
     for u in undefined:
         r.note(f"   ❗ {u}")
 
+    # ── B1. 在**协作者对象**上调用不存在的方法 ───────────────────────
+    #  ⚠️ A1 只扫 `self.xxx()`。而 `self.bridge.clear_event_listeners()`
+    #    这种**在成员对象上**的调用它看不到 —— 实测就是它漏掉了：
+    #    `BrowserBridge` 少了 `clear_event_listeners()`，
+    #    `initialize()` 一跑到那行就 AttributeError，
+    #    **整个插件起不来**，日志里只有一行 "Failed to initialize plugin"。
+    #    这类调用和 A1 一样阴险：语法检查看不出来，一跑就崩。
+    _cls_methods = {}          # 类名 -> 该类"存在的东西"（方法 + 类属性 + 赋值）
+    _cls_of = {}               # (类名, 属性名) -> 目标类名
+    _calls = []                # (文件, 行, 外层类, 属性, 方法)
+    for f in _iter_py():
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            _names = {m.name for m in cls.body
+                      if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            for st in cls.body:
+                if isinstance(st, ast.Assign):
+                    for t in st.targets:
+                        if isinstance(t, ast.Name):
+                            _names.add(t.id)
+                elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                    _names.add(st.target.id)
+            # 同名类只合并（插件里类名唯一，合并无害）
+            _cls_methods.setdefault(cls.name, set()).update(_names)
+            for n in ast.walk(cls):
+                # `self.X = SomeClass(...)` → 记住 X 指向哪个类
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):
+                    _fn = n.value.func
+                    _target = (_fn.id if isinstance(_fn, ast.Name)
+                               else (_fn.attr if isinstance(_fn, ast.Attribute) else None))
+                    if _target and _target[0].isupper():
+                        for _tg in n.targets:
+                            if (isinstance(_tg, ast.Attribute)
+                                    and isinstance(_tg.value, ast.Name)
+                                    and _tg.value.id == "self"):
+                                _cls_of[(cls.name, _tg.attr)] = _target
+                # `self.X.method()` → 记下待查
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                    _inner = n.func.value
+                    if (isinstance(_inner, ast.Attribute)
+                            and isinstance(_inner.value, ast.Name)
+                            and _inner.value.id == "self"):
+                        _calls.append((f, n.lineno, cls.name, _inner.attr, n.func.attr))
+    _ghost = []
+    for f, lineno, outer, attr, method in _calls:
+        target = _cls_of.get((outer, attr))
+        # 目标类不是**插件自己定义的**（Lock / 框架对象…）→ 无从查证，跳过
+        if not target or target not in _cls_methods:
+            continue
+        if method not in _cls_methods[target]:
+            # 对方类里的类属性赋值也算"存在"，避免误报存起来的回调
+            _ghost.append(f"{f.relative_to(PLUGIN_DIR)}:{lineno} "
+                          f"{outer}.self.{attr}.{method}() —— "
+                          f"{target} 里没有 {method}()")
+    r.ok("B1 在协作者对象上调用的方法都存在（启动期 AttributeError 的源头）",
+         not _ghost, f"未定义={_ghost or '无'}")
+    for g in _ghost:
+        r.note(f"   ❗ {g}")
+
     section("B. 工具函数是否都被框架能识别（签名合规）")
     # 框架调用方式：tool_inst.execute(event, **args) —— 第一个位置参数必须是 event
     bad_sig = []

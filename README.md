@@ -489,6 +489,89 @@ python -m playwright install chromium
 <details>
 <summary><b>2.1.x</b> — 49 个版本　·　最新的一系列：双后端重构、安全加固、以及大量审查修复</summary>
 
+### v2.1.51（2026-09-18）
+
+**新图标：二次元萌系立绘风格。** 顺带把图标体积从 1.25 MB 压到 420 KB。
+
+#### 新图标
+
+用 Agnes（`agnes-image-2.5-flash`）生成 —— 一位可爱的二次元少女，
+双手捧着一块悬浮的浏览器窗口、指着里面的光标箭头。
+配色沿用旧图标的品牌色（奶油白 / 青绿 / 琥珀金），"AI 在操纵网页"的意象也保留了。
+
+**关于"参考图"**：本来打算把旧图标作为参考图喂给模型（`image` 字段做图生图），
+但这个 provider 的 `/images/generations` **不支持图生图** —— 带上 `image` 字段就返回
+一个误导性的 `Invalid API key`（纯文本 prompt 则完全正常）。
+所以改为**在提示词里精确描述旧图标的配色与构图元素**，效果一样。
+
+**裁剪**：模型生成的图带了一圈"圆角卡片 + 外留白"（四周各约 82px，
+看着像"图标里又套了一个图标"）。检测出圆角方块的实际边界后裁掉外圈，
+让画面铺满整个画布 —— 缩到 64px 时主体也更大更清楚。
+
+#### 体积
+
+| | 之前 | 之后 |
+|---|---|---|
+| 尺寸 | 1024×1024 | 1024×1024 |
+| 体积 | **1.25 MB** | **420 KB** |
+
+做法是**调色板量化到 256 色**。扁平插画（大色块 + 硬边）几乎没有损失，
+但体积只有原来的三分之一。
+
+#### 新增检查
+
+- **B3b**：图标必须 < 500 KB（面板每次渲染插件列表都要加载它）
+- **B3c**：图标必须正方形且 ≥ 256px
+
+反向验证：把 1.25 MB 的旧图标换回去 → B3b 立刻报红。
+
+#### 结果
+
+回归套件 **357/357 全绿**。版本 2.1.50 → 2.1.51。
+
+### v2.1.50（2026-09-18）
+
+**紧急修复：插件起不来。**
+`Failed to initialize plugin headless_browser: 'BrowserBridge' object has no
+attribute 'clear_event_listeners'`
+
+#### 怎么回事
+
+`main.py` 的 `initialize()` 里有一行：
+
+```python
+# 事件回调（先清再注册，热重载不会重复累积）
+self.bridge.clear_event_listeners()      # ← 这个方法从来没实现过
+```
+
+`BrowserBridge` 只有 `on_event` / `_dispatch_event` —— **没有
+`clear_event_listeners`**。于是 `initialize()` 一跑到这行就
+`AttributeError`，插件**整个起不来**（不是某个功能坏了，是插件加载失败）。
+
+#### 为什么所有检查都没抓到
+
+仓库里本来就有 **A1「`self.xxx()` 调用了但类里没定义」** 这条检查 ——
+正是为这类"语法合法、一跑就崩"的问题准备的。但它只扫 **`self.xxx()`**，
+而这一行是 **`self.bridge.xxx()`**（在**协作者对象**上调用），不在它的覆盖范围。
+
+#### 修法
+
+1. **补上方法**：`BrowserBridge.clear_event_listeners()` 清空
+   `_event_listeners` 与 `_any_listener`（就是那行注释说的语义）
+2. **补上检查 B1**：把调用图检查扩到**协作者对象上的调用** ——
+   先收集 `self.X = SomeClass(...)` 的绑定，再验证 `self.X.method()`
+   里的 `method` 在 `SomeClass` 上真的存在。
+   反向验证：把 `clear_event_listeners` 删掉 → B1 立刻报红并点名到行：
+   `main.py:270 BrowserPlugin.self.bridge.clear_event_listeners() ——
+   BrowserBridge 里没有 clear_event_listeners()`
+
+> 只有**插件自己定义的类**会被查（`Lock` 这类框架对象跳过），
+> 避免误报。
+
+#### 结果
+
+回归套件 **348/348 全绿**（新增 B1 后）。版本 2.1.49 → 2.1.50。
+
 ### v2.1.49（2026-09-17）
 
 **工具定义瘦身 40%**：13 个工具 → 10 个，每次请求的工具 schema 从

@@ -162,6 +162,28 @@ def run(r) -> None:
          bool(icon) and (PLUGIN_DIR / str(icon)).is_file(),
          f"icon={icon!r}")
 
+    # B3b 图标体积与尺寸
+    #  ⚠️ 图标会被面板**每次渲染插件列表时加载**，太大就是白白的网络/内存开销。
+    #    实测旧图标 1024×1024 PNG 有 1.25 MB —— 一张 PNG 比整个插件的代码还大。
+    #    改成立绘风格后重新生成，压到 397 KB（256 色量化；扁平插画几乎无损）。
+    _icon_path = PLUGIN_DIR / str(icon or "")
+    if _icon_path.is_file():
+        _sz = _icon_path.stat().st_size
+        r.ok("B3b 图标 < 500 KB？（面板每次渲染都要加载它）",
+             _sz < 500 * 1024, f"{_sz:,} bytes")
+        try:
+            from PIL import Image as _Img
+            with _Img.open(_icon_path) as _im:
+                _w, _h = _im.size
+            r.ok("B3c 图标是正方形且 ≥256px（缩到小尺寸也不糊）",
+                 _w == _h and _w >= 256, f"{_w}×{_h}")
+        except ImportError:
+            r.warn("没有 Pillow，跳过图标尺寸检查", "apk add py3-pillow 后可启用")
+        except Exception as e:
+            r.ok("B3c 图标可被解析", False, f"{type(e).__name__}: {e}")
+    else:
+        r.ok("B3b/B3c 图标存在（体积与尺寸检查的前提）", False, f"{_icon_path} 不在")
+
     # locales 可选，但给了就必须是 dict
     if mf.get("locales") is not None:
         r.ok("B4 locales 是对象且含 zh",
