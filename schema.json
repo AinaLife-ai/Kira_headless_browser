@@ -442,6 +442,17 @@
       }
     }
   },
+  "allow_remote_pairing": {
+    "name": "Allow remote pairing",
+    "type": "switch",
+    "default": false,
+    "locales": {
+      "zh": {
+        "name": "允许跨机配对",
+        "hint": "默认关闭：扩展的「自动接入」只能从**本机**读取端口和令牌。\n开启后，**同一网络里任何机器**都能读到令牌并连上你的浏览器 —— 只有当你「浏览器和 KiraAI 不在同一台机器」时才需要打开，并且请自行确保网络可信。"
+      }
+    }
+  },
   "load_cookies_on_start": {
     "name": "Auto-load Cookies",
     "type": "switch",

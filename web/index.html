@@ -400,6 +400,30 @@ function tokenFingerprint(tok) {
 //    用户看到的像是"重新生成没生效"，甚至复制到一枚连不上的令牌。
 let _tokenSeq = 0;
 
+// ── 把接入信息推给浏览器扩展（装了的话）──────────────────────────────
+//
+//  扩展要填 服务地址 / 端口 / 令牌 三样，端口原来还写死 5267 —— 用户改过
+//  端口就连不上。而**浏览器扩展读不了本地文件**（安全模型），所以
+//  "去扫安装目录"走不通。
+//
+//  这里是最可靠的"问"法：**本页面就是那个 KiraAI 实例自己服务的**，
+//  `location.port` 就是它的真实端口。所以用户在一台机器上部署了多个
+//  KiraAI 时，他在谁的面板里就配谁 —— 扩展**不会认错**。
+//  扩展没装时这条消息没人接，静默丢弃，不影响页面。
+function pairWithExtension(token) {
+  try {
+    window.postMessage({
+      __kiraPair: true,
+      token: token,
+      host: location.hostname || "127.0.0.1",
+      port: Number(location.port) || 5267,
+      instance: location.hostname + (location.port ? ":" + location.port : ""),
+    }, location.origin);
+  } catch (e) {
+    /* 不该发生；真发生了也不该影响令牌的显示 */
+  }
+}
+
 // 返回 true 表示这次确实换了一枚新令牌
 async function loadToken(force) {
   const seq = ++_tokenSeq;
@@ -412,6 +436,11 @@ async function loadToken(force) {
       return false;
     }
     $("token").value = r.token;
+    // ⚠️ 顺手把这个实例的接入信息**推给浏览器扩展**（装了的话）。
+    //    `location` 就是 KiraAI 自己服务的地址 —— 端口是**这个实例的真实端口**，
+    //    所以用户就算在一台机器上部署了多个 KiraAI，他在谁的面板里
+    //    就配谁，扩展不会认错。扩展没装时这条消息没人接，静默丢弃。
+    pairWithExtension(r.token);
     const genAt = new Date().toLocaleTimeString();
     $("fingerprint").innerHTML =
       "指纹 <code>…" + tokenFingerprint(r.token) + "</code>（末尾 10 位，用于确认是不是同一枚）" +

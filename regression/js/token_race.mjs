@@ -51,13 +51,20 @@ if (src) {
   const $ = (id) => grab(id);
   const tokenFingerprint = (t) => String(t || "").slice(-4);
 
+  // loadToken 拿到令牌后会把接入信息推给浏览器扩展（`pairWithExtension`）。
+  // 探针只验"令牌竞态"，所以这里给个**记录调用**的桩：
+  // 既不真的 postMessage，又能断言"确实推了、推的是新令牌"。
+  const pushed = [];
+  const pairWithExtension = (t) => { pushed.push(t); };
+
   // 受控的 api()：每次调用挂起，由用例显式 resolve
   const pending = [];
   const api = (_path) => new Promise((resolve) => { pending.push(resolve); });
 
-  const build = new Function("$", "api", "tokenFingerprint",
+  const build = new Function("$", "api", "tokenFingerprint", "pairWithExtension",
     src + "\nreturn loadToken;");
-  const loadToken = build($, api, tokenFingerprint);
+  //  桩是**传进去**的（闭包在外面），所以 `pushed` 在外层就能读到
+  const loadToken = build($, api, tokenFingerprint, pairWithExtension);
 
   // ── 场景：轮询先发（拿到旧令牌）→ 强制的后发先回（新令牌）
   //          → 轮询的响应**最后**才到 ─────────────────────────────
@@ -101,6 +108,12 @@ if (src) {
   await r2;
   pending[4]({ ok: false, error: "boom" });
   await r1;
+  // 面板会把令牌推给浏览器扩展（自动接入）—— 推的必须是**当前有效**那枚，
+  // 不能是作废的旧令牌，否则扩展会拿着一枚连不上的令牌去连。
+  push("推给扩展的令牌不含已被作废的那些",
+       pushed.length > 0 && !pushed.some((t) => t === "STALEOLD"),
+       `推送记录=${JSON.stringify(pushed)}`);
+
   push("迟到的失败响应不得覆盖新令牌", fields["token"].value === "NEW3",
        `token=${fields["token"].value}`);
 }

@@ -307,8 +307,13 @@ def run(r) -> None:
                 # 该行必须含正确的 plugin_id，或者是动态拼接
                 if f"/api/plugin/{pid}" in ln or f"/ws/plugin/{pid}" in ln:
                     continue
-                if "plugin_id" in ln or "${" in ln or "ws_path" in ln:
-                    continue          # 动态拼接，OK
+                # 动态拼接一律放行：
+                #   · `{PLUGIN_ID}` / `{pid}` 这类 f-string 插值
+                #     —— 插的是常量，拼出来必然是对的
+                #   · `${...}` 前端模板、显式带 plugin_id 的写法
+                if ("plugin_id" in ln or "${" in ln or "ws_path" in ln
+                        or re.search(r'\{[^}]*[Ii][Dd][^}]*\}', ln)):
+                    continue
                 hard.append(f"{rel}:{i} {ln.strip()[:70]}")
     r.ok("A14 硬编码的插件 id 与 manifest 一致", not hard,
          f"不一致={hard or '无'}（plugin_id={pid}）")

@@ -16,7 +16,7 @@
 import {
   PROTOCOL_VERSION, MSG, CMD, EVT,
   buildWsUrl, KEEPALIVE_ALARM, KEEPALIVE_PERIOD_MINUTES, RECONNECT_DELAYS, STORE,
-  DEFAULT_CONFIRM_TIMEOUT_MS,
+  DEFAULT_CONFIRM_TIMEOUT_MS, PAIR_PATH, CANDIDATE_PORTS,
 } from "./protocol.js";
 import { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
          downloadViaSession, cookieGet, cookieSet } from "./capabilities.js";
@@ -70,15 +70,128 @@ async function getConfig() {
   };
 }
 
+// ─── 零配置接入：自动发现本机的 KiraAI 实例 ──────────────────────────────────
+//
+//  为什么需要：扩展原来要用户手填 服务地址 / 端口 / 令牌 三样，而端口在
+//  代码里**写死 5267**。用户只要改过 KiraAI 的端口就连不上，且报错只说
+//  "连不上" —— 小白用户根本不知道该改哪里。
+//
+//  做法：向候选端口发一个 GET 到插件的配对端点，谁回了就把它的
+//  **端口 + 令牌**存下来。插件侧对这个端点做了"只回答本机请求"的限制，
+//  所以不需要登录也不会把令牌漏给网络上的其他人。
+
+/** 探测单个端口；命中返回插件给的接入信息，否则 null。 */
+async function probePort(port, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}${PAIR_PATH}`, {
+      signal: ctrl.signal,
+      cache: "no-store",
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j && j.ok && j.token) ? j : null;
+  } catch (e) {
+    return null;                  // 端口没人听 / 不是 KiraAI / 超时
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 把探测到的接入信息写进存储。 */
+async function applyPair(hit) {
+  const host = hit.host || "127.0.0.1";
+  const port = Number(hit.port) || 5267;
+  await chrome.storage.local.set({
+    [STORE.HOST]: host,
+    [STORE.PORT]: port,
+    [STORE.TOKEN]: hit.token,
+  });
+  return { host, port, token: hit.token };
+}
+
+/**
+ * 自动发现 KiraAI 实例并写好配置。
+ *
+ * ⚠️ **一台机器上可能有多个 KiraAI**（不同端口、不同数据目录），
+ *    它们都装了本插件。所以这里的原则是：
+ *
+ *    1. **先单独探"用户存过的端口"** —— 保证已经配好的人永远连同一个实例，
+ *       不会因为"并行探测谁先回"而漂到别的实例上去。
+ *    2. 扫其余候选端口，收集**全部**命中。
+ *    3. 命中 0 个 → 报错并给手动办法。
+ *    4. 命中 1 个 → 直接填好（小白的默认路径，零配置）。
+ *    5. 命中 **≥2 个 → 不猜**，把列表交回去让用户选。
+ *       猜错的后果是"我对 A 说话，B 却动了我的浏览器"，比多点一下严重得多。
+ */
+export async function discover({ timeoutMs = 1500 } = {}) {
+  const saved = await getConfig();
+
+  // ① 存过的端口优先，单独探，命中就锁定
+  if (saved.port) {
+    const hit = await probePort(saved.port, timeoutMs);
+    if (hit) return { ok: true, single: await applyPair(hit) };
+  }
+
+  // ② 扫其余候选端口
+  const ports = [];
+  for (const p of CANDIDATE_PORTS) {
+    const n = Number(p);
+    if (Number.isInteger(n) && n > 0 && n < 65536
+        && n !== Number(saved.port) && !ports.includes(n)) ports.push(n);
+  }
+  const results = await Promise.all(ports.map((p) => probePort(p, timeoutMs)));
+  const hits = [];
+  for (const r of results) {
+    if (r && r.ok && r.token && !hits.some((h) => Number(h.port) === Number(r.port))) {
+      hits.push(r);
+    }
+  }
+
+  if (hits.length === 0) {
+    return {
+      ok: false,
+      error: "没有在本机找到 KiraAI 实例。"
+           + "如果 KiraAI 改了端口，可以在插件面板点「复制接入配置」，"
+           + "再粘贴到上面的输入框。",
+    };
+  }
+  if (hits.length === 1) {
+    return { ok: true, single: await applyPair(hits[0]) };
+  }
+  // ③ 多个实例 —— 交回给用户选，绝不替用户猜
+  return {
+    ok: false,
+    multiple: hits.map((h) => ({
+      host: h.host || "127.0.0.1",
+      port: Number(h.port),
+      token: h.token,
+      instance: h.instance || "",
+      data_dir: h.data_dir || "",
+    })),
+    error: `本机找到 ${hits.length} 个 KiraAI 实例，请选一个。`,
+  };
+}
+
 // ─── 连接管理 ────────────────────────────────────────────────────────────────
 
 export async function connect({ manual = false } = {}) {
-  const cfg = await getConfig();
+  let cfg = await getConfig();
 
+  // ⚠️ 没有令牌时**先自动发现**（首次安装的默认路径）。
+  //    这样装完扩展什么都不用填 —— 端口会被探测出来、令牌会被自动写好。
+  //    手动连接时也走这条路：用户点「连接」的意图就是"我要连上"。
   if (!cfg.token) {
-    state.lastError = "尚未配置令牌";
-    await setStatus({ connected: false, error: state.lastError });
-    return { ok: false, error: state.lastError };
+    const d = await discover();
+    if (!d.ok) {
+      state.lastError = d.error;
+      await setStatus({ connected: false, error: d.error });
+      return { ok: false, error: d.error, multiple: d.multiple };
+    }
+    cfg = await getConfig();
+    console.log("[KiraBridge] 自动发现到 KiraAI:",
+                `${d.single.host}:${d.single.port}`);
   }
 
   // 已经是打开状态就不重复连
@@ -702,6 +815,52 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "connect":
         sendResponse(await connect({ manual: true }));
         break;
+      case "page_pair": {
+        // KiraAI 面板页直接把手里的接入信息交过来。
+        // ⚠️ 端口取自**页面实际所在的那个实例**（content script 用的是
+        //    `location.port`）—— 所以用户有多个 KiraAI 时，他在谁的面板里
+        //    就配谁，**不会认错**，不需要探测也不需要让用户选。
+        const p = msg.payload || {};
+        if (!p.token || !p.port) {
+          sendResponse({ ok: false, error: "接入信息不完整" });
+          break;
+        }
+        // ⚠️ 只在**接入信息真的变了**的时候才动作。
+        //    面板每次加载（含 10 分钟一次的令牌轮询）都会推一遍 ——
+        //    若无条件 `setUserDisconnected(false)` + `connect()`，
+        //    用户手动点的「断开」会被每 10 分钟**自动撤销**一次。
+        const before = await getConfig();
+        const changed = before.token !== p.token || Number(before.port) !== Number(p.port);
+        const saved = await applyPair(p);
+        if (!changed) {
+          sendResponse({ ok: true, single: saved, unchanged: true });
+          break;
+        }
+        // 用户主动打开面板来的，就别让他再点一次「连接」
+        await setUserDisconnected(false);
+        if ((await getConfig()).autoConnect) {
+          await connect();
+        }
+        sendResponse({ ok: true, single: saved });
+        break;
+      }
+      case "discover": {
+        // 弹窗上的「自动检测」按钮：只探测并写好配置，不直接连
+        // （让用户看得见检测到了什么，再决定要不要连）。
+        const d = await discover();
+        sendResponse(d);
+        break;
+      }
+      case "use_instance": {
+        // 探测到多个实例时，用户在弹窗里选定了一个
+        const hit = msg.hit || {};
+        if (!hit.token || !hit.port) {
+          sendResponse({ ok: false, error: "实例信息不完整" });
+          break;
+        }
+        sendResponse({ ok: true, single: await applyPair(hit) });
+        break;
+      }
       case "disconnect":
         sendResponse(await disconnect());
         break;
