@@ -262,3 +262,37 @@ def run(r) -> None:
         _bad12.append("没提'装完扩展后重开一次更容易连上'")
     r.ok("S12 配置开头有说明块（照官方 info 写法，含两个关键提示）",
          not _bad12, f"问题={_bad12 or '无'}")
+
+    # ── S13 令牌的 force 必须走 query（塞 body 会变成"每次面板都重生成"）──
+    #    ⚠️ 真事故：FastAPI 对**简单类型**默认按 query 绑定，塞进 JSON body
+    #       根本不生效 → 端点走自己的默认 `force=True` → **每次打开面板
+    #       都会重新生成令牌**，旧令牌当场作废 → 扩展刚配对好就又连不上 ✗
+    _ui13 = src_safe("web/app.js")
+    _bad13 = []
+    if "token?force=" not in _ui13:
+        _bad13.append("令牌调用没把 force 放进 query")
+    if 'api("/token", {' in _ui13:
+        _bad13.append("还有地方按旧写法调 /token")
+    # model_select 必须是下拉（框架的客户端缓存类字段都这么给）
+    if "model_select" not in _ui13 or "<select" not in _ui13:
+        _bad13.append("model_select 没渲染成下拉")
+    # 拉不到模型列表时要能退回文本框（不能给个空下拉）
+    if "没能取到模型列表" not in _ui13:
+        _bad13.append("拉不到模型列表时没有退回方案")
+    r.ok("S13 令牌 force 走 query + model_select 渲染成下拉（且能降级）",
+         not _bad13, f"问题={_bad13 or '无'}")
+
+    # ── S14 静态资源里不能混进"工具的输出"（这次的坑）──────────────────
+    #    ⚠️ 真事故：`file_write` 追加内容太大时会被**换成一句提示文字**
+    #       （"CONTEXT OFFLOADED … saved to …"），而那句话**被当成文件内容
+    #       写进了 style.css** ✗ → CSS 从此坏掉，启动动画样式整段失效
+    #       （用户报"启动动画没出现"，查了半天才发现是这行垃圾）。
+    #    判据：前端资源里不许出现这类提示文字。
+    _bad14 = []
+    for _f in ("web/style.css", "web/app.js", "web/index.html"):
+        _t = src_safe(_f)
+        for _mark in ("CONTEXT OFFLOADED", "offloads/tools/"):
+            if _mark in _t:
+                _bad14.append(f"{_f} 含 {_mark!r}")
+    r.ok("S14 前端资源里没有混进工具输出（offload 提示等）", not _bad14,
+         f"问题={_bad14 or '无'} —— 混进去会让整个样式/脚本失效")

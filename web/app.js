@@ -41,6 +41,21 @@ function toast(msg) {
   el._t = setTimeout(() => el.classList.remove("show"), 2000);
 }
 
+/** 打**框架自己**的接口（不带插件前缀）。
+ *
+ *  `api()` 会把路径拼到 `/api/plugin/<id>` 下面 —— 想读框架的
+ *  provider / model 列表得绕出去，所以单独留一个。
+ *  同样带 kira_token cookie，否则会被拒。
+ */
+async function apiRoot(path) {
+  const res = await fetch("/api" + path, {
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
 async function api(path, opts) {
   const res = await fetch(API + path, Object.assign({
     headers: { "Content-Type": "application/json" },
@@ -172,12 +187,14 @@ let _tokenSeq = 0;
 async function loadToken(force) {
   const seq = ++_tokenSeq;
   try {
-    // ⚠️ 令牌端点是 **POST /token**（`@register.api("POST", "/token")`）——
-    //    原来这里用的是默认 GET，直接 404，界面只能显示"读取失败" ✗
-    //    `force:false` = 只读当前令牌，不重新生成 ✓
-    const r = await api("/token", {
+    // ⚠️⚠️ `force` 必须走 **query**，不能放 JSON body ——
+    //    FastAPI 对简单类型（bool）默认按 query 绑定；塞进 body 的话
+    //    根本没绑上 → 端点走它自己的默认值 `force=True` →
+    //    **每次打开面板都会重新生成令牌** ✗✗✗
+    //    （旧令牌当场作废 → 扩展刚配对好就又连不上了）
+    //    所以：只是读取就 `force=false`，只有点「重新生成」才给 true。
+    const r = await api(`/token?force=${force ? "true" : "false"}`, {
       method: "POST",
-      body: JSON.stringify({ force: !!force }),
     });
     if (seq !== _tokenSeq) return;
     const t = r.token || "";
@@ -193,7 +210,8 @@ async function regen() {
   const btn = $("regen");
   btn.disabled = true;
   try {
-    const r = await api("/token", { method: "POST", body: "{}" });
+    // 重新生成：这才是 force=true（旧令牌当场作废）
+    const r = await api("/token?force=true", { method: "POST" });
     if (!r.ok) throw new Error(r.error || "失败");
     $("tokBox").dataset.token = r.token || "";
     renderToken();
@@ -244,7 +262,7 @@ const GROUPS = [
   { id: "store", name: "存储",   icon: "folder",   keys: ["screenshot_dir","download_dir","cookies_dir","download_auto_clean","download_max_count","max_content_chars"] },
 ];
 
-let SCHEMA = {}, VALUES = {}, INFO_BLOCKS = [];
+let SCHEMA = {}, VALUES = {}, INFO_BLOCKS = [], MODEL_OPTIONS = {};
 const LOCALE = (navigator.language || "zh").toLowerCase().startsWith("zh") ? "zh" : "en";
 
 function labelOf(key, meta) {
@@ -283,6 +301,28 @@ function fieldHTML(key) {
   if (type === "integer" || type === "number") {
     return `<div class="field" data-k="${key}">${lab}
       <input type="number" data-k="${key}" value="${v ?? ""}">${sub}</div>`;
+  }
+  // ⚠️ `model_select` 要渲染成**下拉**，不是文本框 —— 框架那边就是这么给的
+  //    （它的设置页里这类字段是下拉框）。模型列表是从框架的
+  //    /api/providers/<id>/models 拉来的：拉得到就出真正的 <select>，
+  //    拉不到（比如接口没权限）就**优雅退回文本框**，并说明格式 ——
+  //    总比给一个空下拉、用户没法选要好。
+  if (type === "model_select" || type === "persona_select" || type === "session_select") {
+    const opts = (MODEL_OPTIONS[key] || []);
+    if (!opts.length) {
+      return `<div class="field" data-k="${key}">${lab}
+        <input data-k="${key}" value="${v ?? ""}" placeholder="（没能取到模型列表，可直接填模型名）">
+        <div class="sub">${fmt(hintOf(key, meta))} 取不到列表时可以直接填模型名。</div></div>`;
+    }
+    const cur = String(v ?? "");
+    const has = opts.some((o) => o.value === cur);
+    return `<div class="field" data-k="${key}">${lab}
+      <select data-k="${key}">
+        <option value=""${cur ? "" : " selected"}>（用默认）</option>
+        ${opts.map((o) => `<option value="${fmt(o.value)}"${o.value === cur ? " selected" : ""}>`
+                          + `${fmt(o.label)}</option>`).join("")}
+        ${cur && !has ? `<option value="${fmt(cur)}" selected>${fmt(cur)}（当前，已不在列表里）</option>` : ""}
+      </select>${sub}</div>`;
   }
   // 长文本用 textarea
   const long = key.endsWith("_prompt") || String(v || "").length > 60;
@@ -372,6 +412,46 @@ async function saveConfig() {
   }
 }
 
+/** 拉框架里的模型清单，供 model_select 渲染成下拉。
+ *
+ *  ⚠️ 失败**不能影响别的** —— 拉不到就退回文本框（见 fieldHTML），
+ *     所以这里全程吞异常，只把"没拿到"记下来。
+ */
+async function loadModelOptions() {
+  const want = Object.keys(SCHEMA).filter(
+    (k) => (SCHEMA[k] || {}).type === "model_select");
+  if (!want.length) return;
+  try {
+    const r = await apiRoot("/providers");
+    const provs = Array.isArray(r) ? r : (r && r.providers) || [];
+    const out = [];
+    for (const p of provs) {
+      // ⚠️ 显示名不是 id —— 界面上要给**用户认得的那个名字**
+      //    （框架同时给了 id / name / provider_name 之类，取到哪个用哪个，
+      //     别把 uuid 甩到下拉里 ✗）。
+      const pid = p.id || p.provider_id || p.providerId;
+      const pname = p.provider_name || p.name || p.display_name
+                 || p.label || pid;
+      if (!pid) continue;
+      try {
+        const ms = await apiRoot(`/providers/${encodeURIComponent(pid)}/models`);
+        const list = Array.isArray(ms) ? ms : Object.values(ms || {});
+        for (const m of (list || [])) {
+          if (typeof m === "string") { out.push({ value: m, label: m }); continue; }
+          const name = m.model_id || m.model_name || m.id || m.name;
+          if (!name) continue;
+          // 有更好看的名字就用它，最后才退回 id
+          const nice = m.model_name || m.display_name || m.label || name;
+          out.push({ value: name, label: `${nice} · ${pname}` });
+        }
+      } catch (e) { /* 某个 provider 拉不动就跳过 */ }
+    }
+    want.forEach((k) => { MODEL_OPTIONS[k] = out; });
+  } catch (e) {
+    want.forEach((k) => { MODEL_OPTIONS[k] = []; });   // 退回文本框
+  }
+}
+
 async function loadConfig() {
   try {
     const r = await api("/config");
@@ -458,6 +538,7 @@ function dismissBoot() {
   $("ver").textContent = "v—";  // 真正的版本号由 /status 回填
 
   await loadConfig();
+  loadModelOptions().then(() => renderConfig());   // 拿到模型列表后重渲染一次，换成下拉
   spy();
   await loadToken();
   await refresh();
