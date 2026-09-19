@@ -434,6 +434,49 @@ def run(r) -> None:
             server4.close()
             await server4.wait_closed()
 
+        # ── 场景 5：**命令往返**（真 background.js 必须"回话"）──────────
+        #    ⚠️ 抓的是这个真实 bug：`handleMessage` 收到命令后调
+        #       `runCommand(id, name, params)` —— **漏传了 link**。
+        #       而 `sendRaw(obj, link)` 开头就是 `if (!link || !link.open) return false;`
+        #       → 结果**一条都发不出去** → 插件干等 op_timeout(20s) 报
+        #       "扩展没有响应"。表面上像"扩展没连上"，其实连接好好的，
+        #       只是回话被静默吞了。
+        #
+        #    ⚠️ 为什么以前没抓到：`bridge_e2e` 用的是**手写的假扩展客户端**，
+        #       它自己会回话 —— 真 background.js 里的 dispatch 根本没被跑过。
+        #       这里用**真的** background.js，所以能从外面发一条命令进来。
+        tcmd = asyncio.create_task(_run_node(node, client_path, {
+            "action": "auto_only", "storage": {}, "settle_ms": 16000,
+        }))
+        # 场景 4 用完把服务器关了 —— 这里要重新起一个（候选端口），
+        # 否则扩展根本连不上，测的就不是"回话"而是"没连上"了。
+        server5 = await websockets.serve(
+            holder["handler"], "127.0.0.1", port,
+            process_request=holder["process_request"])
+        try:
+            await asyncio.sleep(3.5)          # 等它连上并稳定
+            cmd_task = asyncio.create_task(bridge.send_command("list_tabs", {}, timeout=8))
+            done, _pending = await asyncio.wait({cmd_task}, timeout=12)
+            if cmd_task in done:
+                try:
+                    results["cmd_data"] = cmd_task.result()
+                    results["cmd_err"] = ""
+                except Exception as e:
+                    results["cmd_data"] = None
+                    results["cmd_err"] = f"{type(e).__name__}: {e}"
+            else:
+                results["cmd_data"] = None
+                results["cmd_err"] = "12 秒没拿到响应（结果发不回去）"
+                cmd_task.cancel()
+        finally:
+            try:
+                await asyncio.wait_for(tcmd, timeout=15)
+            except Exception:
+                tcmd.cancel()
+            server5.close()
+            await server5.wait_closed()
+        await bridge.close()
+
         holder["results"] = results
 
     try:
@@ -635,6 +678,37 @@ def run_results(r, holder, results) -> None:
          'id="ver"' in src_safe("browser-bridge/popup.html")
          and "getManifest().version" in src_safe("browser-bridge/popup.js"),
          "没有版本号的话，用户报问题时分不清是新版还是没更新")
+
+    # ── P16：弹窗要告诉用户「允许用户使用脚本」这件事 ─────────────────
+    #    ⚠️ 这个开关**扩展自己打不开**（Chrome/Edge 的刻意设计：防止扩展
+    #       静默执行任意代码），所以只能"检测 + 指路"。而它只影响「执行 JS」
+    #       一个能力，其它命令照常 —— 提示里必须说清这点，别吓着用户。
+    _pop16 = src_safe("browser-bridge/popup.js")
+    _h16 = src_safe("browser-bridge/popup.html")
+    _bad16 = []
+    if "checkUserScripts" not in _pop16:
+        _bad16.append("弹窗没检测这个开关")
+    if "允许用户使用脚本" not in _pop16:
+        _bad16.append("没告诉用户开关叫什么（用户找不到）")
+    if "其它功能不受影响" not in _pop16:
+        _bad16.append("没说清'不开也不影响其它功能'——容易吓到人")
+    if 'id="usHint"' not in _h16:
+        _bad16.append("没有显示提示的容器")
+    r.ok("P16 弹窗会检测并说明「允许用户使用脚本」（且说清不必须）",
+         not _bad16, f"问题={_bad16 or '无'}")
+
+    # ── P15：命令要真的"回话"（真 background.js 的 dispatch 路径）───
+    #    ⚠️ 这条抓的是真 bug：handleMessage 调 runCommand 时漏传 link →
+    #       sendRaw 见 link 为空直接 return false → 结果一条都发不出去 →
+    #       插件报"扩展没有响应/超时"。看起来像断线，其实连接是好的。
+    if results.get("cmd_err"):
+        r.ok("P15 命令往返：扩展收到命令后能回话", False,
+             f"{results['cmd_err']}")
+    else:
+        cd = results.get("cmd_data")
+        r.ok("P15 命令往返：扩展收到命令后能回话（结果真的发回来了）",
+             isinstance(cd, dict) and "tabs" in cd,
+             f"拿到的数据={cd!r}")
 
     # ── P14b：发现失败时要把"试过哪些端口"带出来（否则用户只能干猜）──
     #    最常见的失败原因就是"KiraAI 用了候选列表之外的端口"，
