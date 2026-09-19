@@ -1428,6 +1428,109 @@ class HeadlessBackend(Backend):
         except Exception as e:
             return OpResult.fail(f"列目录失败: {e}", self.name)
 
+    async def close_tab(self, tab_id: int = 0) -> OpResult:
+        """关掉一个无头页面 —— 这个**真能做**（page.close）。"""
+        try:
+            pages = self._context.pages if self._context else []
+            pg = pages[int(tab_id)] if (tab_id and int(tab_id) < len(pages)) else (
+                self._page or (pages[-1] if pages else None))
+            if pg is None:
+                return OpResult.fail("没有可关闭的页面", self.name,
+                                     data={"tab_id": tab_id, "closed": False})
+            await pg.close()
+            return OpResult(ok=True, backend=self.name,
+                            data={"tab_id": tab_id, "closed": True})
+        except Exception as e:
+            return OpResult.fail(f"关标签失败：{type(e).__name__}: {e}", self.name,
+                                 data={"tab_id": tab_id, "closed": False})
+
+    async def activate_tab(self, tab_id: int = 0) -> OpResult:
+        """切到某个无头页面（page.bring_to_front）。"""
+        try:
+            pages = self._context.pages if self._context else []
+            pg = pages[int(tab_id)] if (tab_id and int(tab_id) < len(pages)) else self._page
+            if pg is None:
+                return OpResult.fail("没有可切换的页面", self.name,
+                                     data={"tab_id": tab_id, "activated": False})
+            await pg.bring_to_front()
+            return OpResult(ok=True, backend=self.name,
+                            data={"tab_id": tab_id, "activated": True})
+        except Exception as e:
+            return OpResult.fail(f"切标签失败：{type(e).__name__}: {e}", self.name,
+                                 data={"tab_id": tab_id, "activated": False})
+
+    async def mute_tab(self, tab_id: int = 0, muted: bool = True) -> OpResult:
+        """无头没有"标签栏"，静音也没意义（它本来就没有声音输出）。
+
+        ⚠️ 老老实实说做不到 —— 比"看起来成功"强：后者会让用户以为
+           静音了，其实什么都没发生。真实场景里要静音的是**用户自己的
+           浏览器标签**，那只有扩展桥能做。
+        """
+        return OpResult.fail(
+            "无头浏览器没有标签栏、也没有声音输出，静音无从谈起 —— "
+            "要静音用户自己的标签请让扩展桥连接后重试", self.name,
+            data={"tab_id": tab_id, "muted": bool(muted), "unsupported": True})
+
+    async def pin_tab(self, tab_id: int = 0, pinned: bool = True) -> OpResult:
+        # 无头没有"标签栏"这个概念，固定与否没有意义 —— 明确说不支持
+        return OpResult.fail("无头浏览器没有标签栏，固定标签无从谈起", self.name,
+                             data={"tab_id": tab_id, "pinned": bool(pinned),
+                                   "unsupported": True})
+
+    async def clipboard(self, mode: str = "read", text: str = "",
+                        tab_id: int = 0) -> OpResult:
+        """无头能写（page.evaluate）；**读**多半拿不到（无头页面通常不聚焦）——
+        如实报，不装作拿到了空字符串。"""
+        try:
+            pg = self._page
+            if pg is None:
+                return OpResult.fail("没有可操作的页面", self.name,
+                                     data={"mode": mode, "text": "", "length": 0, "unsupported": True})
+            if mode == "write":
+                await pg.evaluate("(t) => navigator.clipboard.writeText(t)", text or "")
+                return OpResult(ok=True, backend=self.name,
+                                data={"mode": "write", "ok": True, "text": "", "length": len(text or "")})
+            got = await pg.evaluate("() => navigator.clipboard.readText()")
+            return OpResult(ok=True, backend=self.name,
+                            data={"mode": "read", "text": got or ""})
+        except Exception as e:
+            return OpResult.fail(f"剪贴板操作失败：{type(e).__name__}: {e}", self.name,
+                                 data={"mode": mode, "text": "", "length": 0, "unsupported": True})
+
+    async def history(self, query: str = "", limit: int = 100,
+                      days: int = 0) -> OpResult:
+        """无头用的是**临时 profile**，历史里什么都没有 —— 如实说不支持。
+
+        ⚠️ 历史属于**用户自己的浏览器**，只在他那个 profile 里。装作能读、
+           返回空列表，用户会以为"历史丢了"。
+        """
+        return OpResult.fail(
+            "浏览历史只在用户自己的浏览器 profile 里；无头用的是临时 profile，"
+            "读不到 —— 请让扩展桥连接后再试", self.name,
+            data={"items": [], "count": 0, "query": query or "",
+                  "unsupported": True})
+
+    async def bookmarks(self, query: str = "", limit: int = 200,
+                        folders_only: bool = False) -> OpResult:
+        """无头浏览器**没有书签库** —— 明确说不支持，别装作能做。
+
+        ⚠️ 书签是**用户浏览器**里的数据，只存在于他那个 profile 里。
+           插件临时拉起的无头 profile 是干净的，读到的只会是空 ✗
+           （更糟的是"看起来成功但返回空"，用户会以为书签丢了）。
+           所以这里直接失败，让路由把它标成"这个后端做不到"。
+        """
+        # ⚠️ 失败结果里**照样带上完整形状**（空的）：
+        #    契约检查 F1 要求"渲染层读的字段，两个后端都返回" ——
+        #    对无头来说这些字段只能是空的（它压根没有书签库），
+        #    但形状给全，两边才是可比的。**失败本身照旧如实上报**，
+        #    调用方拿到的是 error（不会走到渲染那一步）。
+        return OpResult.fail(
+            "书签只有用户自己的浏览器里有；无头浏览器用的是临时 profile，"
+            "读不到 —— 请让扩展桥连接后再试", self.name,
+            data={"bookmarks": [], "query": query or "",
+                  "total_bookmarks": 0, "truncated": False,
+                  "unsupported": True})
+
     async def debug_state(self) -> OpResult:
         """给排障用：当前后端到底处在什么状态。"""
         pages = 0
@@ -1505,6 +1608,21 @@ class HeadlessBackend(Backend):
                             backend=self.name)
         except Exception as e:
             return OpResult.fail(f"写入 cookie 失败: {e}", self.name)
+
+    async def get_selection(self, tab_id: int = 0) -> OpResult:
+        """读无头页面里选中的文字（page.evaluate）。"""
+        try:
+            pg = self._page
+            if pg is None:
+                return OpResult.fail("没有可操作的页面", self.name,
+                                     data={"content": "", "title": "", "url": ""})
+            txt = await pg.evaluate("() => window.getSelection().toString()")
+            return OpResult(ok=True, backend=self.name,
+                            data={"content": txt or "", "title": pg.title(),
+                                  "url": pg.url})
+        except Exception as e:
+            return OpResult.fail(f"读取选中文字失败：{type(e).__name__}: {e}", self.name,
+                                 data={"content": "", "title": "", "url": ""})
 
     async def execute_js(self, script: str) -> OpResult:
         err = await self._ready()

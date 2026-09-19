@@ -259,6 +259,14 @@ class ExtensionBackend(Backend):
         except Exception as e:
             return OpResult.fail(f"保存截图失败: {e}", self.name)
 
+    async def get_selection(self, tab_id: int = 0) -> OpResult:
+        """读页面上**用户选中的文字**。
+
+        ⚠️ 这个能力扩展早就实现了（content script 的 get_selection），
+           但插件侧一直没接 —— 于是 bot 够不着，只能去读整页文本再自己找。
+        """
+        return await self._send(self._P.CMD_GET_SELECTION, {"tab_id": tab_id})
+
     async def execute_js(self, script: str) -> OpResult:
         """执行任意 JS。
 
@@ -465,6 +473,52 @@ class ExtensionBackend(Backend):
     async def list_files(self, dir_type: str = "downloads", limit: int = 20) -> OpResult:
         return await self._send(self._P.CMD_LIST_FILES,
                                 {"dir_type": dir_type, "limit": limit})
+
+    async def close_tab(self, tab_id: int = 0) -> OpResult:
+        """关掉一个标签（chrome.tabs.remove）。
+
+        ⚠️ 这是**唯一**能关标签的路 —— Ctrl+W / window.close() 对扩展注入的
+           脚本无效（浏览器不允许）。所以别让模型去试那些。
+        """
+        return await self._send(self._P.CMD_CLOSE_TAB, {"tab_id": tab_id})
+
+    async def activate_tab(self, tab_id: int = 0) -> OpResult:
+        """切到某个标签（chrome.tabs.update(active)）。"""
+        return await self._send(self._P.CMD_ACTIVATE_TAB, {"tab_id": tab_id})
+
+    async def mute_tab(self, tab_id: int = 0, muted: bool = True) -> OpResult:
+        """静音/取消静音某个标签（chrome.tabs.update({muted})）。"""
+        return await self._send(self._P.CMD_MUTE_TAB,
+                                {"tab_id": tab_id, "muted": bool(muted)})
+
+    async def pin_tab(self, tab_id: int = 0, pinned: bool = True) -> OpResult:
+        """固定/取消固定某个标签（chrome.tabs.update({pinned})）。"""
+        return await self._send(self._P.CMD_PIN_TAB,
+                                {"tab_id": tab_id, "pinned": bool(pinned)})
+
+    async def clipboard(self, mode: str = "read", text: str = "",
+                        tab_id: int = 0) -> OpResult:
+        """剪贴板读写。⚠️ **读**要求页面在前台聚焦（浏览器隐私限制）。"""
+        return await self._send(self._P.CMD_CLIPBOARD,
+                                {"mode": mode, "text": text or "", "tab_id": tab_id})
+
+    async def history(self, query: str = "", limit: int = 100,
+                      days: int = 0) -> OpResult:
+        """读浏览历史（chrome.history）。和书签同理：要数据，不要页面。"""
+        return await self._send(self._P.CMD_HISTORY,
+                                {"query": query or "", "max": limit, "days": days})
+
+    async def bookmarks(self, query: str = "", limit: int = 200,
+                        folders_only: bool = False) -> OpResult:
+        """读书签**数据**（不是 edge://bookmarks 那个页面）。
+
+        ⚠️ 为什么必须走数据接口：`edge://bookmarks` 是浏览器内部页，
+           任何扩展都注入不进去（硬边界），"打开书签页去读"这条路是死的。
+           用户要的是书签本身，不是那个页面 —— chrome.bookmarks 能给。
+        """
+        return await self._send(self._P.CMD_BOOKMARKS,
+                                {"query": query or "", "max": limit,
+                                 "folders_only": bool(folders_only)})
 
     async def debug_state(self) -> OpResult:
         return await self._send(self._P.CMD_DEBUG)

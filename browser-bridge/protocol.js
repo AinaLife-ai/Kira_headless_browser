@@ -49,6 +49,8 @@ export const CMD = {
   WAIT_FOR: "wait_for",
   ACTIVATE_TAB: "activate_tab",
   CLOSE_TAB: "close_tab",
+  MUTE_TAB: "mute_tab",
+  PIN_TAB: "pin_tab",
   NAVIGATE: "navigate",
   SCROLL: "scroll",
   CLICK: "click",
@@ -79,6 +81,9 @@ export const CMD = {
   MOUSE_DRAG: "mouse_drag",
   LIST_FILES: "list_files",
   DEBUG: "debug",
+  BOOKMARKS: "bookmarks",
+  HISTORY: "history",
+  CLIPBOARD: "clipboard",
 };
 
 // 事件名

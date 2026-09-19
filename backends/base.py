@@ -43,8 +43,16 @@ class OpResult:
     indeterminate: bool = False
 
     @classmethod
-    def fail(cls, error: str, backend: str = "") -> "OpResult":
-        return cls(ok=False, error=error, backend=backend)
+    def fail(cls, error: str, backend: str = "",
+             data: Optional[Dict[str, Any]] = None) -> "OpResult":
+        """失败。`data` 可选 —— 带**同样的字段形状**（通常是空的）。
+
+        ⚠️ 为什么失败也要带形状：契约检查要求"渲染层读的字段，两个后端
+           都真的返回" —— 某个后端天生做不到时（比如无头没有书签库），
+           把形状给全，两边才是可比的。**ok 仍然是 False**，
+           调用方拿到的还是 error、不会走到渲染那一步。
+        """
+        return cls(ok=False, error=error, backend=backend, data=data)
 
     @classmethod
     def declined_by_user(cls, backend: str = "",

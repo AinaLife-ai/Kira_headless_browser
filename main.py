@@ -776,6 +776,65 @@ class BrowserPlugin(BasePlugin):
                     + f" {tag}")
         if method == "get_info":
             return f"📄 标题: {d.get('title', '')}\n🔗 URL: {d.get('url', '')} {tag}"
+        if method == "get_selection":
+            t = (d.get("content") or "").strip()
+            if not t:
+                return f"✂️ 页面上没有选中的文字{tag}"
+            return (f"✂️ 选中的文字（{len(t)} 字符，来自 {d.get('title') or d.get('url')}）："
+                    f"\n{t}")
+        if method == "clipboard":
+            if d.get("mode") == "write":
+                return f"📋 已写入剪贴板（{d.get('length', len(d.get('text') or ''))} 字符）{tag}"
+            t = d.get("text") or ""
+            return (f"📋 剪贴板内容（{len(t)} 字符）：\n{t}" if t
+                    else "📋 剪贴板是空的" + tag)
+        if method == "history":
+            # ⚠️ 没这个分支数据会被默认分支丢掉（守卫 A1 盯的就是这个）
+            its = d.get("items") or []
+            if not its:
+                return (f"🕘 没找到历史记录"
+                        + (f"（关键词：{d.get('query')}）" if d.get("query") else "")
+                        + f"{tag}")
+            lines = [f"🕘 历史 {len(its)} 条"
+                     + (f"（关键词：{d.get('query')}）" if d.get("query") else "") + f"{tag}"]
+            for h in its[:60]:
+                lines.append(f"- {h.get('title')}  {h.get('url')}"
+                             + (f"  （访问 {h.get('visits')} 次）" if h.get("visits") else ""))
+            return "\n".join(lines)
+        if method == "close_tab":
+            tid = d.get("tab_id")
+            ok = d.get("closed", True)
+            return (f"🗑️ 已关闭标签 {tid}{tag}" if ok
+                    else f"❌ 没能关闭标签 {tid}{tag}")
+        if method == "activate_tab":
+            return f"🔀 已切到标签 {d.get('tab_id')}{tag}"
+        if method == "mute_tab":
+            return (f"{'🔇 已静音' if d.get('muted') else '🔊 已取消静音'}"
+                    f"标签 {d.get('tab_id')}{tag}")
+        if method == "pin_tab":
+            return (f"{'📌 已固定' if d.get('pinned') else '📍 已取消固定'}"
+                    f"标签 {d.get('tab_id')}{tag}")
+        if method == "bookmarks":
+            # ⚠️ 没有这个分支的话数据会被**默认分支丢掉**（守卫 A1 专门盯这个）：
+            #    模型只会看到一句"操作成功"，书签却一条都没拿到。
+            bms = d.get("bookmarks") or []
+            if not bms:
+                return (f"🔖 没找到书签"
+                        + (f"（关键词：{d.get('query')}）" if d.get("query") else "")
+                        + f"{tag}")
+            head = (f"🔖 书签 {len(bms)} 条"
+                    + (f"（筛选自 {d.get('total_bookmarks')} 条）"
+                       if d.get("total_bookmarks") else "")
+                    + ("，已达上限被截断" if d.get("truncated") else "")
+                    + f"{tag}")
+            lines = [head]
+            for b in bms[:80]:
+                if b.get("is_folder"):
+                    lines.append(f"- 📁 {b.get('title')}  [{b.get('folder', '')}]")
+                else:
+                    lines.append(f"- {b.get('title')}  {b.get('url')}"
+                                 + (f"  （{b.get('folder')}）" if b.get("folder") else ""))
+            return "\n".join(lines)
         if method == "list_files":
             files = d.get("files") or []
             if not files:
@@ -955,7 +1014,7 @@ class BrowserPlugin(BasePlugin):
         ),
         params={"type": "object", "properties": {
             "mode": {"type": "string",
-                     "enum": ["info", "text", "outline", "html", "selector", "extract"]},
+                     "enum": ["info", "text", "outline", "html", "selector", "extract", "selection"]},
             "selector": {"type": "string"},
             "attr": {"type": "string", "description": "extract 取该属性(如 href)，省略取文本"},
             "limit": {"type": "integer", "description": "extract 最多几条，默认 50"},
@@ -972,6 +1031,10 @@ class BrowserPlugin(BasePlugin):
         m = (mode or "text").lower()
         if m == "info":
             return await self._call("get_info")
+        if m == "selection":
+            # 读用户**选中的文字**（扩展侧一直有 get_selection，只是没接出来）
+            return await self._call("get_selection", for_write=False,
+                                    tab_id=tab_id)
         if m == "extract":
             if not selector:
                 return "mode=extract 需要提供 selector"
@@ -988,13 +1051,84 @@ class BrowserPlugin(BasePlugin):
 
     @register.tool(
         name="browser_tabs",
-        description="列出打开的所有标签页。",
-        params={"type": "object", "properties": {}, "required": []},
+        description=(
+            "标签页管理：列出 / 切换 / 关闭 / 静音 / 固定。"
+            "关标签页**只能用这里的 action=close** —— Ctrl+W、window.close() "
+            "对扩展注入的脚本无效（浏览器不允许），别再去试那些。"
+        ),
+        params={"type": "object", "properties": {
+            "action": {"type": "string",
+                       "enum": ["list", "search", "activate", "close", "mute", "pin"],
+                       "description": "默认 list（列出）"},
+            "tab_id": {"type": "integer", "description": "目标标签（activate/close/mute/pin 用）"},
+            "query": {"type": "string", "description": "action=search 用它筛标签；mute/pin/close 带 query 时**批量**作用于所有匹配的标签（按标题或网址匹配）"},
+            "muted": {"type": "boolean", "description": "action=mute 时：true 静音 / false 取消"},
+            "pinned": {"type": "boolean", "description": "action=pin 时：true 固定 / false 取消"},
+        }, "required": []},
     )
-    async def tool_tabs(self, event, **_):
+    async def tool_tabs(self, event, action: str = "list", **_kw):
         if not self.enabled:
             return "浏览器插件未启用"
-        return await self._call("list_tabs")
+        a = (action or "list").lower()
+        q = (_kw.get("query") or "").strip().lower()
+        tid = _kw.get("tab_id")
+
+        if a in ("list", ""):
+            return await self._call("list_tabs", for_write=False)
+
+        # 搜索 / 批量操作：先拿列表，在插件侧筛（扩展内部命令不计次，
+        # 所以"筛完再逐个操作"完全可行 —— 不用给扩展加批量命令）。
+        if a == "search" or ((a in ("mute", "pin", "close")) and q):
+            r = await self._call("list_tabs", for_write=False)
+            tabs = (r or {}).get("data", {}).get("tabs") if isinstance(r, dict) \
+                else getattr(r, "data", {}).get("tabs", [])
+            tabs = tabs or []
+            hit = [t for t in tabs
+                   if not q or q in (t.get("title", "") + " " + t.get("url", "")).lower()]
+            if a == "search":
+                if not hit:
+                    return f"🔍 没有匹配「{q}」的标签（共 {len(tabs)} 个）"
+                lines = [f"🔍 匹配「{q}」的标签 {len(hit)} 个："]
+                for t in hit[:30]:
+                    lines.append(f"- [{t.get('id')}] {t.get('title')}  {t.get('url')}"
+                                 + ("  📌" if t.get("pinned") else "")
+                                 + ("  🔇" if t.get("muted") else ""))
+                return "\n".join(lines)
+            # 批量：逐个调用（内部命令不计次）
+            ok = 0
+            for t in hit[:50]:
+                try:
+                    if a == "mute":
+                        await self._call("mute_tab", for_write=True, tab_id=t.get("id"),
+                                         muted=bool(_kw.get("muted", True)))
+                    elif a == "pin":
+                        await self._call("pin_tab", for_write=True, tab_id=t.get("id"),
+                                         pinned=bool(_kw.get("pinned", True)))
+                    else:
+                        await self._call("close_tab", for_write=True, tab_id=t.get("id"))
+                    ok += 1
+                except Exception:
+                    pass
+            verb = {"mute": "静音", "pin": "固定", "close": "关闭"}[a]
+            return f"✅ 已{verb} {ok} 个匹配「{q}」的标签（共匹配 {len(hit)} 个）"
+
+        # ⚠️ 这些能力**扩展早就实现了**（`chrome.tabs.remove` /
+        #    `chrome.tabs.update`），但插件侧一直只调了 `list_tabs` ——
+        #    于是 bot 根本够不着，只能去试 Ctrl+W / window.close()，
+        #    那些对注入脚本是无效的（浏览器不允许），结论就成了
+        #    "浏览器桥没有关标签的 API"。其实是**没接出来**。
+        if a == "close":
+            return await self._call("close_tab", for_write=True, tab_id=tid)
+        if a in ("activate", "switch"):
+            return await self._call("activate_tab", for_write=True, tab_id=tid)
+        if a == "mute":
+            return await self._call("mute_tab", for_write=True, tab_id=tid,
+                                    muted=bool(_kw.get("muted", True)))
+        if a in ("pin", "unpin"):
+            return await self._call("pin_tab", for_write=True, tab_id=tid,
+                                    pinned=(a == "pin") if _kw.get("pinned") is None
+                                    else bool(_kw.get("pinned")))
+        return f"❌ 不认识的 action：{action}（可用：list/search/activate/close/mute/pin）"
 
     @register.tool(
         name="browser_screenshot",
@@ -1116,7 +1250,8 @@ class BrowserPlugin(BasePlugin):
                 "click", "fill", "type", "hover", "scroll", "upload",
                 "go_back", "refresh", "key_press", "key_down", "key_up", "key_type",
                 "mouse_click", "mouse_move", "mouse_down", "mouse_up",
-                "mouse_wheel", "mouse_drag"]},
+                "mouse_wheel", "mouse_drag", "bookmarks", "history",
+                "clipboard_get", "clipboard_set"]},
             "selector": {"type": "string", "description": "CSS 选择器"},
             "text": {"type": "string", "description": "可见文字 / key_type 的文本"},
             "index": {"type": "integer", "description": "第几个可点击元素，从 0 开始"},
@@ -1133,6 +1268,8 @@ class BrowserPlugin(BasePlugin):
             "start_x": {"type": "integer"}, "start_y": {"type": "integer"},
             "end_x": {"type": "integer"}, "end_y": {"type": "integer"},
             "submit": {"type": "boolean"}, "clear_first": {"type": "boolean"},
+            "query": {"type": "string",
+                      "description": "只在 action=bookmarks 时用：按关键词过滤书签（匹配标题或网址）"},
             "tab_id": {"type": "integer"}},
             "required": ["action"]},
     )
@@ -1141,6 +1278,32 @@ class BrowserPlugin(BasePlugin):
             return "浏览器插件未启用"
         a = (action or "").lower()
         w = True          # 默认按写操作处理
+
+        if a in ("clipboard_get", "clipboard_read", "clipboard_set", "clipboard_write"):
+            # 剪贴板读写。⚠️ **读**要求页面在前台聚焦（浏览器隐私限制），
+            #    失败时会说清原因，而不是笼统报错。
+            mode = "write" if a.endswith(("set", "write")) else "read"
+            return await self._call("clipboard", for_write=(mode == "write"),
+                                    mode=mode, text=kw.get("text") or "",
+                                    tab_id=kw.get("tab_id"))
+
+        if a == "history":
+            # 看过的网页（chrome.history）—— 和书签同理，是**数据**不是页面
+            return await self._call("history", for_write=False,
+                                    query=kw.get("query"),
+                                    limit=kw.get("amount") or 100,
+                                    days=int(kw.get("days") or 0))
+
+        if a in ("bookmarks", "bookmark"):
+            # 读书签**数据**（不是那个页面）。
+            # ⚠️ 为什么需要：`edge://bookmarks` 是浏览器内部页，任何扩展都注入
+            #    不进去（硬边界），"打开书签页去读"这条路是死的。但书签数据本身
+            #    可以走 chrome.bookmarks 拿 —— 用户要的是书签，不是那个页面。
+            #    这是**读**操作（w=False），不需要回带页面。
+            return await self._call("bookmarks", for_write=False,
+                                    query=kw.get("query"),
+                                    max=kw.get("amount") or 200,
+                                    folders_only=bool(kw.get("folders_only")))
 
         if a == "click":
             if not any([kw.get("selector"), kw.get("text"), kw.get("index") is not None]):

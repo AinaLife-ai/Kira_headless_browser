@@ -494,5 +494,134 @@ async function cookieSet(params) {
   return { ok, written: ok, skipped: 0, failed, total: list.length };
 }
 
+/**
+ * 读书签（数据接口，**不碰页面**）。
+ *
+ * ⚠️ 为什么要它：`edge://bookmarks` 是**浏览器内部页**，任何扩展都注入不进去
+ *    （硬边界），所以"打开书签页去读"这条路是死的。
+ *    但书签**数据**本身可以通过 `chrome.bookmarks` 拿 ——
+ *    这才是用户真正想要的东西（要的是书签，不是那个页面）。
+ *    需要 manifest 里有 `bookmarks` 权限。
+ *
+ * @param {object} params
+ *   - query        : 关键词（匹配标题或网址，不区分大小写）
+ *   - max          : 最多返回多少条（默认 200，防一次刷爆上下文）
+ *   - folders_only : 只要文件夹（不要书签条目）
+ */
+async function bookmarks(params = {}) {
+  if (!chrome.bookmarks) {
+    throw new Error("chrome.bookmarks 不可用 —— 扩展可能没重新加载"
+                  + "（本功能需要 manifest 里的 bookmarks 权限）");
+  }
+  const query = String(params.query || "").trim().toLowerCase();
+  const max = Math.max(1, Math.min(2000, Number(params.max) || 200));
+  const foldersOnly = !!params.folders_only;
+
+  const tree = await chrome.bookmarks.getTree();
+  const out = [];
+  let total = 0;
+
+  const walk = (nodes, path) => {
+    for (const n of nodes || []) {
+      const here = path ? `${path}/${n.title || "(未命名)"}` : (n.title || "");
+      if (n.url) {
+        total += 1;
+        const hit = !query
+          || (n.title || "").toLowerCase().includes(query)
+          || n.url.toLowerCase().includes(query);
+        if (!foldersOnly && hit && out.length < max) {
+          out.push({ title: n.title || "", url: n.url, folder: path || "(根)" });
+        }
+      } else {
+        if (foldersOnly && out.length < max && (!query
+            || (n.title || "").toLowerCase().includes(query))) {
+          out.push({ title: n.title || "", url: "", folder: path || "(根)",
+                     is_folder: true });
+        }
+        walk(n.children, here);
+      }
+    }
+  };
+  walk(tree, "");
+
+  return { count: out.length, total_bookmarks: total,
+           truncated: out.length >= max, query: params.query || "",
+           bookmarks: out };
+}
+
+/**
+ * 读浏览**历史**（chrome.history）。和书签同理：要的是数据，不是那个页面。
+ *  @param {object} params - query（关键词）/ max（默认 100）/ days（只取最近几天）
+ */
+async function historySearch(params = {}) {
+  if (!chrome.history) {
+    throw new Error("chrome.history 不可用 —— 扩展可能没重新加载"
+                  + "（本功能需要 manifest 里的 history 权限）");
+  }
+  const query = String(params.query || "").trim();
+  const max = Math.max(1, Math.min(2000, Number(params.max) || 100));
+  const days = Number(params.days) || 0;
+  const startTime = days > 0 ? Date.now() - days * 86400000 : 0;
+  const arr = await chrome.history.search(
+    { text: query, maxResults: max, startTime });
+  return {
+    count: arr.length, query,
+    items: arr.map((h) => ({
+      title: h.title || "", url: h.url,
+      visits: h.visitCount || 0,
+      last: h.lastVisitTime ? new Date(h.lastVisitTime).toISOString() : "",
+    })),
+  };
+}
+
+/**
+ * 剪贴板读写（`navigator.clipboard`）。
+ *
+ * ⚠️ **不能用 execJs**：那条路走 `chrome.userScripts`，用户没在扩展详情页
+ *    打开"允许用户使用脚本"就整个不可用 ✗ —— 剪贴板是常用功能，
+ *    不能绑在那个开关上。这里改用 `chrome.scripting.executeScript` 的
+ *    **ISOLATED**（普通内容脚本）world —— 不需要那个开关 ✓
+ *
+ * ⚠️ 已知限制：**读**剪贴板要求页面**处于聚焦状态**
+ *    （浏览器隐私限制，`readText()` 在后台标签会抛 NotAllowedError）。
+ *    这里会把原因说清楚，而不是笼统报失败。
+ */
+async function clipboardOp(params = {}) {
+  const { mode } = params;
+  if (!params.tab_id && !params.any_tab) {
+    // 不传 tab_id 时就找当前活动标签
+  }
+  const tab = await resolveTab(params.tab_id);
+  const fn = mode === "write"
+    ? (text) => navigator.clipboard.writeText(text).then(() => text)
+    : () => navigator.clipboard.readText();
+
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "ISOLATED",                       // ← 关键：不需要 userScripts
+      func: mode === "write" ? (t) => navigator.clipboard.writeText(t)
+                             : () => navigator.clipboard.readText(),
+      args: mode === "write" ? [String(params.text ?? "")] : [],
+    });
+  } catch (e) {
+    const msg = String(e && e.message || e);
+    if (/Cannot access|chrome:\/\/|edge:\/\//i.test(msg)) {
+      throw new Error("当前是浏览器内部页，不能在里面读写剪贴板"
+                    + "（和内部页读不了 DOM 是同一个硬边界）");
+    }
+    if (/NotAllowedError|not focused|Document is not focused/i.test(msg)) {
+      throw new Error("读剪贴板要求**页面处于聚焦状态**（浏览器隐私限制）—— "
+                    + "点一下目标标签让它在前台，再试一次");
+    }
+    throw e;
+  }
+  const val = results && results[0] ? results[0].result : undefined;
+  return mode === "write"
+    ? { mode, ok: true, length: String(params.text ?? "").length, text: "" }
+    : { mode, text: typeof val === "string" ? val : String(val ?? "") };
+}
+
 export { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
-         downloadViaSession, cookieGet, cookieSet, ensureUserScripts };
+         downloadViaSession, cookieGet, cookieSet, ensureUserScripts, bookmarks, historySearch, clipboardOp };
