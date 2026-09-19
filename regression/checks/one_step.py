@@ -138,3 +138,127 @@ def run(r) -> None:
         _unreachable.append(_n)
     r.ok("S7 扩展能执行的命令，插件都够得着（不会再出现'实现了却没接出来'）",
          not _unreachable, f"够不着的={_unreachable or '无'}")
+
+    # ── S8 工具 schema 里**数组必须带 items**（否则 Gemini 直接 400）──────
+    #    ⚠️ 真实事故：browser_cookie 的 `cookies` 只写了
+    #       {"type": "array", "description": ...} —— **没有 items**。
+    #       OpenAI 宽松没事，换 Gemini 整个模型组失败：
+    #         tools[0].function_declarations[12].***.properties[cookies]
+    #         .items: missing field.
+    #       （用户的模型组里有 Gemini，于是一条 400 把整组拖垮。）
+    #    ⚠️ 扫描要用 ast（文本 regex 分不清层级）—— 且注意
+    #       **`async def` 是 AsyncFunctionDef**，只认 FunctionDef 会扫出 0 个工具
+    #       （我第一次就是这么写的，白跑三轮）。
+    import ast as _ast8
+    _tree = _ast8.parse(src_safe("main.py"))
+    _bad8, _arrays = [], 0
+
+    def _scan8(node, tool):
+        nonlocal _arrays
+        if isinstance(node, _ast8.Dict):
+            _kv = {}
+            for _k, _v in zip(node.keys, node.values):
+                if isinstance(_k, _ast8.Constant):
+                    _kv[_k.value] = _v
+            if getattr(_kv.get("type"), "value", None) == "array":
+                _arrays += 1
+                if "items" not in _kv:
+                    _bad8.append(f"{tool}(行 {node.lineno})")
+            for _v in node.values:
+                _scan8(_v, tool)
+        elif isinstance(node, (_ast8.List, _ast8.Tuple)):
+            for _v in (getattr(node, "elts", None) or getattr(node, "values", []) or []):
+                _scan8(_v, tool)
+
+    for _n in _ast8.walk(_tree):
+        if isinstance(_n, (_ast8.FunctionDef, _ast8.AsyncFunctionDef)):
+            for _d in _n.decorator_list:
+                if isinstance(_d, _ast8.Call) and getattr(_d.func, "attr", "") == "tool":
+                    for _kw in _d.keywords:
+                        if _kw.arg == "params":
+                            _scan8(_kw.value, _n.name)
+    r.ok("S8 工具 schema 的数组都带 items（否则 Gemini 直接 400）",
+         not _bad8, f"缺 items={_bad8 or '无'}（扫到 {_arrays} 个数组）")
+
+    # ── S9 浏览历史默认关（隐私），且开了才放行 ──────────────────────
+    #    历史是**用户没主动交出来**的数据，不能默认就交给模型 ——
+    #    和 inject_page_state / 下载清理一个道理：默认取向要是保守的那边。
+    #    书签不受此限（书签是用户主动收藏的，性质不同）。
+    import json as _json9
+    _sch9 = _json9.loads(src_safe("schema.json"))
+
+    def _find9(o, key):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == key: return v
+                got = _find9(v, key)
+                if got is not None: return got
+        elif isinstance(o, list):
+            for v in o:
+                got = _find9(v, key)
+                if got is not None: return got
+        return None
+    _m9 = src_safe("main.py")
+    _bad9 = []
+    if (_find9(_sch9, "allow_history") or {}).get("default") is not False:
+        _bad9.append("schema 里不是默认关")
+    if 'cfg.get("allow_history", False)' not in _m9:
+        _bad9.append("代码回落值不是 False")
+    if "if not self.allow_history" not in _m9:
+        _bad9.append("没有真的拦住（开关没接进动作里）")
+    r.ok("S9 浏览历史默认关，且开关真的拦得住", not _bad9,
+         f"问题={_bad9 or '无'}")
+
+    # ── S10 侧边栏能配**全部**项，且改完立刻生效 ──────────────────────
+    #    用户要的是"完全由侧边栏可配置和热更改"。三条都要在：
+    #      ① 有读/写配置的端点
+    #      ② _apply_config 会把侧边栏的覆盖值叠在框架配置之上（不叠 = 光存不生效）
+    #      ③ 界面**从 schema.json 生成**（照着一处真源长出来，加新项自动出现）
+    _m10 = src_safe("main.py")
+    _ui = src_safe("web/app.js")
+    _bad10 = []
+    if 'register.api("GET", "/config"' not in _m10:
+        _bad10.append("没有 GET /config")
+    if 'register.api("POST", "/config"' not in _m10:
+        _bad10.append("没有 POST /config")
+    if "cfg.update(self._cfg_overrides or {})" not in _m10:
+        _bad10.append("覆盖值没叠进 _apply_config（那样就像'存了不生效'）")
+    if "self._apply_config(getattr(self, \"plugin_cfg\", {}) or {})" not in _m10:
+        _bad10.append("保存后没有热应用")
+    if "schema.json" not in _m10 or '"fields": self._schema_fields()' not in _m10:
+        _bad10.append("端点没把 schema 交出去")
+    if "r.fields" not in _ui or "loadConfig" not in _ui:
+        _bad10.append("界面没有按 schema 生成")
+    if "保存并立刻生效" not in _ui:
+        _bad10.append("界面上没说清'立刻生效'")
+    r.ok("S10 侧边栏可配置全部项并热生效（读/写端点 + 叠覆盖 + schema 生成）",
+         not _bad10, f"问题={_bad10 or '无'}")
+
+    # ── S11 README 里要写明"一切都可以在侧边栏配置" ────────────────────
+    _rd = src_safe("README.md")
+    r.ok("S11 README 的配置章节写明'侧边栏可配置、改完即生效'",
+         "侧边栏 WebUI" in _rd and "不用重启" in _rd,
+         "用户找不到入口的话，再好的面板也白搭")
+
+    # ── S12 配置区开头要有说明块（照 KiraAI 官方搜索插件的 info 写法）────
+    #    官方那套是 `"type": "info"` + `level` + `locales.zh.hint` ——
+    #    在设置页里渲染成一段纯说明（不是输入框）。用户要求：
+    #    告诉用户"一切都可以在侧边栏 WebUI 配置更快捷"，
+    #    并提示"装完扩展后重开浏览器 + 重新打开侧边栏页面更容易连上"。
+    import json as _json12
+    _raw12 = _json12.loads(src_safe("schema.json"))
+    _first12 = list(_raw12.keys())[0] if _raw12 else ""
+    _info12 = _raw12.get("info_intro") or {}
+    _zh12 = ((_info12.get("locales") or {}).get("zh") or {})
+    _txt12 = str(_zh12.get("hint") or "")
+    _bad12 = []
+    if _first12 != "info_intro":
+        _bad12.append(f"说明块不在最前面（第一项是 {_first12}）")
+    if _info12.get("type") != "info" or _info12.get("level") != "info":
+        _bad12.append("没有按官方写法（type/level 都该是 info）")
+    if "侧边栏" not in _txt12:
+        _bad12.append("没提侧边栏 WebUI")
+    if "重新打开一次" not in _txt12:
+        _bad12.append("没提'装完扩展后重开一次更容易连上'")
+    r.ok("S12 配置开头有说明块（照官方 info 写法，含两个关键提示）",
+         not _bad12, f"问题={_bad12 or '无'}")

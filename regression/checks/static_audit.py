@@ -777,7 +777,7 @@ def run(r) -> None:
 
     # ⚠️ 面板渲染事件数据/域名时必须用 textContent，不能拼 innerHTML
     #    （这些字段来自持有 bridge token 的一方，是注入口 CWE-79）。
-    web = src_safe("web/index.html")
+    web = src_safe("web/app.js") + src_safe("web/index.html")
     _sinks = re.findall(r'\$\(["\'](?:conflog|domains)["\']\)\.innerHTML\s*=\s*([^;]+)',
                         web)
     r.ok("C16c 面板不用 innerHTML 拼事件数据（XSS）",

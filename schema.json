@@ -1,4 +1,16 @@
 {
+  "info_intro": {
+    "type": "info",
+    "name": "About",
+    "level": "info",
+    "hint": "**Everything here can also be configured from the sidebar WebUI, which is quicker.** Open KiraAI's sidebar, then the \"All-in-One Browser\" plugin page: every option below is editable there (the page is generated from this schema, so new options appear automatically), and changes take effect immediately without restarting KiraAI. The same page also shows connection status, the active backend, extension version, command counters, and the pairing token.\n\nRight after installing the extension, it helps to **restart the browser once and reopen this sidebar WebUI page** - that is the most reliable way to get connected: a freshly loaded extension may still have its service worker asleep, and reopening wakes it immediately so it picks up the port you are actually using.",
+    "locales": {
+      "zh": {
+        "name": "说明",
+        "hint": "**这里的一切都可以在侧边栏 WebUI 里配置，更快捷。**  打开 KiraAI 侧边栏 →「全能浏览器」插件页：下面每一项都能在那儿改，**改完立刻生效、不用重启**；那个页面是照着这份 schema 生成的，以后加了新选项它会自动出现。  同一页还能看连接状态、当前后端、扩展版本、命令计数，以及生成 / 复制接入令牌。\n\n**刚装完扩展时，建议把浏览器重新打开一次，再重新打开一次侧边栏 WebUI 页面**—— 这样最容易连上：扩展刚加载时它的后台进程可能还在休眠，重开一次会让它立刻醒过来去认你当前这个端口。"
+      }
+    }
+  },
   "enabled": {
     "name": "Enabled",
     "type": "switch",
@@ -549,6 +561,17 @@
       "zh": {
         "name": "写操作后一并返回页面内容",
         "hint": "**默认开，建议保持**。框架有「每轮最多 5 次工具调用」的限制（bot_config.agent.max_tool_calls_per_turn），而「点一下 → 再看一眼」如果各占一次调用，5 次只够两轮半 —— 日志里满屏 `Tool call limit exceeded ... skipping tool 'browser_page'` 就是这么来的。开着的话，每次点击/输入/导航都会**顺手把新页面内容一起带回来**（扩展内部命令不计次，所以是白赚），同样的调用预算能干两倍的事、还少一次往返。"
+      }
+    }
+  },
+  "allow_history": {
+    "name": "Allow History",
+    "type": "switch",
+    "default": false,
+    "locales": {
+      "zh": {
+        "name": "允许读取浏览历史（默认关）",
+        "hint": "**默认关，建议保持**。开着的话 bot 能通过 browser_interact(action=\\\"history\\\") **搜索你最近看过的网页** —— 这是**你没主动交出来**的隐私数据，一旦开了，你打开过的地址就会按需发给模型。\\n\\n书签（action=\\\"bookmarks\\\"）**不受这个开关限制** —— 书签是你主动收藏的，性质不一样。\\n\\n要开的话：想清楚再开；开完 browser_diag 的 status 里会一直显示这个状态。"
       }
     }
   },

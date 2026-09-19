@@ -1,5 +1,5 @@
 /**
- * 行为级验证：`loadToken` 的**请求序号**守卫（web/index.html）。
+ * 行为级验证：`loadToken` 的**请求序号**守卫（web/app.js）。
  *
  * ⚠️ 要防的竞态：
  *    定期轮询 `loadToken(false)` 与用户点「重新生成」的 `loadToken(true)`
@@ -7,7 +7,7 @@
  *    轮询那条，它再晚一点返回 —— 面板上于是又显示回一枚**已经作废**的
  *    旧令牌。没有序号守卫时，"后到的响应无条件覆盖"，这个覆盖就会发生。
  *
- * 做法：从 web/index.html 里**抽出真的 loadToken**（不复制一份），
+ * 做法：从 web/app.js 里**抽出真的 loadToken**（不复制一份），
  * 配上受控的 `api()` 桩，显式安排返回顺序。
  *
  * 输出最后一行是 JSON（供 Python 侧解析）。
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const PLUGIN = process.env.KIRA_PLUGIN_DIR
   || fileURLToPath(new URL("../..", import.meta.url));
-const html = readFileSync(`${PLUGIN}/web/index.html`, "utf8");
+const html = readFileSync(`${PLUGIN}/web/app.js`, "utf8");
 
 const results = [];
 const push = (name, ok, detail = "") => results.push({ name, ok, detail });
@@ -27,7 +27,7 @@ const startMarker = "async function loadToken(";
 const at = html.indexOf(startMarker);
 let src = "";
 if (at < 0) {
-  push("可定位 loadToken", false, "index.html 里找不到该函数");
+  push("可定位 loadToken", false, "app.js 里找不到该函数");
 } else {
   // 函数体结束：从起点往后第一个顶格的 `}`
   const rest = html.slice(at);
@@ -45,7 +45,9 @@ if (at < 0) {
 if (src) {
   const fields = {};
   const grab = (id) => {
-    if (!fields[id]) fields[id] = { value: "", textContent: "", innerHTML: "" };
+    // 面板改版后：真令牌存在 `#tokBox` 的 dataset 里（显示的是截断版），
+    // 所以桩也要有 dataset ✓
+    if (!fields[id]) fields[id] = { value: "", textContent: "", innerHTML: "", dataset: {} };
     return fields[id];
   };
   const $ = (id) => grab(id);
@@ -74,12 +76,12 @@ if (src) {
   // 强制的先返回：新令牌
   pending[1]({ ok: true, token: "BRANDNEW", changed: true, never_expires: true });
   await p2;
-  const afterRegen = fields["token"].value;
+  const afterRegen = fields["tokBox"].dataset.token;
 
   // 轮询的**迟到**响应：旧令牌（已经是作废的了）
   pending[0]({ ok: true, token: "STALEOLD", changed: false, never_expires: true });
   await p1;
-  const afterLate = fields["token"].value;
+  const afterLate = fields["tokBox"].dataset.token;
 
   push("强制请求先返回时显示新令牌", afterRegen === "BRANDNEW",
        `token=${afterRegen}`);
@@ -87,9 +89,9 @@ if (src) {
        `token=${afterLate}（若为 STALEOLD 说明序号守卫失效）`);
   // tokenFingerprint 取末 4 位：BRANDNEW → "DNEW"、STALEOLD → "TOLD"
   push("指纹也来自新令牌（不是迟到的那枚）",
-       String(fields["fingerprint"].innerHTML).includes("DNEW")
-       && !String(fields["fingerprint"].innerHTML).includes("TOLD"),
-       String(fields["fingerprint"].innerHTML).slice(0, 60));
+       String(fields["tok"].textContent).includes("DNEW")
+       && !String(fields["tok"].textContent).includes("TOLD"),
+       String(fields["tok"].textContent).slice(0, 60));
 
   // ── 对照：逆序（轮询先回，再回强制的）—— 后者本就该赢 ───────────
   const q1 = loadToken(false);
@@ -98,8 +100,8 @@ if (src) {
   await q1;
   pending[3]({ ok: true, token: "NEW2", changed: true, never_expires: true });
   await q2;
-  push("正常顺序下新令牌生效", fields["token"].value === "NEW2",
-       `token=${fields["token"].value}`);
+  push("正常顺序下新令牌生效", fields["tokBox"].dataset.token === "NEW2",
+       `token=${fields["tokBox"].dataset.token}`);
 
   // ── 失败响应同样不许覆盖更新的成功结果 ───────────────────────────
   const r1 = loadToken(false);
@@ -114,8 +116,8 @@ if (src) {
        pushed.length > 0 && !pushed.some((t) => t === "STALEOLD"),
        `推送记录=${JSON.stringify(pushed)}`);
 
-  push("迟到的失败响应不得覆盖新令牌", fields["token"].value === "NEW3",
-       `token=${fields["token"].value}`);
+  push("迟到的失败响应不得覆盖新令牌", fields["tokBox"].dataset.token === "NEW3",
+       `token=${fields["tokBox"].dataset.token}`);
 }
 
 console.log(JSON.stringify(results));

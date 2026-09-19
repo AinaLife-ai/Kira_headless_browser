@@ -98,12 +98,32 @@ WRITE_TOOL_NAMES = (
 )
 
 
+def _manifest_version() -> str:
+    """从 manifest.json 读版本 —— 面板显示用，避免两处写死。"""
+    try:
+        p = Path(__file__).with_name("manifest.json")
+        return str(json.loads(p.read_text(encoding="utf-8")).get("version") or "")
+    except Exception:
+        return ""
+
+
+_MANIFEST_VERSION = _manifest_version()
+
+
 class BrowserPlugin(BasePlugin):
     """合并后的浏览器插件。"""
+
+    #: 面板上显示的版本（见 _manifest_version）
+    PLUGIN_VERSION = _MANIFEST_VERSION
 
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
         self.bridge = BrowserBridge()
+        # ⚠️ 顺序要紧：覆盖值必须在 `_apply_config` **之前**加载 ——
+        #    `_apply_config` 会把它们叠在框架配置之上（覆盖优先）✓
+        self._cfg_overrides = self._load_overrides()
+        # 记住框架给的配置：侧边栏热更新时要基于它重新摊平
+        self.plugin_cfg = dict(cfg or {})
         self._apply_config(cfg)
 
         self._last_state: dict = {}
@@ -120,7 +140,18 @@ class BrowserPlugin(BasePlugin):
     # ══════════════════════════════════════════════════════════════════
 
     def _apply_config(self, cfg: dict) -> None:
-        """把配置摊平到实例属性。initialize 会重入，必须幂等。"""
+        """把配置摊平到实例属性。initialize 会重入，必须幂等。
+
+        ⚠️ **侧边栏 WebUI 的改动也要能生效**：WebUI 写下来的覆盖值存在
+           `<插件数据目录>/webui_config.json`，这里把它们**叠在框架配置之上**
+           （覆盖优先）—— 于是 `_apply_config` 一跑，热更新就完成了。
+           不这么做的话，WebUI 改完得重启 KiraAI 才生效 ✗
+        """
+        cfg = dict(cfg or {})
+        try:
+            cfg.update(self._cfg_overrides or {})
+        except Exception as e:                     # 覆盖值坏了不该拖垮初始化
+            logger.warning(f"WebUI 覆盖配置读取失败（忽略）：{e}")
         self.enabled = _b(cfg.get("enabled", True))
         # —— 后端策略 ——
         self.backend_strategy = (cfg.get("backend_strategy", "auto") or "auto").lower()
@@ -162,6 +193,10 @@ class BrowserPlugin(BasePlugin):
         # 写操作后是否顺手带回页面状态（默认开）。
         # 省工具调用次数：框架每轮上限默认 5，"点一下+看一眼"要两次就太快用光。
         self.return_page_after_write = _b(cfg.get("return_page_after_write", True))
+        # ⚠️ **默认关**：浏览历史是**用户没主动交出来**的隐私数据 ——
+        #    它会把"你最近看过什么"整段交给模型。要开的人自己去面板上开，
+        #    而且开了之后 `browser_diag` 会一直显示这个状态（看得见）。
+        self.allow_history = _b(cfg.get("allow_history", False))
         #: 默认是否描述。**每次截图时模型也可以自己用 describe 参数覆盖** ——
         # 「要不要看图」应该由模型按当前任务决定（有时它只想把图发给用户）。
         self.auto_describe_screenshot = _b(cfg.get("auto_describe_screenshot", True))
@@ -1289,6 +1324,10 @@ class BrowserPlugin(BasePlugin):
 
         if a == "history":
             # 看过的网页（chrome.history）—— 和书签同理，是**数据**不是页面
+            if not self.allow_history:
+                return ("🔒 浏览历史读取**未开启**（默认关，属于隐私数据）。"
+                        "需要的话请在插件配置里打开「允许读取浏览历史」。"
+                        "书签（action=\"bookmarks\"）不受这个开关限制。")
             return await self._call("history", for_write=False,
                                     query=kw.get("query"),
                                     limit=kw.get("amount") or 100,
@@ -1530,7 +1569,24 @@ class BrowserPlugin(BasePlugin):
         params={"type": "object", "properties": {
             "action": {"type": "string", "enum": ["export", "import"]},
             "url": {"type": "string", "description": "export 目标，省略用当前页"},
-            "cookies": {"type": "array", "description": "import 要写入的数组"}},
+            "cookies": {"type": "array",
+                        # ⚠️ `items` **必须写**：Gemini 的函数声明 schema 比
+                        #    JSON Schema 严 —— 数组没有 items 直接 400：
+                        #      tools[0].function_declarations[..].properties
+                        #      [cookies].items: missing field.
+                        #    OpenAI 宽松所以没事，换 Gemini 就整个模型组失败 ✗
+                        "items": {"type": "object",
+                                  "properties": {
+                                      "name": {"type": "string"},
+                                      "value": {"type": "string"},
+                                      "domain": {"type": "string"},
+                                      "path": {"type": "string"},
+                                      "secure": {"type": "boolean"},
+                                      "httpOnly": {"type": "boolean"},
+                                      "expires": {"type": "number"}}},
+                        "description": "import 要写入的 cookie 数组"
+                                       "（每项至少有 name + value；"
+                                       "export 出来的可以原样传回来）"}},
             "required": ["action"]},
     )
     async def tool_cookie(self, event, action: str, url: str = "", cookies=None, **_):
@@ -1761,6 +1817,7 @@ class BrowserPlugin(BasePlugin):
     async def api_status(self):
         return {
             "enabled": self.enabled,
+            "plugin_version": getattr(self, "PLUGIN_VERSION", "") or "",
             "connected": self.bridge.connected,
             "bridge": self.bridge.info,
             "router": {
@@ -1812,6 +1869,90 @@ class BrowserPlugin(BasePlugin):
     #  为什么需要：扩展要填 host / 端口 / 令牌三样，而**端口默认写死 5267** ——
     #  用户只要改过 KiraAI 的端口，扩展就连不上，且报错只说"连不上"，
     #  小白用户根本不知道该改哪里。
+    # ── 侧边栏 WebUI：配置读写（热更新）────────────────────────────
+    def _overrides_path(self):
+        return Path(self.ctx.get_plugin_data_dir()) / "webui_config.json"
+
+    def _load_overrides(self) -> dict:
+        """读 WebUI 写下来的覆盖值。任何异常都当"没有覆盖"，不拖垮初始化。"""
+        try:
+            p = self._overrides_path()
+            if p.is_file():
+                d = json.loads(p.read_text(encoding="utf-8"))
+                return d if isinstance(d, dict) else {}
+        except Exception as e:
+            logger.warning(f"读取 WebUI 配置失败（按无覆盖处理）：{e}")
+        return {}
+
+    def _schema_fields(self) -> dict:
+        """**界面直接从 schema.json 长出来** —— 一处真源。
+
+        ⚠️ 这比在 HTML 里手写一遍表单强得多：以后加一个配置项，
+           只要写进 schema.json，侧边栏就自动出现，不用改前端 ✗✓
+        """
+        try:
+            p = Path(__file__).with_name("schema.json")
+            d = json.loads(p.read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else {}
+        except Exception as e:
+            logger.warning(f"读取 schema.json 失败：{e}")
+            return {}
+
+    def _config_snapshot(self) -> dict:
+        """当前**生效**的值（含 WebUI 覆盖）。给界面回显用。"""
+        keys = set(self._schema_fields().keys())
+        out = {}
+        for k in sorted(keys):
+            v = getattr(self, k, None)
+            if isinstance(v, (str, int, float, bool)) or v is None:
+                out[k] = v
+            elif isinstance(v, (list, tuple)):
+                out[k] = list(v)
+        return out
+
+    @register.api("GET", "/config", auth=True)
+    async def api_get_config(self):
+        """侧边栏读取：**当前生效值** + schema（界面照着它渲染表单）。"""
+        return {"ok": True, "values": self._config_snapshot(),
+                "fields": self._schema_fields(),
+                "overrides": sorted((self._cfg_overrides or {}).keys())}
+
+    @register.api("POST", "/config", auth=True)
+    async def api_set_config(self, values: dict = None):
+        """侧边栏写入：**存下来 + 立刻生效**（不用重启）✓
+
+        ⚠️ 只接受 schema 里声明过的键 —— 免得前端拼错一个字就悄悄写入
+           一个没人读的字段（那种 bug 最难查）。
+        """
+        values = values or {}
+        known = set(self._schema_fields().keys())
+        bad = [k for k in values if k not in known]
+        if bad:
+            return {"ok": False, "error": f"未知配置项：{bad}"}
+
+        cur = dict(self._cfg_overrides or {})
+        for k, v in values.items():
+            if v is None or v == "":
+                cur.pop(k, None)       # 空 = 回到框架配置的默认值
+            else:
+                cur[k] = v
+        try:
+            p = self._overrides_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(cur, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+        except Exception as e:
+            logger.error(f"保存 WebUI 配置失败：{e}")
+            return {"ok": False, "error": str(e)}
+
+        self._cfg_overrides = cur
+        # ⚠️ **热更新**：重跑一次 _apply_config，立刻生效
+        self._apply_config(getattr(self, "plugin_cfg", {}) or {})
+        logger.info(f"侧边栏改配置：{list(values.keys())}（已热生效）")
+        return {"ok": True, "values": self._config_snapshot(),
+                "overrides": sorted(cur.keys()),
+                "applied": list(values.keys())}
+
     @register.api("GET", "/pair", auth=False)
     async def api_pair(self, request: Request):
         """返回本实例的接入信息（端口 + 令牌），供扩展自动填充。
