@@ -489,6 +489,57 @@ python -m playwright install chromium
 <details>
 <summary><b>2.1.x</b> — 49 个版本　·　最新的一系列：双后端重构、安全加固、以及大量审查修复</summary>
 
+### v2.1.72（2026-09-19）
+
+**修掉一条把整组模型拖垮的 400（是我们造成的）+ 历史读取开关（默认关）。**
+
+#### 那条 Gemini 400 是我们造成的 ✗
+
+```
+tools[0].function_declarations[12].***.properties[cookies].items: missing field.
+```
+
+`browser_cookie` 的 `cookies` 参数写成了：
+
+```python
+{"type": "array", "description": "import 要写入的数组"}     # ← 没有 items ✗
+```
+
+**Gemini 的函数声明 schema 比 JSON Schema 严** —— 数组**必须**有 `items`，
+没有就直接 400；而 OpenAI 宽松，所以一直没暴露 ✗ 用户的模型组里有 Gemini，
+**一条 400 把整组拖垮**。
+
+→ 补上完整的 `items`（name/value/domain/path/secure/httpOnly/expires）✓
+
+#### 新增 S8：数组必须有 items（常驻检查）
+
+> 扫描用 **ast**（文本 regex 分不清层级）。
+> ⚠️ 踩的坑：**`async def` 是 `AsyncFunctionDef`** —— 只认 `FunctionDef`
+> 会扫出 **0 个工具**却"报绿"，等于没查（我第一次就写了三轮才发现）。
+
+反向验证：把 `items` 去掉 → S8 点名 `tool_cookie(行 1533)` ✓
+
+#### 新增 `allow_history`（**默认关**）
+
+浏览历史是**用户没主动交出来**的隐私数据 —— 默认就把"你最近看过什么"
+交给模型不合适。开关默认关，开了才放行：
+
+- 关着时 `browser_interact(action="history")` 会明确说明**为什么**被拒 + 怎么开
+- **书签不受此限**（书签是用户主动收藏的，性质不同）
+
+#### 新增 S9
+
+历史默认关 + 开关**真的拦得住**（不是只在 schema 上写了默认值）。
+
+#### 顺带
+
+README 顶部那行"当前版本 2.1.48"是**过时的**（早就 2.1.71 了），
+已经删掉 —— 版本号看更新日志就够了，省得每次都要同步两处。
+（B4 守卫查的是"版本号出现在 README 里"，更新日志里有 `### v2.1.7x`，
+所以不受影响。）
+
+套件 **440/440 全绿**。
+
 ### v2.1.71（2026-09-19）
 
 **剪贴板读写 / 多标签批量操作 / 标签搜索 + 「够得着」对账（40 个命令全通）。**

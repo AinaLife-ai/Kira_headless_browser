@@ -162,6 +162,10 @@ class BrowserPlugin(BasePlugin):
         # 写操作后是否顺手带回页面状态（默认开）。
         # 省工具调用次数：框架每轮上限默认 5，"点一下+看一眼"要两次就太快用光。
         self.return_page_after_write = _b(cfg.get("return_page_after_write", True))
+        # ⚠️ **默认关**：浏览历史是**用户没主动交出来**的隐私数据 ——
+        #    它会把"你最近看过什么"整段交给模型。要开的人自己去面板上开，
+        #    而且开了之后 `browser_diag` 会一直显示这个状态（看得见）。
+        self.allow_history = _b(cfg.get("allow_history", False))
         #: 默认是否描述。**每次截图时模型也可以自己用 describe 参数覆盖** ——
         # 「要不要看图」应该由模型按当前任务决定（有时它只想把图发给用户）。
         self.auto_describe_screenshot = _b(cfg.get("auto_describe_screenshot", True))
@@ -1289,6 +1293,10 @@ class BrowserPlugin(BasePlugin):
 
         if a == "history":
             # 看过的网页（chrome.history）—— 和书签同理，是**数据**不是页面
+            if not self.allow_history:
+                return ("🔒 浏览历史读取**未开启**（默认关，属于隐私数据）。"
+                        "需要的话请在插件配置里打开「允许读取浏览历史」。"
+                        "书签（action=\"bookmarks\"）不受这个开关限制。")
             return await self._call("history", for_write=False,
                                     query=kw.get("query"),
                                     limit=kw.get("amount") or 100,
@@ -1530,7 +1538,24 @@ class BrowserPlugin(BasePlugin):
         params={"type": "object", "properties": {
             "action": {"type": "string", "enum": ["export", "import"]},
             "url": {"type": "string", "description": "export 目标，省略用当前页"},
-            "cookies": {"type": "array", "description": "import 要写入的数组"}},
+            "cookies": {"type": "array",
+                        # ⚠️ `items` **必须写**：Gemini 的函数声明 schema 比
+                        #    JSON Schema 严 —— 数组没有 items 直接 400：
+                        #      tools[0].function_declarations[..].properties
+                        #      [cookies].items: missing field.
+                        #    OpenAI 宽松所以没事，换 Gemini 就整个模型组失败 ✗
+                        "items": {"type": "object",
+                                  "properties": {
+                                      "name": {"type": "string"},
+                                      "value": {"type": "string"},
+                                      "domain": {"type": "string"},
+                                      "path": {"type": "string"},
+                                      "secure": {"type": "boolean"},
+                                      "httpOnly": {"type": "boolean"},
+                                      "expires": {"type": "number"}}},
+                        "description": "import 要写入的 cookie 数组"
+                                       "（每项至少有 name + value；"
+                                       "export 出来的可以原样传回来）"}},
             "required": ["action"]},
     )
     async def tool_cookie(self, event, action: str, url: str = "", cookies=None, **_):

@@ -552,6 +552,17 @@
       }
     }
   },
+  "allow_history": {
+    "name": "Allow History",
+    "type": "switch",
+    "default": false,
+    "locales": {
+      "zh": {
+        "name": "允许读取浏览历史（默认关）",
+        "hint": "**默认关，建议保持**。开着的话 bot 能通过 browser_interact(action=\\\"history\\\") **搜索你最近看过的网页** —— 这是**你没主动交出来**的隐私数据，一旦开了，你打开过的地址就会按需发给模型。\\n\\n书签（action=\\\"bookmarks\\\"）**不受这个开关限制** —— 书签是你主动收藏的，性质不一样。\\n\\n要开的话：想清楚再开；开完 browser_diag 的 status 里会一直显示这个状态。"
+      }
+    }
+  },
   "vlm_timeout": {
     "name": "VLM Timeout",
     "type": "integer",

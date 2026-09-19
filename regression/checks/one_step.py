@@ -138,3 +138,73 @@ def run(r) -> None:
         _unreachable.append(_n)
     r.ok("S7 扩展能执行的命令，插件都够得着（不会再出现'实现了却没接出来'）",
          not _unreachable, f"够不着的={_unreachable or '无'}")
+
+    # ── S8 工具 schema 里**数组必须带 items**（否则 Gemini 直接 400）──────
+    #    ⚠️ 真实事故：browser_cookie 的 `cookies` 只写了
+    #       {"type": "array", "description": ...} —— **没有 items**。
+    #       OpenAI 宽松没事，换 Gemini 整个模型组失败：
+    #         tools[0].function_declarations[12].***.properties[cookies]
+    #         .items: missing field.
+    #       （用户的模型组里有 Gemini，于是一条 400 把整组拖垮。）
+    #    ⚠️ 扫描要用 ast（文本 regex 分不清层级）—— 且注意
+    #       **`async def` 是 AsyncFunctionDef**，只认 FunctionDef 会扫出 0 个工具
+    #       （我第一次就是这么写的，白跑三轮）。
+    import ast as _ast8
+    _tree = _ast8.parse(src_safe("main.py"))
+    _bad8, _arrays = [], 0
+
+    def _scan8(node, tool):
+        nonlocal _arrays
+        if isinstance(node, _ast8.Dict):
+            _kv = {}
+            for _k, _v in zip(node.keys, node.values):
+                if isinstance(_k, _ast8.Constant):
+                    _kv[_k.value] = _v
+            if getattr(_kv.get("type"), "value", None) == "array":
+                _arrays += 1
+                if "items" not in _kv:
+                    _bad8.append(f"{tool}(行 {node.lineno})")
+            for _v in node.values:
+                _scan8(_v, tool)
+        elif isinstance(node, (_ast8.List, _ast8.Tuple)):
+            for _v in (getattr(node, "elts", None) or getattr(node, "values", []) or []):
+                _scan8(_v, tool)
+
+    for _n in _ast8.walk(_tree):
+        if isinstance(_n, (_ast8.FunctionDef, _ast8.AsyncFunctionDef)):
+            for _d in _n.decorator_list:
+                if isinstance(_d, _ast8.Call) and getattr(_d.func, "attr", "") == "tool":
+                    for _kw in _d.keywords:
+                        if _kw.arg == "params":
+                            _scan8(_kw.value, _n.name)
+    r.ok("S8 工具 schema 的数组都带 items（否则 Gemini 直接 400）",
+         not _bad8, f"缺 items={_bad8 or '无'}（扫到 {_arrays} 个数组）")
+
+    # ── S9 浏览历史默认关（隐私），且开了才放行 ──────────────────────
+    #    历史是**用户没主动交出来**的数据，不能默认就交给模型 ——
+    #    和 inject_page_state / 下载清理一个道理：默认取向要是保守的那边。
+    #    书签不受此限（书签是用户主动收藏的，性质不同）。
+    import json as _json9
+    _sch9 = _json9.loads(src_safe("schema.json"))
+
+    def _find9(o, key):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == key: return v
+                got = _find9(v, key)
+                if got is not None: return got
+        elif isinstance(o, list):
+            for v in o:
+                got = _find9(v, key)
+                if got is not None: return got
+        return None
+    _m9 = src_safe("main.py")
+    _bad9 = []
+    if (_find9(_sch9, "allow_history") or {}).get("default") is not False:
+        _bad9.append("schema 里不是默认关")
+    if 'cfg.get("allow_history", False)' not in _m9:
+        _bad9.append("代码回落值不是 False")
+    if "if not self.allow_history" not in _m9:
+        _bad9.append("没有真的拦住（开关没接进动作里）")
+    r.ok("S9 浏览历史默认关，且开关真的拦得住", not _bad9,
+         f"问题={_bad9 or '无'}")
