@@ -1960,6 +1960,37 @@ class BrowserPlugin(BasePlugin):
                 "overrides": sorted(cur.keys()),
                 "applied": list(values.keys())}
 
+    @register.api("GET", "/models", auth=True)
+    async def api_models(self):
+        """给面板的 model_select 用：列出可选的模型。
+
+        照 Z 插件的做法 —— **由插件后端去框架里读**，而不是让面板直接
+        打框架的 /api/providers ✗（那样既绕、又容易因为字段名不同而显示成 id）。
+
+        - 只取 `model_config.llm` 组：视觉模型也必须配在 LLM 组里才选得到
+          （框架只把 LLM 组的模型交给模型用）
+        - `id` 用 `provider_id:model_id`（配置里填的就是这个格式）
+        - `name` 是 `模型名 (提供商名)` —— 下拉里给人看的是**提供商的名字**，
+          不是那串 id ✓
+        """
+        models = []
+        try:
+            pm = getattr(self.ctx, "provider_mgr", None)
+            if pm is not None and hasattr(pm, "kira_config"):
+                providers = pm.kira_config.get("providers", {}) or {}
+                for pid, pcfg in providers.items():
+                    if not isinstance(pcfg, dict):
+                        continue
+                    mc = (pcfg.get("model_config") or {})
+                    llm = (mc.get("llm") or {})
+                    pname = pcfg.get("name") or pid
+                    for mid in llm:
+                        models.append({"id": f"{pid}:{mid}",
+                                       "name": f"{mid} ({pname})"})
+        except Exception as e:
+            logger.warning(f"列模型失败：{type(e).__name__}: {e}")
+        return {"models": models}
+
     @register.api("GET", "/pair", auth=False)
     async def api_pair(self, request: Request):
         """返回本实例的接入信息（端口 + 令牌），供扩展自动填充。

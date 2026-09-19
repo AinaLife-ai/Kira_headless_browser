@@ -271,6 +271,13 @@ def run(r) -> None:
     _bad13 = []
     if "token?force=" not in _ui13:
         _bad13.append("令牌调用没把 force 放进 query")
+    # ⚠️ **还要是 POST** —— 这就是"旧版能用、重写后不能用"的真正差别：
+    #    旧版是 `api("/token?force=...", { method: "POST" })`，
+    #    我重写面板时把 `{ method: "POST" }` 弄丢了 ✗ → 变成 GET →
+    #    端点只注册了 POST → 404 → 界面"读取失败"。
+    #    只查 query 会漏掉这一半，所以两半都要查。
+    if "token?force=true" not in _ui13 or _ui13.count('method: "POST"') < 2:
+        _bad13.append("令牌调用缺 POST（只有 query 不够 —— 端点只注册了 POST）")
     if 'api("/token", {' in _ui13:
         _bad13.append("还有地方按旧写法调 /token")
     # model_select 必须是下拉（框架的客户端缓存类字段都这么给）

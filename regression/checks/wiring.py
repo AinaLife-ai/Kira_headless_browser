@@ -172,7 +172,7 @@ def run(r) -> None:
     RENAMED = {"command_timeout": "bridge.command_timeout"}
     #: **只有前端用**的配置：Python 侧读它没意义（面板开场播不播动画），
     #: 使用方就是 web/app.js —— 那里出现就算"真的被用了"。
-    FRONTEND_ONLY = {"boot_animation"}
+    FRONTEND_ONLY = {"boot_animation", "boot_replay_seconds"}
 
     unread_attrs = []
     for key in sorted(set(sch) & read):
