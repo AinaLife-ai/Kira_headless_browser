@@ -776,6 +776,27 @@ class BrowserPlugin(BasePlugin):
                     + f" {tag}")
         if method == "get_info":
             return f"📄 标题: {d.get('title', '')}\n🔗 URL: {d.get('url', '')} {tag}"
+        if method == "bookmarks":
+            # ⚠️ 没有这个分支的话数据会被**默认分支丢掉**（守卫 A1 专门盯这个）：
+            #    模型只会看到一句"操作成功"，书签却一条都没拿到。
+            bms = d.get("bookmarks") or []
+            if not bms:
+                return (f"🔖 没找到书签"
+                        + (f"（关键词：{d.get('query')}）" if d.get("query") else "")
+                        + f"{tag}")
+            head = (f"🔖 书签 {len(bms)} 条"
+                    + (f"（筛选自 {d.get('total_bookmarks')} 条）"
+                       if d.get("total_bookmarks") else "")
+                    + ("，已达上限被截断" if d.get("truncated") else "")
+                    + f"{tag}")
+            lines = [head]
+            for b in bms[:80]:
+                if b.get("is_folder"):
+                    lines.append(f"- 📁 {b.get('title')}  [{b.get('folder', '')}]")
+                else:
+                    lines.append(f"- {b.get('title')}  {b.get('url')}"
+                                 + (f"  （{b.get('folder')}）" if b.get("folder") else ""))
+            return "\n".join(lines)
         if method == "list_files":
             files = d.get("files") or []
             if not files:
@@ -1116,7 +1137,7 @@ class BrowserPlugin(BasePlugin):
                 "click", "fill", "type", "hover", "scroll", "upload",
                 "go_back", "refresh", "key_press", "key_down", "key_up", "key_type",
                 "mouse_click", "mouse_move", "mouse_down", "mouse_up",
-                "mouse_wheel", "mouse_drag"]},
+                "mouse_wheel", "mouse_drag", "bookmarks"]},
             "selector": {"type": "string", "description": "CSS 选择器"},
             "text": {"type": "string", "description": "可见文字 / key_type 的文本"},
             "index": {"type": "integer", "description": "第几个可点击元素，从 0 开始"},
@@ -1133,6 +1154,8 @@ class BrowserPlugin(BasePlugin):
             "start_x": {"type": "integer"}, "start_y": {"type": "integer"},
             "end_x": {"type": "integer"}, "end_y": {"type": "integer"},
             "submit": {"type": "boolean"}, "clear_first": {"type": "boolean"},
+            "query": {"type": "string",
+                      "description": "只在 action=bookmarks 时用：按关键词过滤书签（匹配标题或网址）"},
             "tab_id": {"type": "integer"}},
             "required": ["action"]},
     )
@@ -1141,6 +1164,17 @@ class BrowserPlugin(BasePlugin):
             return "浏览器插件未启用"
         a = (action or "").lower()
         w = True          # 默认按写操作处理
+
+        if a in ("bookmarks", "bookmark"):
+            # 读书签**数据**（不是那个页面）。
+            # ⚠️ 为什么需要：`edge://bookmarks` 是浏览器内部页，任何扩展都注入
+            #    不进去（硬边界），"打开书签页去读"这条路是死的。但书签数据本身
+            #    可以走 chrome.bookmarks 拿 —— 用户要的是书签，不是那个页面。
+            #    这是**读**操作（w=False），不需要回带页面。
+            return await self._call("bookmarks", for_write=False,
+                                    query=kw.get("query"),
+                                    max=kw.get("amount") or 200,
+                                    folders_only=bool(kw.get("folders_only")))
 
         if a == "click":
             if not any([kw.get("selector"), kw.get("text"), kw.get("index") is not None]):

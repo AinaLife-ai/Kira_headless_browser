@@ -1428,6 +1428,27 @@ class HeadlessBackend(Backend):
         except Exception as e:
             return OpResult.fail(f"列目录失败: {e}", self.name)
 
+    async def bookmarks(self, query: str = "", limit: int = 200,
+                        folders_only: bool = False) -> OpResult:
+        """无头浏览器**没有书签库** —— 明确说不支持，别装作能做。
+
+        ⚠️ 书签是**用户浏览器**里的数据，只存在于他那个 profile 里。
+           插件临时拉起的无头 profile 是干净的，读到的只会是空 ✗
+           （更糟的是"看起来成功但返回空"，用户会以为书签丢了）。
+           所以这里直接失败，让路由把它标成"这个后端做不到"。
+        """
+        # ⚠️ 失败结果里**照样带上完整形状**（空的）：
+        #    契约检查 F1 要求"渲染层读的字段，两个后端都返回" ——
+        #    对无头来说这些字段只能是空的（它压根没有书签库），
+        #    但形状给全，两边才是可比的。**失败本身照旧如实上报**，
+        #    调用方拿到的是 error（不会走到渲染那一步）。
+        return OpResult.fail(
+            "书签只有用户自己的浏览器里有；无头浏览器用的是临时 profile，"
+            "读不到 —— 请让扩展桥连接后再试", self.name,
+            data={"bookmarks": [], "query": query or "",
+                  "total_bookmarks": 0, "truncated": False,
+                  "unsupported": True})
+
     async def debug_state(self) -> OpResult:
         """给排障用：当前后端到底处在什么状态。"""
         pages = 0

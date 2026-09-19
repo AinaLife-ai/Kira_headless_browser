@@ -66,5 +66,35 @@ def run(r) -> None:
                                 {"user_agent": "Mozilla/5.0 (custom)"})
         r.ok("S4 用户填了 user_agent 就优先用他的",
              b2.user_agent == "Mozilla/5.0 (custom)", f"实际={b2.user_agent!r}")
+
     except Exception as e:
         r.warn("S3/S4 真造无头后端看 UA（需要桩环境）", f"{type(e).__name__}: {e}")
+
+    # ── S5 内部页（edge://）的报错必须**可照做** ────────────────────────
+    #    ⚠️ 原来只说"不允许注入脚本，请先切换到普通网页" —— 模型只能放弃，
+    #       然后回用户一句"扩展没权限访问"，看着像缺陷。
+    #       真实情况是**硬边界**（`<all_urls>` 也不含 chrome://），开不了；
+    #       但有两条能走通的路必须写出来：截图（不需要注入）+ 书签数据接口。
+    _sh = src_safe("browser-bridge/shared.js")
+    _bad5 = []
+    if "硬边界" not in _sh:
+        _bad5.append("没说清这是浏览器的硬边界（不是权限没开）")
+    if "browser_screenshot" not in _sh:
+        _bad5.append("没告诉模型'截图对内部页照样有效'")
+    if "bookmarks" not in _sh:
+        _bad5.append("没告诉模型'书签数据有接口'")
+    r.ok("S5 内部页报错可照做（硬边界 + 截图 + 书签接口）", not _bad5,
+         f"问题={_bad5 or '无'}")
+
+    # ── S6 书签能力与权限 ───────────────────────────────────────────────
+    import json as _json
+    _mf = _json.loads(src_safe("browser-bridge/manifest.json"))
+    _bad6 = []
+    if "bookmarks" not in (_mf.get("permissions") or []):
+        _bad6.append("manifest 没申请 bookmarks 权限")
+    if "async function bookmarks" not in src_safe("browser-bridge/capabilities.js"):
+        _bad6.append("capabilities.js 里没有 bookmarks 实现")
+    if '"bookmarks"' not in src_safe("main.py"):
+        _bad6.append("browser_interact 里没接这个 action")
+    r.ok("S6 书签数据能力可用（权限 + 实现 + action 都齐）", not _bad6,
+         f"问题={_bad6 or '无'}")

@@ -87,6 +87,7 @@ CMD_MOUSE_WHEEL = "mouse_wheel"
 CMD_MOUSE_DRAG = "mouse_drag"
 CMD_LIST_FILES = "list_files"
 CMD_DEBUG = "debug"
+CMD_BOOKMARKS = "bookmarks"
 
 #: 写操作集合 —— 只读模式下会被拦截，且需要过域名白名单
 WRITE_COMMANDS = frozenset({
@@ -129,6 +130,7 @@ ALL_COMMANDS = frozenset({
     CMD_KEY_PRESS, CMD_KEY_DOWN, CMD_KEY_UP,
     CMD_MOUSE_MOVE, CMD_MOUSE_CLICK, CMD_MOUSE_DOWN, CMD_MOUSE_UP,
     CMD_MOUSE_WHEEL, CMD_MOUSE_DRAG, CMD_LIST_FILES, CMD_DEBUG,
+    CMD_BOOKMARKS,
 })
 
 # ─── 事件名（扩展 → 插件） ───────────────────────────────────────────────────

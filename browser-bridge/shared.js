@@ -129,7 +129,29 @@ const INJECTABLE = /^https?:/i;
 
 export function assertInjectable(tab) {
   if (!tab.url || !INJECTABLE.test(tab.url)) {
-    throw new Error(`当前页面（${tab.url || "未知"}）不允许注入脚本，请先切换到普通网页`);
+    // ⚠️ 这条报错是给**模型**看的，必须告诉它"还能怎么办" ——
+    //    原来只说"不允许注入脚本，请先切换到普通网页"，
+    //    模型只能放弃、然后回用户一句"扩展没权限访问"，看着像缺陷。
+    //
+    //    真实情况：`chrome://` / `edge://` 这类**浏览器内部页**是
+    //    **硬边界** —— `<all_urls>` 也不包含它们，任何扩展都注入不了，
+    //    这不是权限没开、也没法开。
+    //
+    //    但有两条**能走通**的路，必须写出来：
+    //      ① **截图**：`browser_screenshot` 走的是 captureVisibleTab，
+    //         截的是可见区域，**不需要注入** → 内部页照常能截，
+    //         配合 VLM 就能读到画面上的内容（书签列表、设置项…）。
+    //      ② **要数据不要页面**：书签数据走 `chrome.bookmarks`（数据接口，
+    //         不碰页面），用 browser_interact 的 action="bookmarks"。
+    throw new Error(
+      `当前页面（${tab.url || "未知"}）是**浏览器内部页**，`
+      + `任何扩展都无法在里面注入脚本（浏览器的硬边界，不是权限没开）。\n`
+      + `可以这样做：\n`
+      + `  · 想**看这个页面**：用 browser_screenshot —— 它对内部页照常有效`
+      + `（截的是可见区域，不需要注入），配合 VLM 就能读到画面内容；\n`
+      + `  · 想读**书签数据**：用 browser_interact 的 action="bookmarks"`
+      + `（走 chrome.bookmarks，读的是数据不是页面）；\n`
+      + `  · 想读普通网页的内容：先 browser_navigate 切过去。`);
   }
 }
 

@@ -466,6 +466,18 @@ class ExtensionBackend(Backend):
         return await self._send(self._P.CMD_LIST_FILES,
                                 {"dir_type": dir_type, "limit": limit})
 
+    async def bookmarks(self, query: str = "", limit: int = 200,
+                        folders_only: bool = False) -> OpResult:
+        """读书签**数据**（不是 edge://bookmarks 那个页面）。
+
+        ⚠️ 为什么必须走数据接口：`edge://bookmarks` 是浏览器内部页，
+           任何扩展都注入不进去（硬边界），"打开书签页去读"这条路是死的。
+           用户要的是书签本身，不是那个页面 —— chrome.bookmarks 能给。
+        """
+        return await self._send(self._P.CMD_BOOKMARKS,
+                                {"query": query or "", "max": limit,
+                                 "folders_only": bool(folders_only)})
+
     async def debug_state(self) -> OpResult:
         return await self._send(self._P.CMD_DEBUG)
 

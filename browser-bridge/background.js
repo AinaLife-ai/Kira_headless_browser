@@ -19,7 +19,7 @@ import {
   DEFAULT_CONFIRM_TIMEOUT_MS, PAIR_PATH, CANDIDATE_PORTS, READ_COMMANDS,
 } from "./protocol.js";
 import { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
-         downloadViaSession, cookieGet, cookieSet } from "./capabilities.js";
+         downloadViaSession, cookieGet, cookieSet, bookmarks } from "./capabilities.js";
 import {
   state, links, activity, otherWriterFor,
   sendRaw, sendResult, sendEvent, sendChunk,
@@ -798,6 +798,7 @@ async function execute(name, params) {
     case CMD.MOUSE_WHEEL:  return await mouseWheel(params);
     case CMD.MOUSE_DRAG:   return await mouseDrag(params);
     case CMD.LIST_FILES:   return await listFiles(params);
+    case CMD.BOOKMARKS:    return await bookmarks(params);
     case CMD.DEBUG:        return await debugInfo(params);
     default:
       throw new Error(`未知命令：${name}`);

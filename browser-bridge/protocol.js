@@ -79,6 +79,7 @@ export const CMD = {
   MOUSE_DRAG: "mouse_drag",
   LIST_FILES: "list_files",
   DEBUG: "debug",
+  BOOKMARKS: "bookmarks",
 };
 
 // 事件名

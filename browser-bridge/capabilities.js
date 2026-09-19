@@ -494,5 +494,60 @@ async function cookieSet(params) {
   return { ok, written: ok, skipped: 0, failed, total: list.length };
 }
 
+/**
+ * 读书签（数据接口，**不碰页面**）。
+ *
+ * ⚠️ 为什么要它：`edge://bookmarks` 是**浏览器内部页**，任何扩展都注入不进去
+ *    （硬边界），所以"打开书签页去读"这条路是死的。
+ *    但书签**数据**本身可以通过 `chrome.bookmarks` 拿 ——
+ *    这才是用户真正想要的东西（要的是书签，不是那个页面）。
+ *    需要 manifest 里有 `bookmarks` 权限。
+ *
+ * @param {object} params
+ *   - query        : 关键词（匹配标题或网址，不区分大小写）
+ *   - max          : 最多返回多少条（默认 200，防一次刷爆上下文）
+ *   - folders_only : 只要文件夹（不要书签条目）
+ */
+async function bookmarks(params = {}) {
+  if (!chrome.bookmarks) {
+    throw new Error("chrome.bookmarks 不可用 —— 扩展可能没重新加载"
+                  + "（本功能需要 manifest 里的 bookmarks 权限）");
+  }
+  const query = String(params.query || "").trim().toLowerCase();
+  const max = Math.max(1, Math.min(2000, Number(params.max) || 200));
+  const foldersOnly = !!params.folders_only;
+
+  const tree = await chrome.bookmarks.getTree();
+  const out = [];
+  let total = 0;
+
+  const walk = (nodes, path) => {
+    for (const n of nodes || []) {
+      const here = path ? `${path}/${n.title || "(未命名)"}` : (n.title || "");
+      if (n.url) {
+        total += 1;
+        const hit = !query
+          || (n.title || "").toLowerCase().includes(query)
+          || n.url.toLowerCase().includes(query);
+        if (!foldersOnly && hit && out.length < max) {
+          out.push({ title: n.title || "", url: n.url, folder: path || "(根)" });
+        }
+      } else {
+        if (foldersOnly && out.length < max && (!query
+            || (n.title || "").toLowerCase().includes(query))) {
+          out.push({ title: n.title || "", url: "", folder: path || "(根)",
+                     is_folder: true });
+        }
+        walk(n.children, here);
+      }
+    }
+  };
+  walk(tree, "");
+
+  return { count: out.length, total_bookmarks: total,
+           truncated: out.length >= max, query: params.query || "",
+           bookmarks: out };
+}
+
 export { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
-         downloadViaSession, cookieGet, cookieSet, ensureUserScripts };
+         downloadViaSession, cookieGet, cookieSet, ensureUserScripts, bookmarks };
