@@ -11,7 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const PLUGIN = process.env.KIRA_PLUGIN_DIR || ".";
-const html = fs.readFileSync(path.join(PLUGIN, "web", "index.html"), "utf-8");
+const html = fs.readFileSync(path.join(PLUGIN, "web", "app.js"), "utf-8");
 
 // 抽出 `let _refreshSeq = 0;` 到 `refresh()` 结束（第一个行首 `}`）
 const seqDef = "let _refreshSeq = 0;";
@@ -30,6 +30,19 @@ if (endIdx < 0) {
 const seqIdx = html.indexOf(seqDef, fnIdx - 4000);
 const src = html.slice(seqIdx >= 0 ? seqIdx : fnIdx, endIdx + 2);
 
+// ⚠️ `refresh()` 现在把渲染**委托**给 `renderStatus()`（面板拆成
+//    index.html + style.css + app.js 之后，函数也跟着分开了）。
+//    只抽 refresh 的话它会在沙箱里 ReferenceError —— 看着像"守卫失效"，
+//    其实是**探针没跟上重构** ✗ 所以这里把相关函数一起抽进来。
+const extra = ["function renderStatus(", "function _renderDomains(",
+               "function renderConfirmLog("].map((mk) => {
+  const i = html.indexOf(mk);
+  if (i < 0) return "";
+  const rest = html.slice(i);
+  const e = rest.indexOf("\n}\n");
+  return e >= 0 ? rest.slice(0, e + 3) : "";
+}).join("\n");
+
 const out = [];
 
 // ── DOM 桩：任何 id 都给一个元素；createElement 给一个可挂子节点的节点 ──
@@ -47,7 +60,12 @@ function makeEl() {
 }
 const els = {};
 const $ = (id) => (els[id] || (els[id] = makeEl()));
-const documentStub = { createElement: () => makeEl() };
+const documentStub = {
+  createElement: () => makeEl(),
+  // 面板渲染不受控字段（域名/确认记录）走的是"DOM 节点 + textContent"，
+  // 会用到 createTextNode —— 桩里缺它整段渲染就抛错 ✗
+  createTextNode: (t) => { const e = makeEl(); e.textContent = String(t); return e; },
+};
 
 // ── api 桩：每次调用挂起，由测试代码决定何时以何值 resolve ──
 const pending = [];
@@ -63,7 +81,7 @@ let refresh;
 try {
   const factory = new Function(
     "$", "api", "document", "_renderDomains", "console",
-    src + "\nreturn refresh;");
+    src + "\n" + extra + "\nreturn refresh;");
   refresh = factory($, api, documentStub, () => {}, console);
 } catch (e) {
   console.log(JSON.stringify([{ name: "装载 refresh()", ok: false,

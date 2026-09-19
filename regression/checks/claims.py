@@ -37,7 +37,7 @@ CLAIMS = [
     ("evaluate 把 __error 转成抛出",
      "browser-bridge/capabilities.js", r"__error"),
     ("面板用 textContent 渲染不受控字段",
-     "web/index.html", r"_renderDomains"),
+     "web/app.js", r"_renderDomains"),
     # ⚠️ 不能只验集合名存在，也不能要求 cookie_get 必须是**第一个元素** ——
     #    解析集合字面量的内容，只要它真的在里面就算过（位置无关）。
     #    匹配 `CONFIRM_ONLY_COMMANDS = new Set([ ... ])` 且括号内出现 cookie_get。

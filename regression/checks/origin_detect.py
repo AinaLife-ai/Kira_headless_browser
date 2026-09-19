@@ -122,7 +122,7 @@ def run(r) -> None:
     #       地址（host + port）认出 KiraAI 在哪儿的。用户打开面板那一刻，
     #       接入信息就推给扩展了 —— 不用手填、不用管端口常不常见。
     #       面板上不写这句，用户对着"未连接"只能干瞪眼。
-    _panel = src_safe("web/index.html")
+    _panel = src_safe("web/app.js") + src_safe("web/index.html")
     _bad6 = []
     if 'id="connHint"' not in _panel:
         _bad6.append("面板没有放提示的位置")

@@ -208,3 +208,34 @@ def run(r) -> None:
         _bad9.append("没有真的拦住（开关没接进动作里）")
     r.ok("S9 浏览历史默认关，且开关真的拦得住", not _bad9,
          f"问题={_bad9 or '无'}")
+
+    # ── S10 侧边栏能配**全部**项，且改完立刻生效 ──────────────────────
+    #    用户要的是"完全由侧边栏可配置和热更改"。三条都要在：
+    #      ① 有读/写配置的端点
+    #      ② _apply_config 会把侧边栏的覆盖值叠在框架配置之上（不叠 = 光存不生效）
+    #      ③ 界面**从 schema.json 生成**（照着一处真源长出来，加新项自动出现）
+    _m10 = src_safe("main.py")
+    _ui = src_safe("web/app.js")
+    _bad10 = []
+    if 'register.api("GET", "/config"' not in _m10:
+        _bad10.append("没有 GET /config")
+    if 'register.api("POST", "/config"' not in _m10:
+        _bad10.append("没有 POST /config")
+    if "cfg.update(self._cfg_overrides or {})" not in _m10:
+        _bad10.append("覆盖值没叠进 _apply_config（那样就像'存了不生效'）")
+    if "self._apply_config(getattr(self, \"plugin_cfg\", {}) or {})" not in _m10:
+        _bad10.append("保存后没有热应用")
+    if "schema.json" not in _m10 or '"fields": self._schema_fields()' not in _m10:
+        _bad10.append("端点没把 schema 交出去")
+    if "r.fields" not in _ui or "loadConfig" not in _ui:
+        _bad10.append("界面没有按 schema 生成")
+    if "保存并立刻生效" not in _ui:
+        _bad10.append("界面上没说清'立刻生效'")
+    r.ok("S10 侧边栏可配置全部项并热生效（读/写端点 + 叠覆盖 + schema 生成）",
+         not _bad10, f"问题={_bad10 or '无'}")
+
+    # ── S11 README 里要写明"一切都可以在侧边栏配置" ────────────────────
+    _rd = src_safe("README.md")
+    r.ok("S11 README 的配置章节写明'侧边栏可配置、改完即生效'",
+         "侧边栏 WebUI" in _rd and "不用重启" in _rd,
+         "用户找不到入口的话，再好的面板也白搭")
