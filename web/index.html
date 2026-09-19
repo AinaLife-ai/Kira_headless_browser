@@ -4,54 +4,64 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>全能浏览器 · 控制台</title>
-<!-- ── 启动动画的**关键 CSS 内联在这里** ────────────────────────────
-     为什么不能放外链 style.css：那样浏览器会先画一帧**没有样式**的覆盖层
-     （或者更糟——先把下面的界面画出来），然后样式到了才变成动画 ✗
-     表现就是"页面先漏出来、再跳出启动动画"。内联进 head 后，
-     覆盖层在**第一帧**就已经是满屏不透明的，下面什么都看不见 ✓
-     剩下的动画细节（弧线、星点、抹除）仍在外链里，随它慢慢到。 -->
+<!-- ── 载入动画的**关键 CSS：内联在 head** ─────────────────────────────
+     为什么不能只放外链：那样浏览器会先画一帧**没有样式**的覆盖层（甚至先
+     把下面的界面画出来），样式到了才变成动画 —— 表现就是"页面先漏出来、
+     再跳出动画"。内联之后，覆盖层在**第一帧**就已经是满屏不透明的 ✓
+     收尾也交给 CSS（animation ... forwards），不依赖 JS 的时机。 -->
 <style>
   .boot {
-    position: fixed; inset: 0; z-index: 9999;
-    display: grid; place-items: center;
-    background: #FBF6E9;
-    background-image:
-      radial-gradient(120% 80% at 22% 12%, #FFFDF6 0%, transparent 60%),
-      radial-gradient(90% 70% at 82% 88%, #F3EEDC 0%, transparent 62%);
+    position: fixed; inset: 0; z-index: 70;
+    display: grid; place-content: center; justify-items: center; gap: 14px;
+    padding: 24px;
+    background:
+      radial-gradient(120% 90% at 50% 38%, #FFFDF6 0%, #FBF6E9 46%, #F2EAD6 100%);
+    /* ⚠️ 背景必须**从第一帧就不透明**，否则淡入的过程中能看见下面的页面 ✗ */
+    animation: boot-out .62s cubic-bezier(.7,0,.2,1) 3.1s forwards;
   }
-  .boot-inner { position: relative; display: grid; place-items: center; }
-  .boot-mark { width: 132px; height: 132px; display: block; }
-  .boot-word {
-    margin-top: 22px; font: 500 11px/1 ui-sans-serif, system-ui, sans-serif;
-    letter-spacing: .42em; text-transform: uppercase; color: #8B8474;
+  [hidden] { display: none !important; }
+  .boot-stage { position: relative; width: 196px; height: 196px;
+                display: grid; place-items: center; }
+  .boot-frame { width: 132px; height: 132px; border-radius: 34px; overflow: hidden;
+                box-shadow: 0 24px 60px -20px rgba(30,142,136,.55),
+                            0 0 0 1px rgba(43,39,33,.10); }
+  .boot-frame img { width: 100%; height: 100%; display: block; }
+  @keyframes boot-out {
+    to { opacity: 0; transform: scale(1.04); visibility: hidden; }
   }
-  /* 用户把它关了：onload 之前就藏掉，一帧都不闪 */
-  html.no-boot .boot { display: none !important; }
 </style>
-<script>
-  // 同步判断（在 body 渲染之前）：关了就一帧都不播。
-  // 用 localStorage 而不是等接口 —— 接口是异步的，等它回来动画已经播完了 ✗
-  try { if (localStorage.getItem("kb_boot") === "0")
-          document.documentElement.classList.add("no-boot"); } catch (e) {}
-</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<!-- ── 启动动画（用插件图标本身当主角）────────────────────────────
-     图标先"墨迹未干"地化开，两道弧线一青一琥珀扫过，几颗星点依次亮起
-     （呼应图标上那些星星），最后整块像被笔刷斜着抹掉。
-     纯 CSS + 插件图标，不依赖任何库；prefers-reduced-motion 下不显示。 -->
-<div class="boot" id="boot" aria-hidden="true">
-  <div class="boot-inner">
+<!-- ── 载入动画 ──────────────────────────────────────────────────────
+     结构照 Z 插件那套**已经跑通**的做法：
+       · 覆盖层放在 body 最前面，样式**内联在 head**（外链会先画一帧没样式的
+         内容，页面就"漏"出来了）
+       · 背景必须**从第一帧就不透明**，只有内容在动
+       · 收尾**由 CSS 自己完成**（animation ... 3s forwards），不依赖 JS —— 
+         JS 只要在接口慢的时候兜个底
+       · 关掉时在**渲染前**就 hidden（紧跟的一段内联脚本），一个闪都没有
+     视觉上跟它不一样：它不是 3D 翻转吗，我们走"墨迹化开 → 星点依次亮 →
+     笔刷斜着抹掉"。 ──────────────────────────────────────────────── -->
+<div id="boot" class="boot">
+  <div class="boot-stage">
     <div class="boot-ring"></div>
     <div class="boot-ring r2"></div>
-    <img class="boot-mark" src="icon-256.webp" alt="" width="132" height="132">
+    <div class="boot-frame"><img src="icon-256.webp" alt=""></div>
     <i class="sp s1"></i><i class="sp s2"></i><i class="sp s3"></i>
     <i class="sp s4"></i><i class="sp s5"></i>
-    <div class="boot-word">All-in-One Browser</div>
   </div>
+  <div class="boot-tagline">All-in-One&nbsp;Browser</div>
+  <div class="boot-hint">点击任意处跳过</div>
 </div>
+<script>
+  // **渲染前**判断（用户关掉时一帧都不闪）—— 位置紧跟覆盖层，别挪到后面
+  try {
+    var _bootCfg = JSON.parse(localStorage.getItem("kira-browser-boot") || "{}");
+    if (_bootCfg.enabled === false) document.getElementById("boot").hidden = true;
+  } catch (e) {}
+</script>
 
 <div class="shell">
 

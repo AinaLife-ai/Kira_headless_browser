@@ -212,76 +212,74 @@ body::after{
 .eye:hover { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 40%, transparent); background: rgba(42,167,160,.06); }
 .eye:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 
-/* ── 启动动画 ─────────────────────────────────────────────────────
    用插件图标本身当主角：图标从"墨迹未干"到清晰，两道弧线一青一琥珀扫过，
    几颗星点依次亮起（呼应图标上那些星星），最后整块像被笔刷斜着抹掉。
    全程纯 CSS，不依赖任何库；prefers-reduced-motion 下直接不显示。 */
-.boot {
-  position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center;
-  background: radial-gradient(120% 90% at 50% 40%, #FFFDF6 0%, #FBF6E9 45%, #F3EAD6 100%);
-  /* ⚠️ 这里**不要**自带 animation —— 让它"到点自己抹掉"会和 dismissBoot()
-     打架：.done 一上来就 display:none，把抹除动画**切掉**（看着像闪一下没了 ✗）。
-     改成由 JS 控制：准备好 → 加 .done 触发抹除 → 抹完加 .gone 才真隐藏。 */
-}
-.boot-inner { position: relative; display: grid; place-items: center; gap: 22px; }
-.boot-mark {
-  width: 132px; height: 132px; border-radius: 26px;
-  box-shadow: 0 18px 44px rgba(30,142,136,.20), 0 2px 0 rgba(255,255,255,.9) inset;
-  animation: bootMark 1.1s cubic-bezier(.2,.9,.25,1) both;
-}
+   （实测截图确认过）。改用 SVG 数据 URI：真正的四角星，在哪都稳。 */
+
+/* 斜着抹掉 —— 像擦掉一块墨迹 */
+@media (prefers-reduced-motion: reduce) { .boot { display: none; } }
+
+/* ══ 载入动画（覆盖层本体在 index.html 的 head 内联里，这里只放"会动"的部分）
+   ⚠️ 视觉上**故意跟 Z 插件不一样**：它是图标 3D 翻转；
+      我们走"墨迹化开 → 星点依次亮 → 笔刷斜着抹掉"。 ══════════════════ */
+.boot.skip { animation: boot-out .26s cubic-bezier(.7,0,.2,1) forwards !important; }
+
+/* 两道弧线：一青一琥珀，从两个方向扫出来 */
 .boot-ring {
-  position: absolute; top: 50%; left: 50%; width: 178px; height: 178px;
-  margin: -89px 0 0 -89px; border-radius: 50%;
-  border: 2px solid transparent; border-top-color: #2AA7A0;
-  animation: bootSpin 1.15s cubic-bezier(.5,0,.3,1) both;
+  position: absolute; inset: -14px; border-radius: 50%;
+  border: 1.5px solid transparent;
+  border-top-color: #2AA7A0; border-right-color: #2AA7A0;
+  animation: bootRing 1.1s cubic-bezier(.5,0,.3,1) both;
 }
 .boot-ring.r2 {
-  width: 214px; height: 214px; margin: -107px 0 0 -107px;
-  border-top-color: #C8873A; animation-delay: .12s; animation-duration: 1.35s;
+  inset: -26px;
+  border-top-color: #E0A44B; border-left-color: #E0A44B;
+  border-right-color: transparent;
+  animation: bootRing 1.32s cubic-bezier(.5,0,.3,1) .12s both reverse;
 }
-.boot-word {
-  font: 600 11px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .34em;
-  color: #8A8377; text-transform: uppercase;
-  animation: bootWord .7s ease .35s both;
+@keyframes bootRing {
+  from { opacity: 0; transform: scale(.62) rotate(-40deg); }
+  to   { opacity: .95; transform: scale(1) rotate(0); }
 }
-/* ⚠️ 星点别用 clip-path —— 这套渲染里对它不生效，会变成**方块** ✗
-   （实测截图确认过）。改用 SVG 数据 URI：真正的四角星，在哪都稳。 */
+
+/* 图标"化开"：从虚到实、从小放大 —— 不用 3D 翻转，那个 Z 插件用过了 */
+.boot-frame { animation: bootInk 1.05s cubic-bezier(.2,.9,.25,1) both; }
+@keyframes bootInk {
+  0%   { opacity: 0; transform: scale(.72); filter: blur(12px) saturate(.4); }
+  58%  { opacity: 1; transform: scale(1.06); filter: blur(0) saturate(1.15); }
+  100% { opacity: 1; transform: scale(1); filter: blur(0) saturate(1); }
+}
+
+/* 星点：依次亮起（呼应图标上那些星星） */
 .sp {
-  position: absolute; width: 11px; height: 11px; background: none;
+  position: absolute; width: 11px; height: 11px;
   background: center / contain no-repeat
     url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23E0A44B' d='M12 0c.6 6.4 5 10.8 12 12-7 1.2-11.4 5.6-12 12-.6-6.4-5-10.8-12-12 7-1.2 11.4-5.6 12-12z'/></svg>");
-  animation: bootStar .8s ease both;
+  opacity: 0;
 }
 .sp.s2, .sp.s4 {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%232AA7A0' d='M12 0c.6 6.4 5 10.8 12 12-7 1.2-11.4 5.6-12 12-.6-6.4-5-10.8-12-12 7-1.2 11.4-5.6 12-12z'/></svg>");
 }
-.sp.s1 { top: -14px; right: 14px; animation-delay: .50s; }
-.sp.s2 { bottom: -6px; left: -6px; animation-delay: .62s; }
-.sp.s3 { top: 42%; left: -26px; animation-delay: .74s; width: 9px; height: 9px; }
-.sp.s4 { top: 12%; left: -18px; animation-delay: .86s; width: 8px; height: 8px; }
-.sp.s5 { bottom: 8%; right: -18px; animation-delay: .98s; }
-
-@keyframes bootMark {
-  0%   { opacity: 0; transform: scale(.72) rotate(-6deg); filter: blur(10px) saturate(.6); }
-  60%  { opacity: 1; filter: blur(0) saturate(1.06); }
-  100% { opacity: 1; transform: scale(1) rotate(0); filter: blur(0) saturate(1); }
-}
-@keyframes bootSpin {
-  0%   { transform: rotate(-140deg) scale(.82); opacity: 0; }
-  30%  { opacity: 1; }
-  100% { transform: rotate(220deg) scale(1); opacity: 0; }
-}
-@keyframes bootWord { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.sp.s1 { top: -16px; right: 12px; animation: bootStar .7s ease .46s both; }
+.sp.s2 { bottom: -8px; left: -8px; animation: bootStar .7s ease .58s both; }
+.sp.s3 { top: 44%; left: -28px; width: 9px; height: 9px; animation: bootStar .7s ease .70s both; }
+.sp.s4 { top: 10%; left: -20px; width: 8px; height: 8px; animation: bootStar .7s ease .82s both; }
+.sp.s5 { bottom: 6%; right: -20px; animation: bootStar .7s ease .94s both; }
 @keyframes bootStar {
-  0%   { opacity: 0; transform: scale(0) rotate(0); }
-  55%  { opacity: 1; transform: scale(1.35) rotate(35deg); }
-  100% { opacity: .9; transform: scale(1) rotate(0); }
+  0%   { opacity: 0; transform: scale(.2) rotate(-90deg); }
+  60%  { opacity: 1; transform: scale(1.25) rotate(6deg); }
+  100% { opacity: .95; transform: scale(1) rotate(0); }
 }
-/* 斜着抹掉 —— 像擦掉一块墨迹 */
-@keyframes bootWipe {
-  0%   { opacity: 1; clip-path: polygon(-10% -10%, 110% -10%, 110% 110%, -10% 110%); }
-  100% { opacity: 1; clip-path: polygon(-10% -10%, 110% -10%, 110% -10%, -10% -10%); }
+
+.boot-tagline {
+  font: 500 11px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: .42em; text-transform: uppercase; color: #8B8474;
+  animation: bootFade .6s ease .9s both;
 }
-.boot.done { animation: bootWipe .78s cubic-bezier(.7,0,.2,1) forwards; }
-.boot.gone { display: none; }
-@media (prefers-reduced-motion: reduce) { .boot { display: none; } }
+.boot-hint {
+  font: 400 11px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: .12em; color: #A9A292;
+  animation: bootFade .6s ease 1.35s both;
+}
+@keyframes bootFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

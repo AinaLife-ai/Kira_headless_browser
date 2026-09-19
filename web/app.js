@@ -47,14 +47,6 @@ function toast(msg) {
  *  provider / model 列表得绕出去，所以单独留一个。
  *  同样带 kira_token cookie，否则会被拒。
  */
-async function apiRoot(path) {
-  const res = await fetch("/api" + path, {
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-  });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  return res.json();
-}
 
 async function api(path, opts) {
   const res = await fetch(API + path, Object.assign({
@@ -422,31 +414,19 @@ async function loadModelOptions() {
     (k) => (SCHEMA[k] || {}).type === "model_select");
   if (!want.length) return;
   try {
-    const r = await apiRoot("/providers");
-    const provs = Array.isArray(r) ? r : (r && r.providers) || [];
-    const out = [];
-    for (const p of provs) {
-      // ⚠️ 显示名不是 id —— 界面上要给**用户认得的那个名字**
-      //    （框架同时给了 id / name / provider_name 之类，取到哪个用哪个，
-      //     别把 uuid 甩到下拉里 ✗）。
-      const pid = p.id || p.provider_id || p.providerId;
-      const pname = p.provider_name || p.name || p.display_name
-                 || p.label || pid;
-      if (!pid) continue;
-      try {
-        const ms = await apiRoot(`/providers/${encodeURIComponent(pid)}/models`);
-        const list = Array.isArray(ms) ? ms : Object.values(ms || {});
-        for (const m of (list || [])) {
-          if (typeof m === "string") { out.push({ value: m, label: m }); continue; }
-          const name = m.model_id || m.model_name || m.id || m.name;
-          if (!name) continue;
-          // 有更好看的名字就用它，最后才退回 id
-          const nice = m.model_name || m.display_name || m.label || name;
-          out.push({ value: name, label: `${nice} · ${pname}` });
-        }
-      } catch (e) { /* 某个 provider 拉不动就跳过 */ }
-    }
-    want.forEach((k) => { MODEL_OPTIONS[k] = out; });
+    // ⚠️ 调**插件自己的** `/models`，不是框架的 /api/providers ——
+    //    照 Z 插件的做法：后端替我们读框架配置，返回 [{id, name}]，
+    //    其中 id 是 `provider_id:model_id`（配置里就是这个格式），
+    //    name 是「模型名 (提供商名)」—— 下拉里显示的是**提供商的名字**，
+    //    不是那串 id ✓
+    //    （原来直连 /api/providers 既绕、又容易把 id 当成名字显示出来 ✗）
+    const d = await api("/models");
+    const list = (d && d.models) || [];
+    const opts = list.map((m) => ({
+      value: String(m.id),
+      label: String(m.name || m.id),
+    }));
+    want.forEach((k) => { MODEL_OPTIONS[k] = opts; });
   } catch (e) {
     want.forEach((k) => { MODEL_OPTIONS[k] = []; });   // 退回文本框
   }
@@ -471,7 +451,13 @@ async function loadConfig() {
     // 启动动画开关：记到 localStorage，**下次打开就能在渲染前判断** ——
     // 这样"关掉"是真的一个闪都不闪，而不是"播完再藏"。
     try {
-      localStorage.setItem("kb_boot", VALUES.boot_animation === false ? "0" : "1");
+      localStorage.setItem("kira-browser-boot", JSON.stringify({
+        enabled: VALUES.boot_animation !== false,
+      }));
+      if (VALUES.boot_replay_seconds != null) {
+        localStorage.setItem("kb_boot_cool", String(Number(VALUES.boot_replay_seconds) || 0));
+      }
+      if (VALUES.boot_animation === false) endBoot();
     } catch (e) { /* 隐私模式下 localStorage 可能不可用，忽略 */ }
     renderConfig();
     $("cfgCount").textContent = Object.keys(SCHEMA).length;
@@ -509,28 +495,42 @@ const _reload = $("reload"); if (_reload) _reload.addEventListener("click", () =
   loadConfig(); refresh(); toast("已重新读取");
 });
 
-/** 收掉启动动画。
+/** 载入动画的收尾 —— 结构照 Z 插件那套（它已经跑通了）。
  *
- *  ⚠️ 两个约束都要满足：
- *    · **不能一闪而过** —— 数据来的比动画快时（本地接口几十毫秒），
- *      直接收掉等于什么都没看见；
- *    · **也不能赖着不走** —— 接口卡住时它必须自己让开，不能挡着界面。
- *  所以：至少演到 1.5 秒（动画本身约 1.45s），最多 4 秒。
+ *  ⚠️ **收尾的主力是 CSS**（`.boot` 上写了 `animation: boot-out ... 3.1s forwards`），
+ *     不靠 JS 掐时间 —— 接口快慢都不会影响它，JS 只负责"点击跳过"和兜底。
  */
-function dismissBoot() {
-  const el = $("boot");
-  if (!el || el.classList.contains("done")) return;
-  const started = Number(el.dataset.t0 || Date.now());
-  const wait = Math.max(0, 1500 - (Date.now() - started));
-  setTimeout(() => {
-    el.classList.add("done");                 // 触发"笔刷抹除"
-    setTimeout(() => el.classList.add("gone"), 820);   // 抹完才真隐藏
-  }, wait);
+let bootPlaying = true;
+let bootTimer = null;
+
+function endBoot() {
+  const b = $("boot");
+  if (!b || !bootPlaying) return;
+  b.classList.add("skip");                  // 立刻走一段短动画抹掉
+  clearTimeout(bootTimer);
+  bootTimer = setTimeout(() => {
+    b.hidden = true;                        // [hidden] → display:none
+    b.classList.remove("skip");
+    bootPlaying = false;
+  }, 320);
 }
 
 (async function boot() {
-  const _b = $("boot");
-  if (_b) { _b.dataset.t0 = Date.now(); setTimeout(dismissBoot, 4000); }
+  // 重播冷却：同一标签页里短时间内（默认 90 秒）不重复播 ——
+  // 不然在页面间来回切会一遍遍放，很烦。照 Z 插件的做法。
+  try {
+    const last = Number(sessionStorage.getItem("kb_boot_at") || 0);
+    const cool = Number(localStorage.getItem("kb_boot_cool") || 90) * 1000;
+    if (last && Date.now() - last < cool) {
+      const b = $("boot");
+      if (b) b.hidden = true;
+      bootPlaying = false;
+    } else {
+      sessionStorage.setItem("kb_boot_at", String(Date.now()));
+    }
+  } catch (e) { /* 隐私模式下 sessionStorage 可能不可用 */ }
+  // 点击任意处跳过
+  document.addEventListener("click", () => endBoot(), true);
   _regen.innerHTML = icon("refresh") + "重新生成";
   _copy.innerHTML = icon("copy") + "复制令牌";
   _save.innerHTML = icon("save") + "保存并立刻生效";
@@ -542,6 +542,5 @@ function dismissBoot() {
   spy();
   await loadToken();
   await refresh();
-  dismissBoot();
   setInterval(refresh, 3000);
 })();
