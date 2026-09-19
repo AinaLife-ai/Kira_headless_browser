@@ -197,7 +197,6 @@ body::after{
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important;animation:none!important}
 }
-[CONTEXT OFFLOADED] Content (~1523 tokens, 4463 bytes) saved to: /var/minis/offloads/tools/file_write_uJdSwWYL9216.txt
 
 /* ── 令牌显示 ─────────────────────────────────────────────────────
    默认遮住（它是连接凭据，不该一打开就摊在屏幕上）；点眼睛才显示。   */
