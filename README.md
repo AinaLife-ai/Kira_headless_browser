@@ -489,6 +489,49 @@ python -m playwright install chromium
 <details>
 <summary><b>2.1.x</b> — 49 个版本　·　最新的一系列：双后端重构、安全加固、以及大量审查修复</summary>
 
+### v2.1.70（2026-09-19）
+
+**按用户列出的清单逐条核对并补齐：关标签页 / 历史 / 静音固定 / 导航滞后。**
+
+#### 逐条对账
+
+| 提的 | 原来 | 现在 |
+|---|---|---|
+| `chrome.bookmarks` | ✗ 没申请权限 | ✅ **已开**（v2.1.69） |
+| **关标签页**（Ctrl+W / window.close 都不行） | 扩展**实现了** `close_tab`，但**插件侧从没调用** ✗ —— bot 够不着，只能去试 Ctrl+W，于是得出"没有关标签的 API" | ✅ `browser_tabs(action="close", tab_id=…)` |
+| **历史记录** `chrome.history` | ✗ 完全没做 | ✅ `browser_interact(action="history", query=…, days=…)` |
+| **静音 / 固定标签** | ✗ 只读不写 | ✅ `action="mute"` / `action="pin"`（扩展侧新加两个命令） |
+| **导航反馈滞后**（"标题还是旧 tab 的"） | ✗ **真 bug** | ✅ 已修（见下） |
+| 页面事件推送 | 扩展**一直在推**（`PAGE_LOADED` 等），插件也接了并缓存进 `_last_state`（`browser_diag` 用的就是它）—— 但**"主动推一条消息给 bot"没做**（需要框架的带外消息） | ⚠️ 部分 |
+| 剪贴板读写 | ✗ 没做 | ⚠️ 未做（优先级低，你说了可以先挑能做的） |
+
+#### 关标签页这条最典型
+
+扩展早就实现了 `close_tab`（`chrome.tabs.remove` —— 这才是**唯一**能关标签的路，
+`Ctrl+W` / `window.close()` 对注入脚本无效，浏览器不允许）。但**插件侧从来没调用它** ——
+所以从 bot 的视角看，"这个能力根本不存在"。
+
+现在 `browser_tabs` 变成标签管理工具（list / activate / close / mute / pin），
+并在工具说明里**明说**："关标签页只能用 action=close，别再去试 Ctrl+W"。
+
+#### 导航滞后：`chrome.tabs.update` 只负责**发起**导航
+
+```js
+await chrome.tabs.update(tab.id, { url: params.url });
+return {...};        // ← 立刻返回，页面还在加载 ✗
+```
+
+上层拿到返回值就去读页面 → 读到的是**旧页面**（标题、正文全是旧的）。
+新增 `waitForLoad(tab.id)`：等 `tabs.onUpdated` 的 `status === "complete"`
+（或超时 12 秒 —— 不能让一个慢站点把工具卡死），navigate 两个分支都等它。
+
+#### 新增检查
+
+契约表（`CALLS` + 假桥形状）覆盖到 24 个方法；守卫 A1/A3/A4/C3/C4/A7/C5a
+全部通过 —— 加一个能力要同时改的地方，一个都没漏。
+
+套件 **437/437 全绿**（24 个方法的字段契约全部一致）。
+
 ### v2.1.69（2026-09-19）
 
 **内部页（edge://）为什么读不了 + 补上书签数据接口（原来是真的没开）。**

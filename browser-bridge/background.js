@@ -19,7 +19,7 @@ import {
   DEFAULT_CONFIRM_TIMEOUT_MS, PAIR_PATH, CANDIDATE_PORTS, READ_COMMANDS,
 } from "./protocol.js";
 import { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
-         downloadViaSession, cookieGet, cookieSet, bookmarks } from "./capabilities.js";
+         downloadViaSession, cookieGet, cookieSet, bookmarks, historySearch } from "./capabilities.js";
 import {
   state, links, activity, otherWriterFor,
   sendRaw, sendResult, sendEvent, sendChunk,
@@ -773,6 +773,8 @@ async function execute(name, params) {
     case CMD.SCREENSHOT:   return await screenshot(params);
     case CMD.ACTIVATE_TAB: return await activateTab(params);
     case CMD.CLOSE_TAB:    return await closeTab(params);
+    case CMD.MUTE_TAB:     return await muteTab(params);
+    case CMD.PIN_TAB:      return await pinTab(params);
     case CMD.NAVIGATE:     return await navigate(params);
     case CMD.SCROLL:       return await scroll(params);
     case CMD.CLICK:        return await click(params);
@@ -799,6 +801,7 @@ async function execute(name, params) {
     case CMD.MOUSE_DRAG:   return await mouseDrag(params);
     case CMD.LIST_FILES:   return await listFiles(params);
     case CMD.BOOKMARKS:    return await bookmarks(params);
+    case CMD.HISTORY:      return await historySearch(params);
     case CMD.DEBUG:        return await debugInfo(params);
     default:
       throw new Error(`未知命令：${name}`);
@@ -900,21 +903,73 @@ async function activateTab(params) {
   return { ok: true, tab_id: tab.id, url: tab.url };
 }
 
+async function muteTab(params) {
+  const tab = await resolveTab(params.tab_id);
+  await chrome.tabs.update(tab.id, { muted: params.muted !== false });
+  return { ok: true, tab_id: tab.id, muted: params.muted !== false };
+}
+
+async function pinTab(params) {
+  const tab = await resolveTab(params.tab_id);
+  await chrome.tabs.update(tab.id, { pinned: !!params.pinned });
+  return { ok: true, tab_id: tab.id, pinned: !!params.pinned };
+}
+
 async function closeTab(params) {
   const tab = await resolveTab(params.tab_id);
   await chrome.tabs.remove(tab.id);
   return { ok: true, closed: tab.id };
 }
 
+/** 等某个标签**加载完**（或超时）。
+
+ * ⚠️ 为什么必须有：`chrome.tabs.update` / `chrome.tabs.create` 只负责
+ *    **发起**导航，不等页面加载完就 resolve。所以原来 navigate 一返回
+ *    就去读页面，读到的是**旧页面** —— 标题、正文全是旧的，
+ *    表现为"导航反馈滞后半拍"（用户实测：打开 B站后工具返回的还是上一个
+ *    tab 的标题和内容）。后面点视频也是同理。
+ *
+ * 返回为什么结束等待："complete" / "already" / "timeout" / "closed" ——
+ * 超时也照样返回，不能让一个慢站点把工具卡死。
+ */
+function waitForLoad(tabId, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const onUpd = (id, info) => {
+      if (id === tabId && info && info.status === "complete") finish("complete");
+    };
+    const onRm = (id) => { if (id === tabId) finish("closed"); };
+    function finish(why) {
+      if (done) return;
+      done = true;
+      try { chrome.tabs.onUpdated.removeListener(onUpd); } catch (_) {}
+      try { chrome.tabs.onRemoved.removeListener(onRm); } catch (_) {}
+      resolve(why);
+    }
+    try { chrome.tabs.onUpdated.addListener(onUpd); } catch (_) {}
+    try { chrome.tabs.onRemoved.addListener(onRm); } catch (_) {}
+    // 先查一次：可能已经加载完了（about:blank 这类瞬间完成）
+    try {
+      chrome.tabs.get(tabId).then((t) => {
+        if (t && t.status === "complete") finish("already");
+      }).catch(() => finish("gone"));
+    } catch (_) { finish("gone"); }
+    setTimeout(() => finish("timeout"), timeoutMs);
+  });
+}
+
 async function navigate(params) {
   if (params.new_tab) {
     const tab = await chrome.tabs.create({ url: params.url, active: true });
-    return { ok: true, tab_id: tab.id, url: params.url, navigated: true };
+    // ⚠️ 等它真的加载完再返回 —— 否则上层立刻读页面会读到旧内容
+    const load = await waitForLoad(tab.id, params.wait_ms || 12000);
+    return { ok: true, tab_id: tab.id, url: params.url, navigated: true, load };
   }
 
   const tab = await resolveTab(params.tab_id);
   await chrome.tabs.update(tab.id, { url: params.url, active: true });
-  return { ok: true, tab_id: tab.id, url: params.url, navigated: true };
+  const load = await waitForLoad(tab.id, params.wait_ms || 12000);
+  return { ok: true, tab_id: tab.id, url: params.url, navigated: true, load };
 }
 
 async function scroll(params) {

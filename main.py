@@ -776,6 +776,32 @@ class BrowserPlugin(BasePlugin):
                     + f" {tag}")
         if method == "get_info":
             return f"📄 标题: {d.get('title', '')}\n🔗 URL: {d.get('url', '')} {tag}"
+        if method == "history":
+            # ⚠️ 没这个分支数据会被默认分支丢掉（守卫 A1 盯的就是这个）
+            its = d.get("items") or []
+            if not its:
+                return (f"🕘 没找到历史记录"
+                        + (f"（关键词：{d.get('query')}）" if d.get("query") else "")
+                        + f"{tag}")
+            lines = [f"🕘 历史 {len(its)} 条"
+                     + (f"（关键词：{d.get('query')}）" if d.get("query") else "") + f"{tag}"]
+            for h in its[:60]:
+                lines.append(f"- {h.get('title')}  {h.get('url')}"
+                             + (f"  （访问 {h.get('visits')} 次）" if h.get("visits") else ""))
+            return "\n".join(lines)
+        if method == "close_tab":
+            tid = d.get("tab_id")
+            ok = d.get("closed", True)
+            return (f"🗑️ 已关闭标签 {tid}{tag}" if ok
+                    else f"❌ 没能关闭标签 {tid}{tag}")
+        if method == "activate_tab":
+            return f"🔀 已切到标签 {d.get('tab_id')}{tag}"
+        if method == "mute_tab":
+            return (f"{'🔇 已静音' if d.get('muted') else '🔊 已取消静音'}"
+                    f"标签 {d.get('tab_id')}{tag}")
+        if method == "pin_tab":
+            return (f"{'📌 已固定' if d.get('pinned') else '📍 已取消固定'}"
+                    f"标签 {d.get('tab_id')}{tag}")
         if method == "bookmarks":
             # ⚠️ 没有这个分支的话数据会被**默认分支丢掉**（守卫 A1 专门盯这个）：
             #    模型只会看到一句"操作成功"，书签却一条都没拿到。
@@ -1009,13 +1035,45 @@ class BrowserPlugin(BasePlugin):
 
     @register.tool(
         name="browser_tabs",
-        description="列出打开的所有标签页。",
-        params={"type": "object", "properties": {}, "required": []},
+        description=(
+            "标签页管理：列出 / 切换 / 关闭 / 静音 / 固定。"
+            "关标签页**只能用这里的 action=close** —— Ctrl+W、window.close() "
+            "对扩展注入的脚本无效（浏览器不允许），别再去试那些。"
+        ),
+        params={"type": "object", "properties": {
+            "action": {"type": "string",
+                       "enum": ["list", "activate", "close", "mute", "pin"],
+                       "description": "默认 list（列出）"},
+            "tab_id": {"type": "integer", "description": "目标标签（activate/close/mute/pin 用）"},
+            "muted": {"type": "boolean", "description": "action=mute 时：true 静音 / false 取消"},
+            "pinned": {"type": "boolean", "description": "action=pin 时：true 固定 / false 取消"},
+        }, "required": []},
     )
-    async def tool_tabs(self, event, **_):
+    async def tool_tabs(self, event, action: str = "list", **_kw):
         if not self.enabled:
             return "浏览器插件未启用"
-        return await self._call("list_tabs")
+        a = (action or "list").lower()
+        if a in ("list", ""):
+            return await self._call("list_tabs", for_write=False)
+        # ⚠️ 这些能力**扩展早就实现了**（`chrome.tabs.remove` /
+        #    `chrome.tabs.update`），但插件侧一直只调了 `list_tabs` ——
+        #    于是 bot 根本够不着，只能去试 Ctrl+W / window.close()，
+        #    那些对注入脚本是无效的（浏览器不允许），结论就成了
+        #    "浏览器桥没有关标签的 API"。其实是**没接出来**。
+        if a == "close":
+            return await self._call("close_tab", for_write=True, tab_id=_kw.get("tab_id"))
+        if a in ("activate", "switch"):
+            return await self._call("activate_tab", for_write=True, tab_id=_kw.get("tab_id"))
+        if a == "mute":
+            return await self._call("mute_tab", for_write=True,
+                                    tab_id=_kw.get("tab_id"),
+                                    muted=bool(_kw.get("muted", True)))
+        if a in ("pin", "unpin"):
+            return await self._call("pin_tab", for_write=True,
+                                    tab_id=_kw.get("tab_id"),
+                                    pinned=(a == "pin") if _kw.get("pinned") is None
+                                    else bool(_kw.get("pinned")))
+        return f"❌ 不认识的 action：{action}（可用：list/activate/close/mute/pin）"
 
     @register.tool(
         name="browser_screenshot",
@@ -1164,6 +1222,13 @@ class BrowserPlugin(BasePlugin):
             return "浏览器插件未启用"
         a = (action or "").lower()
         w = True          # 默认按写操作处理
+
+        if a == "history":
+            # 看过的网页（chrome.history）—— 和书签同理，是**数据**不是页面
+            return await self._call("history", for_write=False,
+                                    query=kw.get("query"),
+                                    limit=kw.get("amount") or 100,
+                                    days=int(kw.get("days") or 0))
 
         if a in ("bookmarks", "bookmark"):
             # 读书签**数据**（不是那个页面）。

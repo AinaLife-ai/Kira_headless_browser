@@ -1428,6 +1428,68 @@ class HeadlessBackend(Backend):
         except Exception as e:
             return OpResult.fail(f"列目录失败: {e}", self.name)
 
+    async def close_tab(self, tab_id: int = 0) -> OpResult:
+        """关掉一个无头页面 —— 这个**真能做**（page.close）。"""
+        try:
+            pages = self._context.pages if self._context else []
+            pg = pages[int(tab_id)] if (tab_id and int(tab_id) < len(pages)) else (
+                self._page or (pages[-1] if pages else None))
+            if pg is None:
+                return OpResult.fail("没有可关闭的页面", self.name,
+                                     data={"tab_id": tab_id, "closed": False})
+            await pg.close()
+            return OpResult(ok=True, backend=self.name,
+                            data={"tab_id": tab_id, "closed": True})
+        except Exception as e:
+            return OpResult.fail(f"关标签失败：{type(e).__name__}: {e}", self.name,
+                                 data={"tab_id": tab_id, "closed": False})
+
+    async def activate_tab(self, tab_id: int = 0) -> OpResult:
+        """切到某个无头页面（page.bring_to_front）。"""
+        try:
+            pages = self._context.pages if self._context else []
+            pg = pages[int(tab_id)] if (tab_id and int(tab_id) < len(pages)) else self._page
+            if pg is None:
+                return OpResult.fail("没有可切换的页面", self.name,
+                                     data={"tab_id": tab_id, "activated": False})
+            await pg.bring_to_front()
+            return OpResult(ok=True, backend=self.name,
+                            data={"tab_id": tab_id, "activated": True})
+        except Exception as e:
+            return OpResult.fail(f"切标签失败：{type(e).__name__}: {e}", self.name,
+                                 data={"tab_id": tab_id, "activated": False})
+
+    async def mute_tab(self, tab_id: int = 0, muted: bool = True) -> OpResult:
+        """无头没有"标签栏"，静音也没意义（它本来就没有声音输出）。
+
+        ⚠️ 老老实实说做不到 —— 比"看起来成功"强：后者会让用户以为
+           静音了，其实什么都没发生。真实场景里要静音的是**用户自己的
+           浏览器标签**，那只有扩展桥能做。
+        """
+        return OpResult.fail(
+            "无头浏览器没有标签栏、也没有声音输出，静音无从谈起 —— "
+            "要静音用户自己的标签请让扩展桥连接后重试", self.name,
+            data={"tab_id": tab_id, "muted": bool(muted), "unsupported": True})
+
+    async def pin_tab(self, tab_id: int = 0, pinned: bool = True) -> OpResult:
+        # 无头没有"标签栏"这个概念，固定与否没有意义 —— 明确说不支持
+        return OpResult.fail("无头浏览器没有标签栏，固定标签无从谈起", self.name,
+                             data={"tab_id": tab_id, "pinned": bool(pinned),
+                                   "unsupported": True})
+
+    async def history(self, query: str = "", limit: int = 100,
+                      days: int = 0) -> OpResult:
+        """无头用的是**临时 profile**，历史里什么都没有 —— 如实说不支持。
+
+        ⚠️ 历史属于**用户自己的浏览器**，只在他那个 profile 里。装作能读、
+           返回空列表，用户会以为"历史丢了"。
+        """
+        return OpResult.fail(
+            "浏览历史只在用户自己的浏览器 profile 里；无头用的是临时 profile，"
+            "读不到 —— 请让扩展桥连接后再试", self.name,
+            data={"items": [], "count": 0, "query": query or "",
+                  "unsupported": True})
+
     async def bookmarks(self, query: str = "", limit: int = 200,
                         folders_only: bool = False) -> OpResult:
         """无头浏览器**没有书签库** —— 明确说不支持，别装作能做。

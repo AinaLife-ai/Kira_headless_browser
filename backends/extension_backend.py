@@ -466,6 +466,34 @@ class ExtensionBackend(Backend):
         return await self._send(self._P.CMD_LIST_FILES,
                                 {"dir_type": dir_type, "limit": limit})
 
+    async def close_tab(self, tab_id: int = 0) -> OpResult:
+        """关掉一个标签（chrome.tabs.remove）。
+
+        ⚠️ 这是**唯一**能关标签的路 —— Ctrl+W / window.close() 对扩展注入的
+           脚本无效（浏览器不允许）。所以别让模型去试那些。
+        """
+        return await self._send(self._P.CMD_CLOSE_TAB, {"tab_id": tab_id})
+
+    async def activate_tab(self, tab_id: int = 0) -> OpResult:
+        """切到某个标签（chrome.tabs.update(active)）。"""
+        return await self._send(self._P.CMD_ACTIVATE_TAB, {"tab_id": tab_id})
+
+    async def mute_tab(self, tab_id: int = 0, muted: bool = True) -> OpResult:
+        """静音/取消静音某个标签（chrome.tabs.update({muted})）。"""
+        return await self._send(self._P.CMD_MUTE_TAB,
+                                {"tab_id": tab_id, "muted": bool(muted)})
+
+    async def pin_tab(self, tab_id: int = 0, pinned: bool = True) -> OpResult:
+        """固定/取消固定某个标签（chrome.tabs.update({pinned})）。"""
+        return await self._send(self._P.CMD_PIN_TAB,
+                                {"tab_id": tab_id, "pinned": bool(pinned)})
+
+    async def history(self, query: str = "", limit: int = 100,
+                      days: int = 0) -> OpResult:
+        """读浏览历史（chrome.history）。和书签同理：要数据，不要页面。"""
+        return await self._send(self._P.CMD_HISTORY,
+                                {"query": query or "", "max": limit, "days": days})
+
     async def bookmarks(self, query: str = "", limit: int = 200,
                         folders_only: bool = False) -> OpResult:
         """读书签**数据**（不是 edge://bookmarks 那个页面）。

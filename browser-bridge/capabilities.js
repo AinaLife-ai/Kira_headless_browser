@@ -549,5 +549,30 @@ async function bookmarks(params = {}) {
            bookmarks: out };
 }
 
+/**
+ * 读浏览**历史**（chrome.history）。和书签同理：要的是数据，不是那个页面。
+ *  @param {object} params - query（关键词）/ max（默认 100）/ days（只取最近几天）
+ */
+async function historySearch(params = {}) {
+  if (!chrome.history) {
+    throw new Error("chrome.history 不可用 —— 扩展可能没重新加载"
+                  + "（本功能需要 manifest 里的 history 权限）");
+  }
+  const query = String(params.query || "").trim();
+  const max = Math.max(1, Math.min(2000, Number(params.max) || 100));
+  const days = Number(params.days) || 0;
+  const startTime = days > 0 ? Date.now() - days * 86400000 : 0;
+  const arr = await chrome.history.search(
+    { text: query, maxResults: max, startTime });
+  return {
+    count: arr.length, query,
+    items: arr.map((h) => ({
+      title: h.title || "", url: h.url,
+      visits: h.visitCount || 0,
+      last: h.lastVisitTime ? new Date(h.lastVisitTime).toISOString() : "",
+    })),
+  };
+}
+
 export { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
-         downloadViaSession, cookieGet, cookieSet, ensureUserScripts, bookmarks };
+         downloadViaSession, cookieGet, cookieSet, ensureUserScripts, bookmarks, historySearch };
