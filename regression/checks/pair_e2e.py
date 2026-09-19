@@ -714,8 +714,8 @@ def run_results(r, holder, results) -> None:
         _bad12.append(f"渲染引导失败: {type(_e).__name__}: {_e}")
     if "粘进去" in _sg or "复制接入令牌" in _sg:
         _bad12.append("还在教用户手动粘令牌")
-    if "打开就会自动配对" not in _sg:
-        _bad12.append("没提'打开面板即自动配对'这条主路径")
+    if "页面自己的地址" not in _sg and "打开就会自动配对" not in _sg:
+        _bad12.append("没提'打开一次 KiraAI 页面即自动配对'这条主路径")
     if "自动检测" not in _sg:
         _bad12.append("没提弹窗的「自动检测」")
     r.ok("P12 安装引导与当前流程一致（不是老的手动粘贴流程）", not _bad12,
