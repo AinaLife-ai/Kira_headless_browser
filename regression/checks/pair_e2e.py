@@ -434,6 +434,57 @@ def run(r) -> None:
             server4.close()
             await server4.wait_closed()
 
+        # ── 场景 5：**命令往返**（真 background.js 必须"回话"）──────────
+        #    ⚠️ 抓的是这个真实 bug：`handleMessage` 收到命令后调
+        #       `runCommand(id, name, params)` —— **漏传了 link**。
+        #       而 `sendRaw(obj, link)` 开头就是 `if (!link || !link.open) return false;`
+        #       → 结果**一条都发不出去** → 插件干等 op_timeout(20s) 报
+        #       "扩展没有响应"。表面上像"扩展没连上"，其实连接好好的，
+        #       只是回话被静默吞了。
+        #
+        #    ⚠️ 为什么以前没抓到：`bridge_e2e` 用的是**手写的假扩展客户端**，
+        #       它自己会回话 —— 真 background.js 里的 dispatch 根本没被跑过。
+        #       这里用**真的** background.js，所以能从外面发一条命令进来。
+        tcmd = asyncio.create_task(_run_node(node, client_path, {
+            "action": "auto_only", "storage": {}, "settle_ms": 16000,
+        }))
+        # 场景 4 用完把服务器关了 —— 这里要重新起一个（候选端口），
+        # 否则扩展根本连不上，测的就不是"回话"而是"没连上"了。
+        server5 = await websockets.serve(
+            holder["handler"], "127.0.0.1", port,
+            process_request=holder["process_request"])
+        try:
+            await asyncio.sleep(3.5)          # 等它连上并稳定
+            # ⚠️ 测**多条**命令，不是一条 —— 分派里每个 case 都是独立代码路径，
+            #    只测 list_tabs 的话，别的 case 漏传/写错照样绿。
+            results["cmds"] = {}
+            for _name, _params, _must in (
+                ("list_tabs",  {},                 "tabs"),
+                ("debug", {},                      None),
+                ("list_files", {"dir_type": "downloads"}, None),
+            ):
+                _t = asyncio.create_task(bridge.send_command(_name, _params, timeout=6))
+                _done, _ = await asyncio.wait({_t}, timeout=10)
+                if _t not in _done:
+                    results["cmds"][_name] = {"ok": False, "err": "10 秒无响应（结果发不回去）"}
+                    _t.cancel()
+                    continue
+                try:
+                    _d = _t.result()
+                    _ok = isinstance(_d, dict) and (_must is None or _must in _d)
+                    results["cmds"][_name] = {"ok": _ok, "data": str(_d)[:120]}
+                except Exception as _e:
+                    results["cmds"][_name] = {"ok": False,
+                                              "err": f"{type(_e).__name__}: {_e}"}
+        finally:
+            try:
+                await asyncio.wait_for(tcmd, timeout=15)
+            except Exception:
+                tcmd.cancel()
+            server5.close()
+            await server5.wait_closed()
+        await bridge.close()
+
         holder["results"] = results
 
     try:
@@ -635,6 +686,83 @@ def run_results(r, holder, results) -> None:
          'id="ver"' in src_safe("browser-bridge/popup.html")
          and "getManifest().version" in src_safe("browser-bridge/popup.js"),
          "没有版本号的话，用户报问题时分不清是新版还是没更新")
+
+    # ── P17：`link` 传参审计（"必需参数被静默丢掉"这一整类）─────────────
+    #    ⚠️ 抓的就是 P15 那个 bug 的**同类**：函数要 link，调用点没给，
+    #       而 `sendRaw` 对空 link 是**静默 return false** —— 不报错、
+    #       不抛异常，只是"回话没人接"。这类 bug 靠看代码很难发现，
+    #       必须自动比对"形参要求 vs 实参给了几个"。
+    #
+    #    白名单里的都是**按设计**可以不给 link 的：
+    #      · sendEvent —— 广播给所有连接（tab 事件本来就该所有实例都知道）
+    #      · probeServerRoundTrip —— 有 `link || 第一条活着的连接` 兜底
+    #      · sendRaw —— Link 类自己的方法（用的是 this，不是模块函数）
+    _WL = {"sendEvent", "probeServerRoundTrip", "sendRaw"}
+    import re as _re17
+    # ⚠️ **必须先剥注释** —— 注释里会引用函数名举例（capabilities.js 里就有
+    #    一句 `sendResult(id, true, ...)` 的说明），不剥会被当成真调用点
+    #    （首跑就是这么误报的）。
+    _js = {f.name: strip_comments_only(f.read_text(encoding="utf-8"))
+           for f in (PLUGIN_DIR / "browser-bridge").glob("*.js")}
+    _need = {}
+    for _fn, _src in _js.items():
+        for _m in _re17.finditer(r'(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)', _src):
+            _args = [a.strip() for a in _m.group(2).split(",")]
+            if "link" in _args:
+                _need[_m.group(1)] = _args.index("link") + 1   # link 是第几个参数
+    _bad17 = []
+    for _fn, _src in _js.items():
+        for _name, _pos in _need.items():
+            if _name in _WL:
+                continue
+            for _m in _re17.finditer(r'(?<![\w.])' + _re17.escape(_name) + r'\s*\(', _src):
+                i, depth, j = _m.end(), 1, _m.end()
+                while j < len(_src) and depth:
+                    if _src[j] == "(": depth += 1
+                    elif _src[j] == ")": depth -= 1
+                    j += 1
+                inner, depth, args, cur = _src[i:j-1], 0, [], ""
+                for ch in inner:
+                    if ch in "([{": depth += 1
+                    elif ch in ")]}": depth -= 1
+                    if ch == "," and depth == 0: args.append(cur.strip()); cur = ""
+                    else: cur += ch
+                if cur.strip(): args.append(cur.strip())
+                if len(args) < _pos:
+                    _bad17.append(f"{_fn}:{_src[: _m.start()].count(chr(10)) + 1} "
+                                  f"{_name}({len(args)} 参，需要 {_pos})")
+    r.ok("P17 带 link 形参的函数，调用点都传了 link（防『回话没人接』再次发生）",
+         not _bad17, f"漏传={_bad17 or '无'}")
+
+    # ── P16：弹窗要告诉用户「允许用户使用脚本」这件事 ─────────────────
+    #    ⚠️ 这个开关**扩展自己打不开**（Chrome/Edge 的刻意设计：防止扩展
+    #       静默执行任意代码），所以只能"检测 + 指路"。而它只影响「执行 JS」
+    #       一个能力，其它命令照常 —— 提示里必须说清这点，别吓着用户。
+    _pop16 = src_safe("browser-bridge/popup.js")
+    _h16 = src_safe("browser-bridge/popup.html")
+    _bad16 = []
+    if "checkUserScripts" not in _pop16:
+        _bad16.append("弹窗没检测这个开关")
+    if "允许用户使用脚本" not in _pop16:
+        _bad16.append("没告诉用户开关叫什么（用户找不到）")
+    if "其它功能不受影响" not in _pop16:
+        _bad16.append("没说清'不开也不影响其它功能'——容易吓到人")
+    if 'id="usHint"' not in _h16:
+        _bad16.append("没有显示提示的容器")
+    r.ok("P16 弹窗会检测并说明「允许用户使用脚本」（且说清不必须）",
+         not _bad16, f"问题={_bad16 or '无'}")
+
+    # ── P15：命令要真的"回话"（真 background.js 的 dispatch 路径）───
+    #    ⚠️ 这条抓的是真 bug：handleMessage 调 runCommand 时漏传 link →
+    #       sendRaw 见 link 为空直接 return false → 结果一条都发不出去 →
+    #       插件报"扩展没有响应/超时"。看起来像断线，其实连接是好的。
+    #    测**多条**命令：分派里每个 case 都是独立路径，只测一条不够。
+    _cmds = results.get("cmds") or {}
+    _bad15 = [f"{k}: {v.get('err') or v.get('data')}"
+              for k, v in _cmds.items() if not v.get("ok")]
+    r.ok("P15 命令往返：多条命令都能收到扩展回话（不是只有一条能通）",
+         bool(_cmds) and not _bad15,
+         f"没回话的={_bad15 or '无'}　全部={list(_cmds)}")
 
     # ── P14b：发现失败时要把"试过哪些端口"带出来（否则用户只能干猜）──
     #    最常见的失败原因就是"KiraAI 用了候选列表之外的端口"，

@@ -268,6 +268,36 @@ document.addEventListener("keydown", (e) => {
 
 // ─── 启动 ────────────────────────────────────────────────────────────────────
 
+/** 检查"允许用户使用脚本"开关是否打开。
+ *
+ *  ⚠️ 这个开关**扩展自己打不开** —— 它是 Chrome/Edge 的刻意设计：
+ *     `userScripts` 必须由用户在扩展详情页手动开启，防止扩展静默执行任意代码。
+ *     所以这里只能**检测 + 告诉用户去哪儿开**，不能替他开。
+ *
+ *  ⚠️ 它只影响「执行 JS」这一个能力：不开的话点击 / 输入 / 截图 / 列标签页
+ *     等等全部照常工作。很多人根本用不到它 —— 所以只提示，不报警。
+ */
+async function checkUserScripts() {
+  try {
+    if (!chrome.userScripts) return { ok: false, why: "浏览器版本太老（需 120+）" };
+    await chrome.userScripts.getScripts({});
+    return { ok: true };
+  } catch (_) {
+    return { ok: false, why: "未开启「允许用户使用脚本」" };
+  }
+}
+
+async function renderUserScriptsHint() {
+  const el = $("usHint");
+  if (!el) return;
+  const st = await checkUserScripts();
+  if (st.ok) { el.style.display = "none"; return; }
+  el.style.display = "";
+  el.innerHTML = "ℹ️ 执行 JS 不可用：" + escapeHtml(st.why)
+    + "。<br>需要用的话，去 <b>edge://extensions</b> → 本扩展 →「详细信息」，"
+    + "把「<b>允许用户使用脚本</b>」打开即可（<b>其它功能不受影响</b>，不用也不开没关系）。";
+}
+
 // 版本号：装在弹窗标题旁。
 // ⚠️ 用户报"装了还是连不上"时，第一件要问清楚的就是**他装的是哪一版** ——
 //    以前弹窗不显示版本，没法确认他是没更新、还是新版真有 bug。
@@ -277,4 +307,5 @@ try {
 } catch (_) { /* 拿不到就不显示，不影响其它功能 */ }
 
 loadConfig().then(refresh);
+renderUserScriptsHint();
 setInterval(refresh, 2000);

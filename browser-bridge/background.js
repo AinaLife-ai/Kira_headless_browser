@@ -646,7 +646,13 @@ async function handleMessage(raw, link) {
     }
 
     case MSG.CMD:
-      await runCommand(msg.id, msg.name, msg.params || {});
+      // ⚠️⚠️ `link` 必须一路传下去 —— `sendRaw` 开头是
+      //       `if (!link || !link.open) return false;`
+      //     漏传的后果不是"发错人"，而是**一条都发不出去**：
+      //     插件发来命令 → 扩展执行完 → 结果被 sendRaw 静默吞掉 →
+      //     插件干等 op_timeout（20 秒）→ 报"扩展没有响应/超时"。
+      //     表面看像"扩展没反应/没连上"，实际连着的，只是回话没人接。
+      await runCommand(msg.id, msg.name, msg.params || {}, link);
       break;
 
     default:
