@@ -541,6 +541,17 @@
       }
     }
   },
+  "return_page_after_write": {
+    "name": "Return Page After Write",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "写操作后一并返回页面内容",
+        "hint": "**默认开，建议保持**。框架有「每轮最多 5 次工具调用」的限制（bot_config.agent.max_tool_calls_per_turn），而「点一下 → 再看一眼」如果各占一次调用，5 次只够两轮半 —— 日志里满屏 `Tool call limit exceeded ... skipping tool 'browser_page'` 就是这么来的。开着的话，每次点击/输入/导航都会**顺手把新页面内容一起带回来**（扩展内部命令不计次，所以是白赚），同样的调用预算能干两倍的事、还少一次往返。"
+      }
+    }
+  },
   "vlm_timeout": {
     "name": "VLM Timeout",
     "type": "integer",

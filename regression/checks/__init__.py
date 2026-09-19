@@ -27,6 +27,7 @@ from . import (
     paths_default,
     pair_e2e,
     origin_detect,
+    one_step,
 )
 
 #: 检查**模块**列表（按顺序执行）。
@@ -35,6 +36,7 @@ from . import (
 #    写成元组会在跑的时候抛 AttributeError。
 #    要新增检查：import 进来，加到这个列表里即可。
 ALL_CHECKS = [
+    one_step,            # 一步到位（写操作带页面结果 / 无头安全 UA）
     origin_detect,       # 页面来源识别（扩展自己问出 KiraAI 的端口）
     pair_e2e,            # 零配置接入端到端（真 bridge + 扩展真代码）
     paths_default,       # 默认目录基准（截图/下载/cookie 必须绝对 + 跟框架走）
