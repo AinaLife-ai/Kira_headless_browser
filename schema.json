@@ -1,4 +1,16 @@
 {
+  "info_intro": {
+    "type": "info",
+    "name": "About",
+    "level": "info",
+    "hint": "**Everything here can also be configured from the sidebar WebUI, which is quicker.** Open KiraAI's sidebar, then the \"All-in-One Browser\" plugin page: every option below is editable there (the page is generated from this schema, so new options appear automatically), and changes take effect immediately without restarting KiraAI. The same page also shows connection status, the active backend, extension version, command counters, and the pairing token.\n\nRight after installing the extension, it helps to **restart the browser once and reopen this sidebar WebUI page** - that is the most reliable way to get connected: a freshly loaded extension may still have its service worker asleep, and reopening wakes it immediately so it picks up the port you are actually using.",
+    "locales": {
+      "zh": {
+        "name": "说明",
+        "hint": "**这里的一切都可以在侧边栏 WebUI 里配置，更快捷。**  打开 KiraAI 侧边栏 →「全能浏览器」插件页：下面每一项都能在那儿改，**改完立刻生效、不用重启**；那个页面是照着这份 schema 生成的，以后加了新选项它会自动出现。  同一页还能看连接状态、当前后端、扩展版本、命令计数，以及生成 / 复制接入令牌。\n\n**刚装完扩展时，建议把浏览器重新打开一次，再重新打开一次侧边栏 WebUI 页面**—— 这样最容易连上：扩展刚加载时它的后台进程可能还在休眠，重开一次会让它立刻醒过来去认你当前这个端口。"
+      }
+    }
+  },
   "enabled": {
     "name": "Enabled",
     "type": "switch",

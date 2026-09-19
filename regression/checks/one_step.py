@@ -239,3 +239,26 @@ def run(r) -> None:
     r.ok("S11 README 的配置章节写明'侧边栏可配置、改完即生效'",
          "侧边栏 WebUI" in _rd and "不用重启" in _rd,
          "用户找不到入口的话，再好的面板也白搭")
+
+    # ── S12 配置区开头要有说明块（照 KiraAI 官方搜索插件的 info 写法）────
+    #    官方那套是 `"type": "info"` + `level` + `locales.zh.hint` ——
+    #    在设置页里渲染成一段纯说明（不是输入框）。用户要求：
+    #    告诉用户"一切都可以在侧边栏 WebUI 配置更快捷"，
+    #    并提示"装完扩展后重开浏览器 + 重新打开侧边栏页面更容易连上"。
+    import json as _json12
+    _raw12 = _json12.loads(src_safe("schema.json"))
+    _first12 = list(_raw12.keys())[0] if _raw12 else ""
+    _info12 = _raw12.get("info_intro") or {}
+    _zh12 = ((_info12.get("locales") or {}).get("zh") or {})
+    _txt12 = str(_zh12.get("hint") or "")
+    _bad12 = []
+    if _first12 != "info_intro":
+        _bad12.append(f"说明块不在最前面（第一项是 {_first12}）")
+    if _info12.get("type") != "info" or _info12.get("level") != "info":
+        _bad12.append("没有按官方写法（type/level 都该是 info）")
+    if "侧边栏" not in _txt12:
+        _bad12.append("没提侧边栏 WebUI")
+    if "重新打开一次" not in _txt12:
+        _bad12.append("没提'装完扩展后重开一次更容易连上'")
+    r.ok("S12 配置开头有说明块（照官方 info 写法，含两个关键提示）",
+         not _bad12, f"问题={_bad12 or '无'}")

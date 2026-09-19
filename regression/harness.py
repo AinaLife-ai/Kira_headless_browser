@@ -389,7 +389,16 @@ def bridge_src() -> str:
 
 
 def schema() -> dict:
-    return load_json_safe("schema.json")
+    """schema.json 里的**配置项**（已滤掉版面元素）。
+
+    ⚠️ `type: "info"` / `type: "section"` 是**版面元素**（说明块、分组），
+       不是配置项 —— 它们没有 default、也不会被 `cfg.get()` 读。
+       不滤掉的话，"schema 里每一项都被代码读取"这类守卫会把说明块
+       报成"孤儿配置"（真实踩过：加了 info_intro 就红了两条）。
+    """
+    d = load_json_safe("schema.json")
+    return {k: v for k, v in d.items()
+            if not (isinstance(v, dict) and v.get("type") in ("info", "section"))}
 
 
 def manifest() -> dict:

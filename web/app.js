@@ -221,7 +221,7 @@ const GROUPS = [
   { id: "store", name: "存储",   icon: "folder",   keys: ["screenshot_dir","download_dir","cookies_dir","download_auto_clean","download_max_count","max_content_chars"] },
 ];
 
-let SCHEMA = {}, VALUES = {};
+let SCHEMA = {}, VALUES = {}, INFO_BLOCKS = [];
 const LOCALE = (navigator.language || "zh").toLowerCase().startsWith("zh") ? "zh" : "en";
 
 function labelOf(key, meta) {
@@ -283,6 +283,17 @@ function renderConfig() {
       <div class="card"><div class="pad">${keys.map(fieldHTML).join("")}</div></div>
     </section>`);
   }
+  // 说明块：放在配置区**最上面**（和框架设置页里那个 info 是同一段话）
+  if (INFO_BLOCKS.length) {
+    out.unshift(INFO_BLOCKS.map((f) => {
+      const zh = (f.locales || {}).zh || {};
+      const title = zh.name || f.name || "说明";
+      // 走现成的 fmt()：它做 HTML 转义，再把 **粗体** / `代码` / 换行转好
+      return `<section class="sec" id="sec-note"><div class="note info">`
+        + `<b>${fmt(title)}</b><p>${fmt(zh.hint || f.hint || "")}</p></div></section>`;
+    }).join(""));
+  }
+
   const rest = Object.keys(SCHEMA).filter((k) => !used.has(k));
   if (rest.length) {
     out.push(`<section class="sec" id="sec-more">
@@ -341,7 +352,18 @@ async function saveConfig() {
 async function loadConfig() {
   try {
     const r = await api("/config");
-    SCHEMA = r.fields || {};
+    // ⚠️ `info` / `section` 是**版面元素**（说明块、分组），不是配置项 ——
+    //    滤掉它们，否则会被当成输入框渲染（info 连 default 都没有）。
+    //    info 的文字单独取出来，渲染成配置区最上面那块说明。
+    const rawFields = r.fields || {};
+    INFO_BLOCKS = Object.keys(rawFields)
+      .filter((k) => (rawFields[k] || {}).type === "info")
+      .map((k) => rawFields[k]);
+    SCHEMA = {};
+    for (const k of Object.keys(rawFields)) {
+      const t = (rawFields[k] || {}).type;
+      if (t !== "info" && t !== "section") SCHEMA[k] = rawFields[k];
+    }
     VALUES = r.values || {};
     renderConfig();
     $("cfgCount").textContent = Object.keys(SCHEMA).length;
