@@ -548,10 +548,30 @@ if (!link || !link.open) return false;    // link 是 undefined → 静默吞掉
 **"其它功能不受影响"**（免得吓到人）。`debug_info` 里本来就报 `user_scripts`，
 所以 bot 通过 `browser_diag` 也看得到。
 
-#### 新增 P15 / P16
+#### 同类问题的**全量审计**（`link` 传参）
 
-- **P15** 命令往返：扩展收到命令后能回话（真 `background.js` 的 dispatch 路径）
+把 `browser-bridge/*.js` 里**所有带 `link` 形参的函数**都列出来，逐个核对调用点实參个数：
+
+| 函数 | 结果 |
+|---|---|
+| `runCommand` | ✗ **就是本次修的这处** |
+| `downloadViaSession` | ✓ 特判分支传了 `id` + `link` |
+| `sendChunk`（下载分块） | ✓ 传了 |
+| `sendResult` ×4 | ✓ 传了 |
+| `sendEvent` ×5 | ✓ **按设计**广播给所有连接（tab 事件所有实例都该知道） |
+| `probeServerRoundTrip` | ✓ 有 `link \|\| 第一条活着的连接` 兜底 |
+| `Link.sendRaw`（类方法） | ✓ 用 `this`，不是模块函数 |
+
+**结论：这一整类里实际只有一处真 bug（已修）**，其余都是"有意兜底"或"按设计广播"。
+
+#### 新增 P15 / P16 / P17
+
+- **P15** 命令往返 —— 而且测**多条**（`list_tabs` / `debug` / `list_files`）：
+  分派里每个 case 都是独立代码路径，只测一条的话别的 case 漏传照样绿
 - **P16** 弹窗会检测并说明「允许用户使用脚本」，且说清不必须
+- **P17** **`link` 传参审计（自动化）**：把上面那张表变成常驻检查 ——
+  "带 `link` 形参的函数，调用点必须传够参数"，白名单只有上面那三个有意兜底的。
+  反向验证：把 `link` 去掉 → P17 点名 `background.js:606 runCommand(3 参，需要 4)`
 
 套件 **425/425 全绿**。
 
