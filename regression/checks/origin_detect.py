@@ -116,3 +116,20 @@ def run(r) -> None:
     r.ok("O5 后台确实处理 page_pair（发出去有人接）",
          'case "page_pair"' in bg,
          "content script 把端口递回去，后台要有对应的处理分支")
+
+    # ── O6：**未连接时必须告诉用户"打开一次这个页面"** ─────────────────
+    #    ⚠️ 这一步不是可选提示，而是**主接入路径**：扩展是靠页面自己的
+    #       地址（host + port）认出 KiraAI 在哪儿的。用户打开面板那一刻，
+    #       接入信息就推给扩展了 —— 不用手填、不用管端口常不常见。
+    #       面板上不写这句，用户对着"未连接"只能干瞪眼。
+    _panel = src_safe("web/index.html")
+    _bad6 = []
+    if 'id="connHint"' not in _panel:
+        _bad6.append("面板没有放提示的位置")
+    if "打开一次这个页面" not in _panel:
+        _bad6.append("没告诉用户'打开一次这个页面'")
+    if "认出 KiraAI 在哪个端口" not in _panel:
+        _bad6.append("没说清为什么要打开（扩展要认端口）")
+    r.ok("O6 面板未连接时明确告诉用户'打开一次这个页面'", not _bad6,
+         f"问题={_bad6 or '无'}")
+
