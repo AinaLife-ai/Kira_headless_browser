@@ -259,6 +259,14 @@ class ExtensionBackend(Backend):
         except Exception as e:
             return OpResult.fail(f"保存截图失败: {e}", self.name)
 
+    async def get_selection(self, tab_id: int = 0) -> OpResult:
+        """读页面上**用户选中的文字**。
+
+        ⚠️ 这个能力扩展早就实现了（content script 的 get_selection），
+           但插件侧一直没接 —— 于是 bot 够不着，只能去读整页文本再自己找。
+        """
+        return await self._send(self._P.CMD_GET_SELECTION, {"tab_id": tab_id})
+
     async def execute_js(self, script: str) -> OpResult:
         """执行任意 JS。
 
@@ -487,6 +495,12 @@ class ExtensionBackend(Backend):
         """固定/取消固定某个标签（chrome.tabs.update({pinned})）。"""
         return await self._send(self._P.CMD_PIN_TAB,
                                 {"tab_id": tab_id, "pinned": bool(pinned)})
+
+    async def clipboard(self, mode: str = "read", text: str = "",
+                        tab_id: int = 0) -> OpResult:
+        """剪贴板读写。⚠️ **读**要求页面在前台聚焦（浏览器隐私限制）。"""
+        return await self._send(self._P.CMD_CLIPBOARD,
+                                {"mode": mode, "text": text or "", "tab_id": tab_id})
 
     async def history(self, query: str = "", limit: int = 100,
                       days: int = 0) -> OpResult:

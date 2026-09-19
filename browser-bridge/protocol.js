@@ -83,6 +83,7 @@ export const CMD = {
   DEBUG: "debug",
   BOOKMARKS: "bookmarks",
   HISTORY: "history",
+  CLIPBOARD: "clipboard",
 };
 
 // 事件名

@@ -91,6 +91,7 @@ CMD_BOOKMARKS = "bookmarks"
 CMD_MUTE_TAB = "mute_tab"
 CMD_PIN_TAB = "pin_tab"
 CMD_HISTORY = "history"
+CMD_CLIPBOARD = "clipboard"
 
 #: 写操作集合 —— 只读模式下会被拦截，且需要过域名白名单
 WRITE_COMMANDS = frozenset({
@@ -133,7 +134,7 @@ ALL_COMMANDS = frozenset({
     CMD_KEY_PRESS, CMD_KEY_DOWN, CMD_KEY_UP,
     CMD_MOUSE_MOVE, CMD_MOUSE_CLICK, CMD_MOUSE_DOWN, CMD_MOUSE_UP,
     CMD_MOUSE_WHEEL, CMD_MOUSE_DRAG, CMD_LIST_FILES, CMD_DEBUG,
-    CMD_BOOKMARKS, CMD_MUTE_TAB, CMD_PIN_TAB, CMD_HISTORY,
+    CMD_BOOKMARKS, CMD_MUTE_TAB, CMD_PIN_TAB, CMD_HISTORY, CMD_CLIPBOARD,
 })
 
 # ─── 事件名（扩展 → 插件） ───────────────────────────────────────────────────

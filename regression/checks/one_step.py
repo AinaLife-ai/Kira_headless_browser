@@ -98,3 +98,43 @@ def run(r) -> None:
         _bad6.append("browser_interact 里没接这个 action")
     r.ok("S6 书签数据能力可用（权限 + 实现 + action 都齐）", not _bad6,
          f"问题={_bad6 or '无'}")
+
+    # ── S7 扩展能执行的命令，插件必须**够得着** ────────────────────────
+    #    ⚠️ 这一类 bug 用户抓到过两次：
+    #       · close_tab / activate_tab —— 扩展实现了 31 个命令，插件只调了 12 个
+    #       · get_selection —— 扩展一直有，插件从没调用
+    #       从 bot 的视角看就是"这个能力不存在"，它只能去试 Ctrl+W 这种歪招。
+    #    判据：协议里的每个命令，要么 main.py 里调得到，要么在下面的
+    #    **内部子步骤**白名单里（那些是别的命令内部用的，不该单独暴露）。
+    import re as _re7
+    _INTERNAL = {
+        # 只有**真正内部**的才在白名单里 —— 别的都该在 main.py 或后端方法里找得到。
+        # 白名单放宽 = 这个检查就没牙齿了（第一版把所有东西都列进去，等于白写）。
+        "upload_chunk", "upload_finish", "upload_abort",   # upload 的内部步骤
+        "exec_js",        # 后端方法叫 execute_js（方法名 ≠ 命令名），下面单独认
+        "key_up", "mouse_up",   # 动作走的是 key_down_up / mouse_down_up 组合
+    }
+    _proto = src_safe("protocol.py")
+    _names = set(_re7.findall(r'CMD_\w+ = "([a-z_]+)"', _proto))
+    _main = src_safe("main.py")
+    _backend = {}
+    for _f in ("backends/extension_backend.py", "backends/headless_backend.py"):
+        _backend[_f] = src_safe(_f)
+    _unreachable = []
+    for _n in sorted(_names - _INTERNAL):
+        # ⚠️ 判据必须是 **`_call("xxx")`**，不能只查 `"xxx"` 这个字符串 ——
+        #    渲染分支里也会出现 `method == "get_selection"`，
+        #    只查字符串的话"删掉调用、留下渲染"照样绿（反向验证时抓到的）。
+        if f'_call("{_n}"' in _main:
+            continue
+        # ⚠️ 不看"后端有没有这个方法" —— 方法存在**不等于**插件会调它。
+        #    get_selection 就是活例子：后端方法一直有，main.py 从没调过 ✗
+        #    （反向验证时正是靠删掉调用才暴露出这一点）。
+        # 方法名和命令名不同的（exec_js ↔ execute_js），用"哪个后端方法
+        # 发这条命令"反查。
+        if any(f'CMD_{_n.upper()} ' in _v or f'CMD_{_n.upper()},' in _v
+               or f'CMD_{_n.upper()})' in _v for _v in _backend.values()):
+            continue
+        _unreachable.append(_n)
+    r.ok("S7 扩展能执行的命令，插件都够得着（不会再出现'实现了却没接出来'）",
+         not _unreachable, f"够不着的={_unreachable or '无'}")

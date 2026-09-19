@@ -1477,6 +1477,26 @@ class HeadlessBackend(Backend):
                              data={"tab_id": tab_id, "pinned": bool(pinned),
                                    "unsupported": True})
 
+    async def clipboard(self, mode: str = "read", text: str = "",
+                        tab_id: int = 0) -> OpResult:
+        """无头能写（page.evaluate）；**读**多半拿不到（无头页面通常不聚焦）——
+        如实报，不装作拿到了空字符串。"""
+        try:
+            pg = self._page
+            if pg is None:
+                return OpResult.fail("没有可操作的页面", self.name,
+                                     data={"mode": mode, "text": "", "length": 0, "unsupported": True})
+            if mode == "write":
+                await pg.evaluate("(t) => navigator.clipboard.writeText(t)", text or "")
+                return OpResult(ok=True, backend=self.name,
+                                data={"mode": "write", "ok": True, "text": "", "length": len(text or "")})
+            got = await pg.evaluate("() => navigator.clipboard.readText()")
+            return OpResult(ok=True, backend=self.name,
+                            data={"mode": "read", "text": got or ""})
+        except Exception as e:
+            return OpResult.fail(f"剪贴板操作失败：{type(e).__name__}: {e}", self.name,
+                                 data={"mode": mode, "text": "", "length": 0, "unsupported": True})
+
     async def history(self, query: str = "", limit: int = 100,
                       days: int = 0) -> OpResult:
         """无头用的是**临时 profile**，历史里什么都没有 —— 如实说不支持。
@@ -1588,6 +1608,21 @@ class HeadlessBackend(Backend):
                             backend=self.name)
         except Exception as e:
             return OpResult.fail(f"写入 cookie 失败: {e}", self.name)
+
+    async def get_selection(self, tab_id: int = 0) -> OpResult:
+        """读无头页面里选中的文字（page.evaluate）。"""
+        try:
+            pg = self._page
+            if pg is None:
+                return OpResult.fail("没有可操作的页面", self.name,
+                                     data={"content": "", "title": "", "url": ""})
+            txt = await pg.evaluate("() => window.getSelection().toString()")
+            return OpResult(ok=True, backend=self.name,
+                            data={"content": txt or "", "title": pg.title(),
+                                  "url": pg.url})
+        except Exception as e:
+            return OpResult.fail(f"读取选中文字失败：{type(e).__name__}: {e}", self.name,
+                                 data={"content": "", "title": "", "url": ""})
 
     async def execute_js(self, script: str) -> OpResult:
         err = await self._ready()

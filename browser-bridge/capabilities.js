@@ -574,5 +574,54 @@ async function historySearch(params = {}) {
   };
 }
 
+/**
+ * 剪贴板读写（`navigator.clipboard`）。
+ *
+ * ⚠️ **不能用 execJs**：那条路走 `chrome.userScripts`，用户没在扩展详情页
+ *    打开"允许用户使用脚本"就整个不可用 ✗ —— 剪贴板是常用功能，
+ *    不能绑在那个开关上。这里改用 `chrome.scripting.executeScript` 的
+ *    **ISOLATED**（普通内容脚本）world —— 不需要那个开关 ✓
+ *
+ * ⚠️ 已知限制：**读**剪贴板要求页面**处于聚焦状态**
+ *    （浏览器隐私限制，`readText()` 在后台标签会抛 NotAllowedError）。
+ *    这里会把原因说清楚，而不是笼统报失败。
+ */
+async function clipboardOp(params = {}) {
+  const { mode } = params;
+  if (!params.tab_id && !params.any_tab) {
+    // 不传 tab_id 时就找当前活动标签
+  }
+  const tab = await resolveTab(params.tab_id);
+  const fn = mode === "write"
+    ? (text) => navigator.clipboard.writeText(text).then(() => text)
+    : () => navigator.clipboard.readText();
+
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "ISOLATED",                       // ← 关键：不需要 userScripts
+      func: mode === "write" ? (t) => navigator.clipboard.writeText(t)
+                             : () => navigator.clipboard.readText(),
+      args: mode === "write" ? [String(params.text ?? "")] : [],
+    });
+  } catch (e) {
+    const msg = String(e && e.message || e);
+    if (/Cannot access|chrome:\/\/|edge:\/\//i.test(msg)) {
+      throw new Error("当前是浏览器内部页，不能在里面读写剪贴板"
+                    + "（和内部页读不了 DOM 是同一个硬边界）");
+    }
+    if (/NotAllowedError|not focused|Document is not focused/i.test(msg)) {
+      throw new Error("读剪贴板要求**页面处于聚焦状态**（浏览器隐私限制）—— "
+                    + "点一下目标标签让它在前台，再试一次");
+    }
+    throw e;
+  }
+  const val = results && results[0] ? results[0].result : undefined;
+  return mode === "write"
+    ? { mode, ok: true, length: String(params.text ?? "").length, text: "" }
+    : { mode, text: typeof val === "string" ? val : String(val ?? "") };
+}
+
 export { execJs, upload, uploadChunk, uploadFinish, uploadAbort,
-         downloadViaSession, cookieGet, cookieSet, ensureUserScripts, bookmarks, historySearch };
+         downloadViaSession, cookieGet, cookieSet, ensureUserScripts, bookmarks, historySearch, clipboardOp };
