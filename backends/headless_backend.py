@@ -26,6 +26,40 @@ from .router import Backend
 logger = get_logger("browser_merged", "cyan")
 
 
+def _safe_default_ua() -> str:
+    """没配 `user_agent` 时用的默认 UA —— **不带 Headless 标记**。
+
+    ⚠️ 为什么必须给：Playwright 自带浏览器的默认 UA 里带 `HeadlessChrome`，
+       B站 / 知乎 / 淘宝 这类站点会据此直接拦（表现为"页面能开但内容空、
+       或者弹验证"），而用户根本看不出是 UA 的问题 ✗
+
+    版本号尽量跟**当前浏览器的主版本对齐**（拿得到就用它的），
+    免得 UA 说一个大版本、实际是另一个，反而更可疑。
+    平台按宿主系统推断：Windows 上就报 Windows 的 UA。
+    """
+    import platform as _pf
+    major = ""
+    try:
+        # 能拿到浏览器版本就用它的主版本号
+        import importlib
+        _sync = importlib.import_module("playwright.sync_api")
+        v = getattr(_sync, "__version__", "") or ""
+        major = v.split(".")[0] if v else ""
+    except Exception:
+        pass
+    if not major:
+        major = "131"          # 拿不到就用一个近期的稳定大版本
+    sysname = _pf.system().lower()
+    if "win" in sysname:
+        plat = "Windows NT 10.0; Win64; x64"
+    elif "darwin" in sysname:
+        plat = "Macintosh; Intel Mac OS X 10_15_7"
+    else:
+        plat = "X11; Linux x86_64"
+    return (f"Mozilla/5.0 ({plat}) AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{major}.0.0.0 Safari/537.36 Edg/{major}.0.0.0")
+
+
 def _resolve_user_dir(value, default: str, plugin_data_dir: Path) -> str:
     """把用户填的目录解析成**绝对路径**，语义与 KiraAI 的 `<file>` 标签一致。
 
@@ -47,6 +81,9 @@ def _resolve_user_dir(value, default: str, plugin_data_dir: Path) -> str:
     """
     raw = (value or "").strip().replace("\\", "/")
     if not raw:
+        # ⚠️ **留空必须回落到默认值**。少了这一行，用户什么都不填时
+        #    会得到 `<数据目录>` 本身（而不是 `<数据目录>/files` 之类），
+        #    下载/截图就全都堆到数据目录根上去了。
         return default
     if raw == "data":
         return str(_framework_data_path(plugin_data_dir))
@@ -179,6 +216,13 @@ class HeadlessBackend(Backend):
         self.timeout = int(cfg.get("timeout", 45) or 45)
         self.viewport = _parse_viewport(cfg.get("default_viewport", "1920x1080"))
         self.user_agent = (cfg.get("user_agent") or "").strip() or None
+        # ⚠️ 没配就**不要**留空让 Playwright 用它自己的默认值 —— 那个
+        #    默认 UA 里带 "HeadlessChrome"，B站/知乎/淘宝这类站点会直接拦 ✗
+        #    （表现为"页面能开但内容空/要验证"，很难看出是 UA 的问题）。
+        #    给一个**真实桌面浏览器**的 UA：去掉 Headless 标记，
+        #    版本号跟 Playwright 浏览器的主版本对齐（拿得到就用它的）。
+        if not self.user_agent:
+            self.user_agent = _safe_default_ua()
 
         # 只用插件自己的 profile：临时（用完即弃）或持久化（保留登录态）
         self.profile_mode = (cfg.get("headless_profile_mode", "inherit") or "inherit").lower()
@@ -604,7 +648,13 @@ class HeadlessBackend(Backend):
             #    **失败不能影响浏览器本身可用**（cookies.py 内部已逐文件容错）。
             if getattr(self, "cookies_dir", "") and getattr(self, "load_cookies_on_start", True):
                 try:
-                    from . import cookies as _ck
+                    # ⚠️ 是 `from ..`（插件**根目录**的 cookies.py），
+                    #    不是 `from .`（backends/ 里没有 cookies ✗）——
+                    #    写错的表现是日志里一句
+                    #    "cannot import name 'cookies' from 'plugins.headless_browser.backends'"，
+                    #    然后 cookie 静默不加载（用户的登录态白丢）。
+                    #    同目录的 extension_backend.py 用的就是 `from .. import protocol`。
+                    from .. import cookies as _ck
                     stats = await _ck.load_into_context(self._context, self.cookies_dir)
                     if stats["loaded"]:
                         self._desc += f"，已加载 {stats['cookies']} 条 cookie"

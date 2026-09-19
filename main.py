@@ -148,11 +148,20 @@ class BrowserPlugin(BasePlugin):
         #    两个后端都适用（VLM 调用在插件进程里，跟谁拍的图无关）。
         self.vlm_model = str(cfg.get("vlm_model") or "").strip()
         self.vlm_describe_prompt = str(cfg.get("vlm_describe_prompt") or "").strip()
-        # ⚠️ 默认 30 秒。原来 10 秒对视觉模型偏紧：一张大截图的编码 + 推理
-        #    经常就要十几秒，超时后描述被丢掉，用户看到的是"没拿到描述"。
-        #    30 秒是"够用又不至于把工具卡太久"的折中（超时只是不附描述，
-        #    截图本身照常返回）。
-        self.vlm_timeout = float(cfg.get("vlm_timeout", 30) or 30)
+        # ⚠️ 默认 **60 秒**。原来 10 → 30 还是偏紧：一张大截图的编码 + 推理
+        #    经常十几秒，网络慢或模型忙就更久，超时后描述被丢掉，
+        #    用户看到的是"没拿到描述"。
+        #    现在已经**默认先压缩再发**（见 vlm_compress），正常几秒就回来了；
+        #    60 秒是留给"模型确实慢"的余量 —— 超时只是不附描述，
+        #    截图本身照常返回、照常发给用户，所以放宽不增加风险。
+        self.vlm_timeout = float(cfg.get("vlm_timeout", 60) or 60)
+        # VLM 前压缩（默认开）。三个值都能在面板上调。
+        self.vlm_compress = _b(cfg.get("vlm_compress", True))
+        self.vlm_compress_max_size = int(cfg.get("vlm_compress_max_size", 1280) or 1280)
+        self.vlm_compress_quality = int(cfg.get("vlm_compress_quality", 85) or 85)
+        # 写操作后是否顺手带回页面状态（默认开）。
+        # 省工具调用次数：框架每轮上限默认 5，"点一下+看一眼"要两次就太快用光。
+        self.return_page_after_write = _b(cfg.get("return_page_after_write", True))
         #: 默认是否描述。**每次截图时模型也可以自己用 describe 参数覆盖** ——
         # 「要不要看图」应该由模型按当前任务决定（有时它只想把图发给用户）。
         self.auto_describe_screenshot = _b(cfg.get("auto_describe_screenshot", True))
@@ -382,6 +391,40 @@ class BrowserPlugin(BasePlugin):
     #  后端路由 —— 所有工具都走这里
     # ══════════════════════════════════════════════════════════════════
 
+    async def _with_page_after(self, result: str, *, chars: int = 800,
+                               tab_id=None) -> str:
+        """把「动作结果」和「动作之后的页面状态」拼成**一次**返回。
+
+        ⚠️ 为什么必须合起来：框架有**每轮工具调用上限**
+           （`bot_config.agent.max_tool_calls_per_turn`，默认 **5**）。
+           "点一下 → 再看一眼"如果各占一次调用，5 次只够两轮半 ——
+           bot 还没干完就被限流，日志里表现为满屏
+           `Tool call limit exceeded ... skipping tool 'browser_page'`。
+
+        ⚠️ 而**扩展内部命令不计次**（计的是 LLM 发起的工具调用）。所以在工具
+           内部顺手把页面取回来是**白赚的** —— 同样的预算能干两倍的事，
+           还少一次模型往返，更快。
+
+        ⚠️ 取不到就只回动作结果 —— 不能让"顺手多取"把动作本身搞成失败。
+        """
+        try:
+            info = await self._call("get_info", tab_id=tab_id)
+        except Exception:
+            info = ""
+        try:
+            body = await self._call("get_page", detail="text", tab_id=tab_id,
+                                    max_chars=int(chars or 800))
+        except Exception:
+            body = ""
+        if not info and not body:
+            return result
+        parts = [result] if result else []
+        if info:
+            parts.append(f"📍 现在的页面：\n{info}")
+        if body:
+            parts.append(f"📄 页面内容（截断）：\n{body}")
+        return "\n\n".join(parts)
+
     async def _call(self, method: str, *, for_write: bool = False, **kw):
         """在候选后端上依次尝试某个能力。
 
@@ -413,6 +456,20 @@ class BrowserPlugin(BasePlugin):
             res = await fn(**kw)
             if res.ok:
                 out = self._render(method, res, backend)
+                # ⚠️ **动作与结果一体返回**。
+                #    框架有每轮工具调用上限（max_tool_calls_per_turn，
+                #    默认 5），"点一下 → 再看一眼"各占一次的话 5 次只够
+                #    两轮半 —— 日志里满屏 "Tool call limit exceeded ...
+                #    skipping tool 'browser_page'" 就是这么来的。
+                #    而**扩展/后端的内部命令不计次**，所以在 `_call` 这一层
+                #    顺手把页面状态带上，是**白赚**的：一处改动覆盖所有写操作
+                #    （点/填/导航/滚动…），以后加新工具也自动生效，
+                #    还省掉一次模型往返。
+                #    ⚠️ 只对**写**操作做（for_write）—— 读操作本身就在取页面；
+                #       `_with_page_after` 内部的读是 for_write=False，
+                #       所以不会递归。
+                if for_write and self.return_page_after_write:
+                    out = await self._with_page_after(out, chars=800)
                 # 首次成功调用：如果扩展没连上，顺手把安装引导捎给用户
                 # （只带一次，不刷屏）
                 return self._attach_setup_notice(out)
@@ -950,7 +1007,12 @@ class BrowserPlugin(BasePlugin):
             "selector": {"type": "string"},
             "send": {"type": "boolean"},
             "describe": {"type": "boolean",
-                         "description": "默认取插件配置（通常 true）"}},
+                         "description": (
+                             "要不要让视觉模型也描述这张图（默认取插件配置）。"
+                             "页面上有很多文字/表单时，browser_page 拿到的 DOM 文本"
+                             "通常比图更快更准 —— 那类场景传 false 可以省掉几秒到几十秒；"
+                             "但传了 false 你就**看不到画面本身**（布局、图片、验证码、"
+                             "渲染异常这类只有图里才有的信息）。拿不准就别传。")}},
             "required": []},
     )
     async def tool_screenshot(self, event: KiraMessageBatchEvent, full_page: bool = False,
@@ -994,6 +1056,11 @@ class BrowserPlugin(BasePlugin):
                 configured_model=self.vlm_model,
                 prompt=self.vlm_describe_prompt,
                 timeout=self.vlm_timeout,
+                # ⚠️ 默认**开**：不压的话 1920×1080 的截图会变成好几 MB 的
+                #    data URL，配上框架写死的 detail:"high"，又慢又贵还容易超时。
+                compress=self.vlm_compress,
+                compress_max_size=self.vlm_compress_max_size,
+                compress_quality=self.vlm_compress_quality,
             )
             if desc:
                 parts.append(f"🖼️ 图片描述（VLM）：\n{desc}")
@@ -1182,9 +1249,37 @@ class BrowserPlugin(BasePlugin):
     async def tool_navigate(self, event, url: str, new_tab: bool = False, **_):
         if not self.enabled:
             return "浏览器插件未启用"
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url.lstrip("/")
-        return await self._call("navigate", for_write=True, url=url, new_tab=new_tab)
+        url = (url or "").strip()
+        if not url:
+            return "❌ 没给网址"
+        # ⚠️ 只在"**完全没有 scheme**"时才补前缀。
+        #    原来是 `if not url.startswith(("http://", "https://")): url = "https://" + url`
+        #    —— 于是 `about:blank` 变成 `https://about:blank`、`edge://settings`
+        #    变成 `https://edge://settings`，全都变成非法 URL。
+        #    日志里那句 `[navigate] 失败：Invalid url: "https://about:blank"`
+        #    就是这么来的。
+        #
+        #    判据不能只看"有没有冒号" —— `localhost:3000/p` 也长成 `x:y`，
+        #    但它是**主机:端口**、不是 scheme。所以三条一起看：
+        #      ① 形如 `scheme:`（字母开头）
+        #      ② 冒号前**不含点**（含点的多半是域名，如 example.com:8080）
+        #      ③ 冒号后**不以数字开头**（`localhost:3000` 的 3 是端口号）
+        #    三条都成立才当 scheme（about: / edge: / chrome: / file: /
+        #    data: / view-source: / mailto: …）。
+        import re as _re
+        _m = _re.match(r"^([a-zA-Z][a-zA-Z0-9+.\-]*):(.*)$", url, _re.S)
+        _is_scheme = bool(_m) and "." not in _m.group(1) \
+            and not _m.group(2)[:1].isdigit()
+        if not _is_scheme:
+            # 本机地址用 http（https 在 127.0.0.1/localhost 上基本连不上）
+            _host = url.split("/")[0].split(":")[0].lower()
+            _scheme = "http" if (_host in ("localhost", "127.0.0.1", "::1")
+                                 or _host.endswith(".local")) else "https"
+            url = f"{_scheme}://" + url.lstrip("/")
+        # ⚠️ 导航完**顺手把新页面带回来** —— "导航 → 再看一眼"是浏览器里
+        #    最常见的两次调用，合起来才够用（框架默认每轮只有 5 次）。
+        r = await self._call("navigate", for_write=True, url=url, new_tab=new_tab)
+        return await self._with_page_after(r, chars=800)
 
     # ── 5. 脚本 ──────────────────────────────────────────────────────
 

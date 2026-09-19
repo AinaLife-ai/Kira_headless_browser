@@ -165,7 +165,10 @@ async def get_vlm_client(ctx, configured: str = "") -> Optional[object]:
 async def describe_image(ctx, image_path: str, *,
                          configured_model: str = "",
                          prompt: str = "",
-                         timeout: float = 30.0) -> str:
+                         timeout: float = 60.0,
+                         compress: bool = True,
+                         compress_max_size: int = 1280,
+                         compress_quality: int = 85) -> str:
     """用 VLM 描述一张图；失败/超时返回空串（**不抛异常**）。
 
     调用方（截图工具）据此决定是否把描述附给 bot —— 描述拿不到
@@ -192,12 +195,41 @@ async def describe_image(ctx, image_path: str, *,
         logger.warning(f"框架的 desc_img 不可用，跳过描述：{e}")
         return ""
 
+    img = _Image(image=image_path)
+
+    # ⚠️⚠️ **发图前必须先压一遍** —— 这段是"VLM 老是超时"的根因所在：
+    #
+    #    `desc_img` 内部走 `image.to_data_url()`，那是**原样 base64**
+    #    （不缩放、不重编码），再配上它写死的 `detail: "high"` ——
+    #    一张 1920×1080 的截图会变成好几 MB 的 data URL，
+    #    发给模型又慢又贵，**很容易直接撞上超时**（日志里那条
+    #    "VLM 描述超时（30.0s）"就是这么来的）。
+    #
+    #    框架自己在 `message_manager` 发消息前会调 `compress_image_element`，
+    #    但那是**消息链路**；我们直接调 `desc_img`，**绕过了那一步** ✗
+    #    而且框架的默认配置里 `image_compression.enabled` 是 **False**，
+    #    所以插件这边必须自己默认压。
+    if compress:
+        try:
+            from core.utils.image_compression import compress_image_element
+            _cfg = {"enabled": True,
+                    "max_size": int(compress_max_size or 1280),
+                    "quality": max(1, min(100, int(compress_quality or 85))),
+                    "min_file_size_mb": 0}
+            _before = _os.path.getsize(image_path)
+            if await compress_image_element(img, _cfg):
+                _after = _os.path.getsize(img.file) if _os.path.isfile(str(img.file)) else 0
+                logger.info(f"VLM 前已压缩：{_before // 1024}KB → {_after // 1024}KB")
+        except Exception as e:
+            # 压缩失败不该让描述也失败 —— 用原图继续（大不了慢一点）
+            logger.warning(f"VLM 前压缩失败（继续用原图）：{type(e).__name__}: {e}")
+
     try:
         desc = await asyncio.wait_for(
             desc_img(client=client,
-                     image=_Image(image=image_path),
+                     image=img,
                      prompt=prompt or VLM_TOOL_OPTIMIZED_PROMPT),
-            timeout=float(timeout or 30.0),
+            timeout=float(timeout or 60.0),
         )
         return (desc or "").strip()
     except asyncio.TimeoutError:

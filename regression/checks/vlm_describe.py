@@ -62,8 +62,33 @@ spec.loader.exec_module(vlm)
 _TMPDIR = tempfile.TemporaryDirectory(prefix="kira_vlm_fixture_")
 atexit.register(_TMPDIR.cleanup)
 PNG = os.path.join(_TMPDIR.name, "shot.png")
-with open(PNG, "wb") as f:
-    f.write(bytes.fromhex("89504e470d0a1a0a") + b"0" * 128)
+# ⚠️ 要一张**真的、够大的** PNG：压缩那一步走的是框架的真
+#    `compress_image_element`（PIL 打开 → 缩放 → 重编码），
+#    喂它一个假的 PNG（只有魔数 + 一堆 0）会**打不开**，
+#    于是"压缩"这条路径根本没被验到（看着绿，其实什么都没测）。
+try:
+    from PIL import Image as _PILImage
+    import random as _rnd
+    _rnd.seed(7)
+    _w, _h = 1800, 1200
+    _im = _PILImage.new("RGB", (_w, _h))
+    _im.putdata([(_rnd.randrange(256), _rnd.randrange(256), _rnd.randrange(256))
+                 for _ in range(_w * _h)])
+    _im.save(PNG, "PNG")
+except Exception:
+    with open(PNG, "wb") as f:
+        f.write(bytes.fromhex("89504e470d0a1a0a") + b"0" * 128)
+
+RAW_B64_LEN = 0
+try:
+    import base64 as _b64
+    with open(PNG, "rb") as f:
+        RAW_B64_LEN = len(_b64.b64encode(f.read()))
+except Exception:
+    pass
+
+#: 假客户端收到的 data URL 长度 —— 压缩有没有真的生效就看它比 RAW_B64_LEN 小多少
+DATA_URL_LEN = 0
 
 
 class Model:
@@ -91,8 +116,15 @@ class Client:
         #    这是**链路真跑通**的证据：如果 core.utils.common_utils 导不到
         #    （缺桩/框架不在），describe_image 会静默走 except 返回空串，
         #    那条路径下这个计数器是 0。
-        global CHAT_CALLS
+        global CHAT_CALLS, DATA_URL_LEN
         CHAT_CALLS += 1
+        # 顺手量一下**真正发给模型的那串 data URL 有多长** ——
+        # 压缩有没有生效，全看它。不压的话它 ≈ 原图的 base64 长度。
+        try:
+            _url = req.messages[0]["content"][0]["image_url"]["url"]
+            DATA_URL_LEN = len(_url)
+        except Exception:
+            pass
         return R()
 
 
@@ -168,6 +200,8 @@ async def main():
     # 探针自检：至少有一次描述是**真的走了框架链路**（假 client 被调用）。
     # 全 0 的话说明每次都静默走了 except 分支 —— 那些断言就是空转。
     out["desc_img_path_exercised"] = CHAT_CALLS > 0
+    out["raw_b64_len"] = RAW_B64_LEN
+    out["data_url_len"] = DATA_URL_LEN
 
     out["vision_filter"] = (
         vlm.is_vision_model(Client("gpt-4o")) is True
@@ -259,14 +293,47 @@ def run(r) -> None:
     #    也照样绿（用户没在面板上存过配置时走的就是代码回落）。
     _sch_to = (sch.get("vlm_timeout") or {}).get("default")
     _m_to = re.search(r'cfg\.get\(\s*["\']vlm_timeout["\']\s*,\s*(\d+)', main)
-    r.ok("A13a schema 里 vlm_timeout 默认 30 秒", _sch_to == 30,
+    r.ok("A13a schema 里 vlm_timeout 默认 60 秒", _sch_to == 60,
          f"实际={_sch_to!r}")
-    r.ok("A13b 代码回落值也是 30，且与 schema 一致",
-         bool(_m_to) and _m_to.group(1) == "30",
+    r.ok("A13b 代码回落值也是 60，且与 schema 一致",
+         bool(_m_to) and _m_to.group(1) == "60",
          f"实际={_m_to.group(1) if _m_to else '没找到 cfg.get(...)'}")
-    r.ok("A13c describe_image 的 timeout 形参默认也是 30",
-         "timeout: float = 30.0" in v,
+    r.ok("A13c describe_image 的 timeout 形参默认也是 60",
+         "timeout: float = 60.0" in v,
          "调用方不传 timeout 时用的就是它")
+
+    # ── A15 发图给 VLM 前**必须压缩**（这是"VLM 老是超时"的根因）──────
+    #    ⚠️ `desc_img` 内部走 `image.to_data_url()`（**原样 base64**，
+    #       不缩放不重编码）再配它写死的 `detail: "high"` —— 1920×1080 的
+    #       截图就是好几 MB，又慢又贵还容易超时。框架自己在 message_manager
+    #       发消息前会压，但直接调 desc_img **绕过了那一步**；
+    #       而框架默认 `image_compression.enabled = False`，
+    #       所以插件这边必须自己默认压。
+    _bad15 = []
+    if "compress_image_element" not in v:
+        _bad15.append("vlm.py 里没有压缩调用")
+    _m_c = re.search(r'cfg\.get\(\s*["\']vlm_compress["\']\s*,\s*(True|False)', main)
+    if not _m_c or _m_c.group(1) != "True":
+        _bad15.append("vlm_compress 默认不是开")
+    if '"vlm_compress"' not in src_safe("schema.json"):
+        _bad15.append("schema 里没有 vlm_compress")
+    r.ok("A15 发图给 VLM 前会先压缩（默认开）", not _bad15,
+         f"问题={_bad15 or '无'}")
+
+    # ── A17 「只截图、不描述」这条路要走得通，而且要说得清什么时候用 ──
+    #    用户问的是："bot 能不能选择截图发出去但不做 VLM 描述？"
+    #    功能一直有（`describe=false`），但原来那句说明只写了
+    #    "默认取插件配置（通常 true）" —— **bot 看不出什么时候该传 false**，
+    #    等于这个开关对它不存在。
+    _bad17 = []
+    if "describe" not in main:
+        _bad17.append("截图工具没有 describe 参数")
+    if "browser_page" not in main:
+        _bad17.append("说明里没告诉它'文字多时用 snapshot 更快'")
+    if "看不到画面本身" not in main:
+        _bad17.append("没说清关掉之后会失去什么（不可逆的代价）")
+    r.ok("A17 「只截图不描述」可用，且说明写清了何时该关", not _bad17,
+         f"问题={_bad17 or '无'}")
 
     # ── A14 失败文案必须**短**（不要一段排查说明挤进每次返回）────────
     #    ⚠️ 原来失败时返回六行"常见原因…图片本身已保存…"，既占 token
@@ -359,6 +426,17 @@ def run(r) -> None:
         ]
         for label, key in cases:
             r.ok(label, bool(data.get(key)), f"探针结果={data.get(key)}")
+
+        # ── A16 行为验证：真正发给模型的 data URL **确实变小了** ────────
+        #    ⚠️ 只查"代码里有没有 compress_image_element"是不够的 ——
+        #       夹具是假 PNG 时 PIL 打不开，压缩会静默返回 False，
+        #       那条路径根本没被验到（看着绿）。所以夹具换成**真的
+        #       1800×1200 PNG**，再量真正发出去的那串 data URL。
+        _raw = data.get("raw_b64_len") or 0
+        _sent = data.get("data_url_len") or 0
+        r.ok("A16 实测：发给 VLM 的图确实被压小了（data URL 明显短于原图）",
+             bool(_raw) and bool(_sent) and _sent < _raw * 0.5,
+             f"原图 base64={_raw} 实发={_sent}（应小于一半）")
     except Exception as e:
         r.ok("B0 VLM 行为探针可运行", False, f"{type(e).__name__}: {e}")
     finally:
