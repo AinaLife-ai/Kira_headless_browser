@@ -157,6 +157,12 @@ def run(r) -> None:
     read = set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"', main))
     read |= set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"',
                            src_safe("backends/headless_backend.py")))
+    # ⚠️ 只有前端用的配置（比如"启动动画"开关）Python 侧当然不读 ——
+    #    把面板也当"使用者"，否则会被误判成孤儿配置。
+    _ui = src_safe("web/app.js")
+    for _k in list(sch):
+        if re.search(r"(?<![\w])" + re.escape(_k) + r"(?![\w])", _ui):
+            read.add(_k)
     orphan = sorted(set(sch) - read)
     r.ok("C1 没有「schema 里有但没人读」的配置项",
          not orphan, f"孤儿={orphan or '无'}（共 {len(sch)} 项）")
@@ -164,10 +170,15 @@ def run(r) -> None:
     # 读出来的配置要真的被用（不能只赋给变量又不引用）
     #: 读进来后换成别的名字使用的配置项（配置名 ≠ 属性名）
     RENAMED = {"command_timeout": "bridge.command_timeout"}
+    #: **只有前端用**的配置：Python 侧读它没意义（面板开场播不播动画），
+    #: 使用方就是 web/app.js —— 那里出现就算"真的被用了"。
+    FRONTEND_ONLY = {"boot_animation"}
 
     unread_attrs = []
     for key in sorted(set(sch) & read):
         if key in RENAMED:
+            continue
+        if key in FRONTEND_ONLY:
             continue
         attr_uses = len(re.findall(rf'self\.{key}\b', main))
         if attr_uses == 0:

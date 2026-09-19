@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -1893,7 +1894,13 @@ class BrowserPlugin(BasePlugin):
         try:
             p = Path(__file__).with_name("schema.json")
             d = json.loads(p.read_text(encoding="utf-8"))
-            return d if isinstance(d, dict) else {}
+            if not isinstance(d, dict):
+                return {}
+            # ⚠️ `info` / `section` 是**版面元素**（说明块、分组），不是配置项 ——
+            #    混进来会让 POST 校验把"info_intro"当成一个可以写入的键 ✗
+            return {k: v for k, v in d.items()
+                    if isinstance(v, dict)
+                    and v.get("type") not in ("info", "section")}
         except Exception as e:
             logger.warning(f"读取 schema.json 失败：{e}")
             return {}

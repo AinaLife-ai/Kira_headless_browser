@@ -46,6 +46,13 @@ def run(r) -> None:
     #    （历史坑：schema 有、代码不读 → 用户改了没反应 / AttributeError）
     read_keys = set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"', main))
     read_keys |= set(re.findall(r'cfg\.get\(\s*"([a-z_]+)"', hb))
+    # ⚠️ 有些配置**只有前端用**（比如启动动画开关：它决定面板开场播不播，
+    #    Python 侧根本不读 ✗）。不把面板算进来的话，这类配置会被误判成
+    #    "孤儿配置"。判据：键名在 web/app.js 里以**独立单词**出现过。
+    _ui = src_safe("web/app.js")
+    for _k in list(sch):
+        if re.search(r"(?<![\w])" + re.escape(_k) + r"(?![\w])", _ui):
+            read_keys.add(_k)
     never_read = sorted(set(sch) - read_keys)
     r.ok("A1 schema 每个配置项都被代码读取",
          not never_read, f"未被读取={never_read or '无'}（共 {len(sch)} 项）")
@@ -823,6 +830,14 @@ def run(r) -> None:
                     _decl.add(_a)
         for _m in re.finditer(r'(?<![\w.$])([A-Za-z_$][\w$]*)\s*=>', _c):
             _decl.add(_m.group(1))
+        # ⚠️ **带括号的箭头函数参数也要收**：`(x) => x.trim()` 这种
+        #    只认 `x =>` 的话会把 `x` 当成未声明（实测被误报两个 ✗）。
+        #    参数里可能有默认值/解构，所以取逗号分段后的标识符名。
+        for _m in re.finditer(r'\(([^()]*)\)\s*=>', _c):
+            for _a in _m.group(1).split(","):
+                _a = _a.strip().split("=")[0].strip().lstrip(".").strip()
+                if _a.isidentifier():
+                    _decl.add(_a)
 
         _bi = {
             "document", "window", "chrome", "console", "Math", "JSON", "Date",
@@ -838,6 +853,7 @@ def run(r) -> None:
             "confirm", "prompt", "Event", "CustomEvent", "Map", "Set",
             "Symbol", "RegExp", "Infinity", "NaN", "arguments", "globalThis",
             "requestAnimationFrame", "btoa", "atob", "Blob", "File",
+            "localStorage", "sessionStorage", "performance", "history",
             "Uint8Array", "DataTransfer",
         }
         _used = {}
@@ -870,8 +886,13 @@ def run(r) -> None:
          "notDeclaredAnywhere" not in _scan_undeclared(_fx_ok),
          f"夹具扫描={sorted(_scan_undeclared(_fx_ok))}")
 
-    _js = re.search(r'<script>([\s\S]*)</script>', web)
-    _code_raw = _js.group(1) if _js else ""
+    # ⚠️ 面板拆成 index.html + style.css + app.js 之后，**JS 主体在 app.js**，
+    #    index.html 里只剩一两段内联（启动动画的开关判断）。
+    #    原来只抓 `<script>...</script>`：① 抓不到 app.js（检查空转 ✗）；
+    #    ② `*` 是贪婪的，两段内联会被当成一整块 ✗ → 改成**分别非贪婪匹配**。
+    _inline = "".join(re.findall(
+        r'<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)</script>', web))
+    _code_raw = src_safe("web/app.js") + "\n" + _inline
     # ⚠️ 直接用 `_scan_undeclared`（上面那个），**不要再内联一份副本** ——
     #    之前这里把"剥注释/字符串/模板串 + 收集声明 + 排除内置名 + 两种
     #    引用形态"整套逻辑又写了一遍，和 `_scan_undeclared` 是两份实现。

@@ -8,6 +8,8 @@ const API = "/api/plugin/headless_browser";
 /* ── Lucide 图标（内联 SVG，界面全程不用表情符号）────────────
    取 Lucide 的官方路径子集；stroke 用 currentColor，尺寸交给 CSS。  */
 const P = {
+  eye:'<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
+  'eye-off':'<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/>',
   monitor:'<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
   plug:'<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
   sliders:'<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>',
@@ -149,17 +151,38 @@ function renderConfirmLog(log) {
   });
 }
 
+/* 令牌显示：**默认遮住** —— 它是连接凭据，不该一打开就摊在屏幕上
+   （旁边有人、或者投屏的时候特别尴尬）。点眼睛才显示。
+   ⚠️ 值一直存在 dataset 里，复制按钮用的也是它，所以遮住不影响复制。 */
+let _tokShown = false;
+function renderToken() {
+  const t = $("tokBox").dataset.token || "";
+  if (!t) { $("tok").textContent = "（无）"; return; }
+  $("tok").textContent = _tokShown ? t : "•".repeat(28);
+  const eye = $("eye");
+  if (eye) {
+    eye.innerHTML = icon(_tokShown ? "eye" : "eye-off");
+    eye.title = _tokShown ? "隐藏令牌" : "显示令牌";
+  }
+}
+
 /* ── 令牌 ────────────────────────────────────────────────────── */
 let _tokenSeq = 0;
 
 async function loadToken(force) {
   const seq = ++_tokenSeq;
   try {
-    const r = await api("/token" + (force ? "?force=false" : ""));
+    // ⚠️ 令牌端点是 **POST /token**（`@register.api("POST", "/token")`）——
+    //    原来这里用的是默认 GET，直接 404，界面只能显示"读取失败" ✗
+    //    `force:false` = 只读当前令牌，不重新生成 ✓
+    const r = await api("/token", {
+      method: "POST",
+      body: JSON.stringify({ force: !!force }),
+    });
     if (seq !== _tokenSeq) return;
     const t = r.token || "";
-    $("tok").textContent = t ? (t.slice(0, 10) + "…" + t.slice(-6)) : "（无）";
     $("tokBox").dataset.token = t;
+    renderToken();                       // 默认遮住，点了眼睛才显示
     pairWithExtension(t);
   } catch (e) {
     if (seq === _tokenSeq) $("tok").textContent = "读取失败";
@@ -172,8 +195,8 @@ async function regen() {
   try {
     const r = await api("/token", { method: "POST", body: "{}" });
     if (!r.ok) throw new Error(r.error || "失败");
-    $("tok").textContent = (r.token || "").slice(0, 10) + "…" + (r.token || "").slice(-6);
     $("tokBox").dataset.token = r.token || "";
+    renderToken();
     pairWithExtension(r.token || "");
     toast(r.changed ? "已生成新令牌（旧令牌已作废）" : "令牌未变化");
   } catch (e) {
@@ -208,7 +231,7 @@ function pairWithExtension(token) {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   配置：**界面从 schema.json 长出来** —— 一处真源。
+   配置：界面从 schema.json 长出来 —— 一处真源。
    后端 /config 会把 schema 原样返回，这里只负责分组 + 渲染 +
    改完立刻 POST 回后端（后端热应用，不用重启）。
    ───────────────────────────────────────────────────────────── */
@@ -340,7 +363,7 @@ async function saveConfig() {
     $("saveBar").style.display = "none";
     $("config").classList.add("pulse");
     setTimeout(() => $("config").classList.remove("pulse"), 800);
-    toast("已保存并**立刻生效**（不用重启）");
+    toast("已保存并立刻生效（不用重启）");
   } catch (e) {
     toast("保存失败：" + (e.message || e));
   } finally {
@@ -365,6 +388,11 @@ async function loadConfig() {
       if (t !== "info" && t !== "section") SCHEMA[k] = rawFields[k];
     }
     VALUES = r.values || {};
+    // 启动动画开关：记到 localStorage，**下次打开就能在渲染前判断** ——
+    // 这样"关掉"是真的一个闪都不闪，而不是"播完再藏"。
+    try {
+      localStorage.setItem("kb_boot", VALUES.boot_animation === false ? "0" : "1");
+    } catch (e) { /* 隐私模式下 localStorage 可能不可用，忽略 */ }
     renderConfig();
     $("cfgCount").textContent = Object.keys(SCHEMA).length;
   } catch (e) {
@@ -401,7 +429,28 @@ const _reload = $("reload"); if (_reload) _reload.addEventListener("click", () =
   loadConfig(); refresh(); toast("已重新读取");
 });
 
+/** 收掉启动动画。
+ *
+ *  ⚠️ 两个约束都要满足：
+ *    · **不能一闪而过** —— 数据来的比动画快时（本地接口几十毫秒），
+ *      直接收掉等于什么都没看见；
+ *    · **也不能赖着不走** —— 接口卡住时它必须自己让开，不能挡着界面。
+ *  所以：至少演到 1.5 秒（动画本身约 1.45s），最多 4 秒。
+ */
+function dismissBoot() {
+  const el = $("boot");
+  if (!el || el.classList.contains("done")) return;
+  const started = Number(el.dataset.t0 || Date.now());
+  const wait = Math.max(0, 1500 - (Date.now() - started));
+  setTimeout(() => {
+    el.classList.add("done");                 // 触发"笔刷抹除"
+    setTimeout(() => el.classList.add("gone"), 820);   // 抹完才真隐藏
+  }, wait);
+}
+
 (async function boot() {
+  const _b = $("boot");
+  if (_b) { _b.dataset.t0 = Date.now(); setTimeout(dismissBoot, 4000); }
   _regen.innerHTML = icon("refresh") + "重新生成";
   _copy.innerHTML = icon("copy") + "复制令牌";
   _save.innerHTML = icon("save") + "保存并立刻生效";
@@ -412,5 +461,6 @@ const _reload = $("reload"); if (_reload) _reload.addEventListener("click", () =
   spy();
   await loadToken();
   await refresh();
+  dismissBoot();
   setInterval(refresh, 3000);
 })();

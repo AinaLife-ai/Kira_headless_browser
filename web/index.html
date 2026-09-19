@@ -4,18 +4,61 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>全能浏览器 · 控制台</title>
+<!-- ── 启动动画的**关键 CSS 内联在这里** ────────────────────────────
+     为什么不能放外链 style.css：那样浏览器会先画一帧**没有样式**的覆盖层
+     （或者更糟——先把下面的界面画出来），然后样式到了才变成动画 ✗
+     表现就是"页面先漏出来、再跳出启动动画"。内联进 head 后，
+     覆盖层在**第一帧**就已经是满屏不透明的，下面什么都看不见 ✓
+     剩下的动画细节（弧线、星点、抹除）仍在外链里，随它慢慢到。 -->
+<style>
+  .boot {
+    position: fixed; inset: 0; z-index: 9999;
+    display: grid; place-items: center;
+    background: #FBF6E9;
+    background-image:
+      radial-gradient(120% 80% at 22% 12%, #FFFDF6 0%, transparent 60%),
+      radial-gradient(90% 70% at 82% 88%, #F3EEDC 0%, transparent 62%);
+  }
+  .boot-inner { position: relative; display: grid; place-items: center; }
+  .boot-mark { width: 132px; height: 132px; display: block; }
+  .boot-word {
+    margin-top: 22px; font: 500 11px/1 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .42em; text-transform: uppercase; color: #8B8474;
+  }
+  /* 用户把它关了：onload 之前就藏掉，一帧都不闪 */
+  html.no-boot .boot { display: none !important; }
+</style>
+<script>
+  // 同步判断（在 body 渲染之前）：关了就一帧都不播。
+  // 用 localStorage 而不是等接口 —— 接口是异步的，等它回来动画已经播完了 ✗
+  try { if (localStorage.getItem("kb_boot") === "0")
+          document.documentElement.classList.add("no-boot"); } catch (e) {}
+</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<!-- ── 启动动画（用插件图标本身当主角）────────────────────────────
+     图标先"墨迹未干"地化开，两道弧线一青一琥珀扫过，几颗星点依次亮起
+     （呼应图标上那些星星），最后整块像被笔刷斜着抹掉。
+     纯 CSS + 插件图标，不依赖任何库；prefers-reduced-motion 下不显示。 -->
+<div class="boot" id="boot" aria-hidden="true">
+  <div class="boot-inner">
+    <div class="boot-ring"></div>
+    <div class="boot-ring r2"></div>
+    <img class="boot-mark" src="icon-256.webp" alt="" width="132" height="132">
+    <i class="sp s1"></i><i class="sp s2"></i><i class="sp s3"></i>
+    <i class="sp s4"></i><i class="sp s5"></i>
+    <div class="boot-word">All-in-One Browser</div>
+  </div>
+</div>
+
 <div class="shell">
 
   <!-- ── 左侧栏 ─────────────────────────────────────────────── -->
   <aside class="side">
     <div class="brand">
-      <span class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/>
-        <line x1="12" x2="12" y1="17" y2="21"/></svg></span>
+      <span class="mark"><img src="icon-96.webp" alt="" width="46" height="46"></span>
       <div>
         <h1>全能浏览器</h1>
         <small id="ver">v—</small>
@@ -52,7 +95,7 @@
         Control Surface
       </div>
       <h2>让 bot 真的会用浏览器</h2>
-      <p>连接、令牌、以及**全部**行为配置。改完即时生效 —— 不用重启 KiraAI，也不用去翻配置文件。</p>
+      <p>连接、令牌、以及全部行为配置。改完即时生效 —— 不用重启 KiraAI，也不用去翻配置文件。</p>
     </header>
 
     <section class="sec" id="sec-status">
@@ -77,10 +120,15 @@
       <h3>接入令牌</h3>
       <div class="card"><div class="pad">
         <div class="stat"><div class="k">当前令牌</div>
-          <div class="v mono" id="tokBox"><span id="tok">读取中…</span></div></div>
+          <div class="v mono tok-line">
+            <span id="tok">读取中…</span>
+            <button class="eye" id="eye" type="button" aria-label="显示/隐藏令牌"></button>
+          </div></div>
         <div class="hint">
-          令牌与 KiraAI 的鉴权状态绑定：重启、或轮换 access_token 之后需要重新生成。
-          「重新生成」会让**旧令牌立即作废**（不是等它过期），然后签出一枚新的。
+          令牌默认隐藏，点右边的眼睛可以显示。
+          它与 KiraAI 的鉴权状态绑定：重启、或轮换 access_token 之后需要重新生成。
+          「重新生成」会让旧令牌立即作废（不是等它过期），然后签出一枚新的。
+          用不着手抄 —— 打开这个页面就会自动把它推给扩展。
         </div>
         <div class="row" style="margin-top:12px">
           <button class="btn pri" id="regen">重新生成</button>

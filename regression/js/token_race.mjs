@@ -63,10 +63,32 @@ if (src) {
   const pending = [];
   const api = (_path) => new Promise((resolve) => { pending.push(resolve); });
 
-  const build = new Function("$", "api", "tokenFingerprint", "pairWithExtension",
-    src + "\nreturn loadToken;");
+  // ⚠️ `loadToken()` 现在把"怎么显示"交给 `renderToken()`（令牌默认遮住、
+  //    点眼睛才看）。只抽 loadToken 的话它会在沙箱里 ReferenceError，
+  //    被自己的 catch 吞掉 → 界面显示"读取失败"—— 看着像守卫失效，
+  //    其实是**探针没跟上重构** ✗ 所以把相关声明一起抽进来。
+  const extra = (() => {
+    const out = [];
+    const i0 = html.indexOf("let _tokShown =");
+    if (i0 >= 0) out.push(html.slice(i0, html.indexOf("\n", i0) + 1));
+    const i1 = html.indexOf("function renderToken(");
+    if (i1 >= 0) {
+      const rest = html.slice(i1);
+      const e = rest.indexOf("\n}\n");
+      out.push(e >= 0 ? rest.slice(0, e + 2) : "");
+    }
+    return out.join("\n");
+  })();
+
+  // `renderToken()` 里会调 `icon()` 画那只眼睛 —— 沙箱里没有它就会
+  // ReferenceError（又被 catch 吞成"读取失败"）。这里给个空壳就行：
+  // 探针验的是**令牌值**，不是图标长什么样。
+  const icon = () => "";
+
+  const build = new Function("$", "api", "tokenFingerprint", "pairWithExtension", "icon",
+    src + "\n" + extra + "\nreturn loadToken;");
   //  桩是**传进去**的（闭包在外面），所以 `pushed` 在外层就能读到
-  const loadToken = build($, api, tokenFingerprint, pairWithExtension);
+  const loadToken = build($, api, tokenFingerprint, pairWithExtension, icon);
 
   // ── 场景：轮询先发（拿到旧令牌）→ 强制的后发先回（新令牌）
   //          → 轮询的响应**最后**才到 ─────────────────────────────
@@ -88,10 +110,13 @@ if (src) {
   push("迟到的旧响应不得覆盖新令牌", afterLate === "BRANDNEW",
        `token=${afterLate}（若为 STALEOLD 说明序号守卫失效）`);
   // tokenFingerprint 取末 4 位：BRANDNEW → "DNEW"、STALEOLD → "TOLD"
+    // ⚠️ 令牌**默认是遮住的**（显示 `••••••••`），点眼睛才看得到 ——
+  //    所以这条不能再读 `#tok` 的文本（读到的全是圆点 ✗），
+  //    要读**存下来的真值**（`#tokBox` 的 dataset，复制按钮用的也是它）。
   push("指纹也来自新令牌（不是迟到的那枚）",
-       String(fields["tok"].textContent).includes("DNEW")
-       && !String(fields["tok"].textContent).includes("TOLD"),
-       String(fields["tok"].textContent).slice(0, 60));
+       String(fields["tokBox"].dataset.token).includes("DNEW")
+       && !String(fields["tokBox"].dataset.token).includes("TOLD"),
+       String(fields["tokBox"].dataset.token).slice(0, 60));
 
   // ── 对照：逆序（轮询先回，再回强制的）—— 后者本就该赢 ───────────
   const q1 = loadToken(false);
