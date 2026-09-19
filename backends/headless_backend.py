@@ -604,7 +604,13 @@ class HeadlessBackend(Backend):
             #    **失败不能影响浏览器本身可用**（cookies.py 内部已逐文件容错）。
             if getattr(self, "cookies_dir", "") and getattr(self, "load_cookies_on_start", True):
                 try:
-                    from . import cookies as _ck
+                    # ⚠️ 是 `from ..`（插件**根目录**的 cookies.py），
+                    #    不是 `from .`（backends/ 里没有 cookies ✗）——
+                    #    写错的表现是日志里一句
+                    #    "cannot import name 'cookies' from 'plugins.headless_browser.backends'"，
+                    #    然后 cookie 静默不加载（用户的登录态白丢）。
+                    #    同目录的 extension_backend.py 用的就是 `from .. import protocol`。
+                    from .. import cookies as _ck
                     stats = await _ck.load_into_context(self._context, self.cookies_dir)
                     if stats["loaded"]:
                         self._desc += f"，已加载 {stats['cookies']} 条 cookie"

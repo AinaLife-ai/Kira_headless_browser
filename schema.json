@@ -544,12 +544,45 @@
   "vlm_timeout": {
     "name": "VLM Timeout",
     "type": "integer",
-    "default": 30,
-    "hint": "Seconds to wait for the VLM description (default 30). On timeout the description is skipped - the screenshot itself still succeeds.",
+    "default": 60,
+    "hint": "Seconds to wait for the VLM description (default 60). On timeout the description is skipped - the screenshot itself still succeeds.",
     "locales": {
       "zh": {
         "name": "VLM 超时（秒）",
-        "hint": "等待 VLM 描述的超时时间。超时会跳过描述 —— 截图本身仍然成功、也仍然会发给你，只是 bot 这次没拿到描述。"
+        "hint": "等待 VLM 描述的超时时间（默认 60）。超时会跳过描述 —— 截图本身仍然成功、也仍然会发给你，只是 bot 这次没拿到描述。"
+      }
+    }
+  },
+  "vlm_compress": {
+    "name": "Compress Before VLM",
+    "type": "switch",
+    "default": true,
+    "locales": {
+      "zh": {
+        "name": "VLM 前自动压缩图片",
+        "hint": "**默认开，建议保持**。不压的话：截图会以**原尺寸**转成 base64（1920×1080 就是好几 MB）再配 high detail 发给模型 —— 又慢又贵，还经常直接超时（日志里那条『VLM 描述超时』多半就是这个）。压过之后正常几秒就回来。"
+      }
+    }
+  },
+  "vlm_compress_max_size": {
+    "name": "Compress Max Size",
+    "type": "integer",
+    "default": 1280,
+    "locales": {
+      "zh": {
+        "name": "压缩：最长边（像素）",
+        "hint": "图片最长边压到这个尺寸（默认 1280）。截图里的按钮文字通常还看得清；嫌看不清可以调到 1600。"
+      }
+    }
+  },
+  "vlm_compress_quality": {
+    "name": "Compress Quality",
+    "type": "integer",
+    "default": 85,
+    "locales": {
+      "zh": {
+        "name": "压缩：JPEG 质量",
+        "hint": "重新编码的质量（默认 85，1-100）。调高更清晰但更大。"
       }
     }
   }

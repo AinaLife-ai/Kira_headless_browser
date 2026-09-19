@@ -684,6 +684,29 @@ def run(r) -> None:
              f"实际 default={_entry.get('default')!r} —— 开着=每轮都把当前网址发给服务商")
 
     _m = re.search(r'cfg\.get\(\s*["\']inject_page_state["\']\s*,\s*(True|False)', src_safe("main.py"))
+    # ── C10 navigate 不能给**已经有 scheme 的** URL 硬套 https:// ──────
+    #    ⚠️ 真实踩过：`about:blank` 被加成 `https://about:blank`、
+    #       `edge://settings` 被加成 `https://edge://settings` → 直接
+    #       "Invalid url" 失败（日志里那条就是）。
+    #    判据：① 不能再有"只判 http/https 就补前缀"的写法；
+    #          ② 必须有 scheme 识别（含"冒号后不以数字开头"那条，
+    #             否则 `localhost:3000` 会被误判成 scheme）。
+    #    ⚠️ 必须先剥**Python 注释** —— 我在注释里引用了那句老写法作说明，
+    #       不剥的话判据会被自己的注释命中（首跑就误报了）。
+    #       （`strip_comments_only` 是给 JS 写的，剥不掉 `#`。）
+    _m_src = "\n".join(
+        ln.split("#", 1)[0] if not ln.lstrip().startswith("#") else ""
+        for ln in src_safe("main.py").splitlines())
+    _bad10 = []
+    if 'if not url.startswith(("http://", "https://"))' in _m_src:
+        _bad10.append("还在用『只认 http/https』的老判据（会把 about: 加成 https://about:）")
+    if "is_scheme" not in _m_src and "_is_scheme" not in _m_src:
+        _bad10.append("没有 scheme 识别")
+    if "isdigit()" not in _m_src:
+        _bad10.append("没有『冒号后不以数字开头』的判据（localhost:3000 会被误判）")
+    r.ok("C10 navigate 不硬套 https://（about:blank / edge:// / localhost:3000）",
+         not _bad10, f"问题={_bad10 or '无'}")
+
     r.ok("C9b 代码里的回落值也是关，且与 schema 一致",
          bool(_m) and _m.group(1) == "False",
          f"实际={_m.group(1) if _m else '没找到 cfg.get(...)'}")

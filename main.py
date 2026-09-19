@@ -148,11 +148,17 @@ class BrowserPlugin(BasePlugin):
         #    两个后端都适用（VLM 调用在插件进程里，跟谁拍的图无关）。
         self.vlm_model = str(cfg.get("vlm_model") or "").strip()
         self.vlm_describe_prompt = str(cfg.get("vlm_describe_prompt") or "").strip()
-        # ⚠️ 默认 30 秒。原来 10 秒对视觉模型偏紧：一张大截图的编码 + 推理
-        #    经常就要十几秒，超时后描述被丢掉，用户看到的是"没拿到描述"。
-        #    30 秒是"够用又不至于把工具卡太久"的折中（超时只是不附描述，
-        #    截图本身照常返回）。
-        self.vlm_timeout = float(cfg.get("vlm_timeout", 30) or 30)
+        # ⚠️ 默认 **60 秒**。原来 10 → 30 还是偏紧：一张大截图的编码 + 推理
+        #    经常十几秒，网络慢或模型忙就更久，超时后描述被丢掉，
+        #    用户看到的是"没拿到描述"。
+        #    现在已经**默认先压缩再发**（见 vlm_compress），正常几秒就回来了；
+        #    60 秒是留给"模型确实慢"的余量 —— 超时只是不附描述，
+        #    截图本身照常返回、照常发给用户，所以放宽不增加风险。
+        self.vlm_timeout = float(cfg.get("vlm_timeout", 60) or 60)
+        # VLM 前压缩（默认开）。三个值都能在面板上调。
+        self.vlm_compress = _b(cfg.get("vlm_compress", True))
+        self.vlm_compress_max_size = int(cfg.get("vlm_compress_max_size", 1280) or 1280)
+        self.vlm_compress_quality = int(cfg.get("vlm_compress_quality", 85) or 85)
         #: 默认是否描述。**每次截图时模型也可以自己用 describe 参数覆盖** ——
         # 「要不要看图」应该由模型按当前任务决定（有时它只想把图发给用户）。
         self.auto_describe_screenshot = _b(cfg.get("auto_describe_screenshot", True))
@@ -950,7 +956,12 @@ class BrowserPlugin(BasePlugin):
             "selector": {"type": "string"},
             "send": {"type": "boolean"},
             "describe": {"type": "boolean",
-                         "description": "默认取插件配置（通常 true）"}},
+                         "description": (
+                             "要不要让视觉模型也描述这张图（默认取插件配置）。"
+                             "页面上有很多文字/表单时，browser_page 拿到的 DOM 文本"
+                             "通常比图更快更准 —— 那类场景传 false 可以省掉几秒到几十秒；"
+                             "但传了 false 你就**看不到画面本身**（布局、图片、验证码、"
+                             "渲染异常这类只有图里才有的信息）。拿不准就别传。")}},
             "required": []},
     )
     async def tool_screenshot(self, event: KiraMessageBatchEvent, full_page: bool = False,
@@ -994,6 +1005,11 @@ class BrowserPlugin(BasePlugin):
                 configured_model=self.vlm_model,
                 prompt=self.vlm_describe_prompt,
                 timeout=self.vlm_timeout,
+                # ⚠️ 默认**开**：不压的话 1920×1080 的截图会变成好几 MB 的
+                #    data URL，配上框架写死的 detail:"high"，又慢又贵还容易超时。
+                compress=self.vlm_compress,
+                compress_max_size=self.vlm_compress_max_size,
+                compress_quality=self.vlm_compress_quality,
             )
             if desc:
                 parts.append(f"🖼️ 图片描述（VLM）：\n{desc}")
@@ -1182,8 +1198,33 @@ class BrowserPlugin(BasePlugin):
     async def tool_navigate(self, event, url: str, new_tab: bool = False, **_):
         if not self.enabled:
             return "浏览器插件未启用"
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url.lstrip("/")
+        url = (url or "").strip()
+        if not url:
+            return "❌ 没给网址"
+        # ⚠️ 只在"**完全没有 scheme**"时才补前缀。
+        #    原来是 `if not url.startswith(("http://", "https://")): url = "https://" + url`
+        #    —— 于是 `about:blank` 变成 `https://about:blank`、`edge://settings`
+        #    变成 `https://edge://settings`，全都变成非法 URL。
+        #    日志里那句 `[navigate] 失败：Invalid url: "https://about:blank"`
+        #    就是这么来的。
+        #
+        #    判据不能只看"有没有冒号" —— `localhost:3000/p` 也长成 `x:y`，
+        #    但它是**主机:端口**、不是 scheme。所以三条一起看：
+        #      ① 形如 `scheme:`（字母开头）
+        #      ② 冒号前**不含点**（含点的多半是域名，如 example.com:8080）
+        #      ③ 冒号后**不以数字开头**（`localhost:3000` 的 3 是端口号）
+        #    三条都成立才当 scheme（about: / edge: / chrome: / file: /
+        #    data: / view-source: / mailto: …）。
+        import re as _re
+        _m = _re.match(r"^([a-zA-Z][a-zA-Z0-9+.\-]*):(.*)$", url, _re.S)
+        _is_scheme = bool(_m) and "." not in _m.group(1) \
+            and not _m.group(2)[:1].isdigit()
+        if not _is_scheme:
+            # 本机地址用 http（https 在 127.0.0.1/localhost 上基本连不上）
+            _host = url.split("/")[0].split(":")[0].lower()
+            _scheme = "http" if (_host in ("localhost", "127.0.0.1", "::1")
+                                 or _host.endswith(".local")) else "https"
+            url = f"{_scheme}://" + url.lstrip("/")
         return await self._call("navigate", for_write=True, url=url, new_tab=new_tab)
 
     # ── 5. 脚本 ──────────────────────────────────────────────────────
