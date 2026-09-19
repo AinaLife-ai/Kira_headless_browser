@@ -93,6 +93,7 @@
         <div class="k">扩展连接</div>
         <div class="v" id="conn"><span class="dot off"></span>未连接</div>
       </div>
+      <div class="hint" id="connHint" style="display:none"></div>
       <div class="stat">
         <div class="k">浏览器</div>
         <div class="v" id="browser">—</div>
@@ -209,6 +210,23 @@ async function refresh() {
     $("conn").innerHTML = connected
       ? '<span class="dot on"></span>已连接'
       : '<span class="dot off"></span>未连接';
+    // ⚠️ 未连接时**必须给出下一步**，而且第一步就是"打开一次这个页面"：
+    //    扩展是靠**页面自己的地址**（host + port）认出 KiraAI 在哪儿的 ——
+    //    用户打开这个面板的那一刻，接入信息就推给扩展了，不用手填、
+    //    也不用管 KiraAI 装在哪一个端口上。
+    //    不写这句的话，用户对着"未连接"只能干瞪眼。
+    {
+      const _h = $("connHint");
+      if (connected) {
+        _h.style.display = "none";
+      } else {
+        _h.style.display = "";
+        _h.innerHTML = "扩展没连上？<b>打开一次这个页面</b>就行 —— "
+          + "扩展会从这个页面的地址认出 KiraAI 在哪个端口"
+          + "（不用手填、也不用管端口是不是常见的）。<br>"
+          + "还不行的话：点一下浏览器上的扩展图标，看它自己报什么错。";
+      }
+    }
     $("browser").textContent = b.browser || "—";
     $("extver").textContent = b.extension_version ? ("v" + b.extension_version) : "—";
     $("sent").textContent = b.commands_sent ?? 0;

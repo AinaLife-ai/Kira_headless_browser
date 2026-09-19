@@ -139,6 +139,9 @@ try {
   out.fatal = String(e && e.stack || e);
 }
 console.error = realErr;
+// 把 storage 也带出去 —— 两次运行之间要能"沿用同一份状态"
+// （场景 6 就靠它模拟"扩展手里攥着旧令牌"）。
+try { out.storageDump = JSON.parse(JSON.stringify(store)); } catch (_) {}
 process.stdout.write("RESULT:" + JSON.stringify(out) + "\n");
 // ⚠️ 必须**强制退出**：扩展连上之后还有心跳/重连定时器挂着，
 //    进程不会自己结束 —— 不加这句，测试会一直挂到超时。
@@ -485,6 +488,43 @@ def run(r) -> None:
             await server5.wait_closed()
         await bridge.close()
 
+        # ── 场景 6：**令牌作废后的自救**（用户实际撞到的"又连不上了"）───
+        #    插件侧的令牌与 KiraAI 的鉴权状态**绑定** —— KiraAI 重启、或轮换
+        #    access_token 之后，旧令牌当场作废。而扩展原来只会拿着旧令牌
+        #    一遍遍重连、**永远不会回去重新配对**，于是面板上「扩展连接」
+        #    一直显示未连接（"昨天还好好的，今天又连不上了"）。
+        #    这里：先正常连上（拿到 T1）→ 服务器**换令牌**成 T2 并断开 →
+        #    扩展应该回**已知的地址**重新领一枚（而不是死磕 T1）。
+        server6 = await websockets.serve(
+            holder["handler"], "127.0.0.1", port,
+            process_request=holder["process_request"])
+        try:
+            a6 = await _run_node(node, client_path, {
+                "action": "auto_only", "storage": {}, "settle_ms": 2500,
+            })
+            t1 = ((a6.get("storageDump") or {}).get("kb_instances") or [{}])
+            tok1 = t1[0].get("token") if t1 else None
+
+            state["token"] = TOKEN + "-ROTATED"      # 服务器换令牌（旧的全废）
+            await bridge.close()                     # 把现有连接踢掉
+            # 用**上一轮的 storage**再跑一次 —— 模拟"扩展手里攥着旧令牌"。
+            # 退避状态设成"早就该重试了"，别让测试干等。
+            seed6 = dict(a6.get("storageDump") or {})
+            seed6["kb_discover_at"] = 1
+            b6 = await _run_node(node, client_path, {
+                "action": "alive", "storage": seed6, "settle_ms": 3000,
+            })
+            tok2 = ((b6.get("storageDump") or {}).get("kb_instances") or [{}])
+            tok2 = tok2[0].get("token") if tok2 else None
+            results["repair"] = {
+                "tok1": tok1, "tok2": tok2,
+                "connected": bool((b6.get("status") or {}).get("connected")),
+            }
+        finally:
+            state["token"] = TOKEN
+            server6.close()
+            await server6.wait_closed()
+
         holder["results"] = results
 
     try:
@@ -674,8 +714,8 @@ def run_results(r, holder, results) -> None:
         _bad12.append(f"渲染引导失败: {type(_e).__name__}: {_e}")
     if "粘进去" in _sg or "复制接入令牌" in _sg:
         _bad12.append("还在教用户手动粘令牌")
-    if "打开就会自动配对" not in _sg:
-        _bad12.append("没提'打开面板即自动配对'这条主路径")
+    if "页面自己的地址" not in _sg and "打开就会自动配对" not in _sg:
+        _bad12.append("没提'打开一次 KiraAI 页面即自动配对'这条主路径")
     if "自动检测" not in _sg:
         _bad12.append("没提弹窗的「自动检测」")
     r.ok("P12 安装引导与当前流程一致（不是老的手动粘贴流程）", not _bad12,

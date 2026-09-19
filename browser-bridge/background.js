@@ -214,10 +214,14 @@ export async function discover({ timeoutMs = 1500 } = {}) {
       // 把**试过哪些端口**一起带回去：用户一看就知道"我的端口不在这个列表里"，
       // 而不是对着一句"没找到"猜。
       triedPorts: CANDIDATE_PORTS.slice(),
+      // ⚠️ 措辞别再写"从 127.0.0.1 或 localhost 打开" —— 范围太窄：
+      //    检测对**任何私网地址**都生效（127/localhost/::1/10.x/192.168.x/
+      //    172.16-31.x/*.local），而且**不限于插件面板页**，随便哪个 KiraAI
+      //    页面都行。写窄了会让用户以为必须用某个特定地址。
       error: "没有在本机找到 KiraAI 实例。可能是它用了不常见的端口 —— "
-           + "两种办法：① 从 127.0.0.1 或 localhost 打开 KiraAI 的"
-           + "「全能浏览器」插件面板，页面会自动把接入信息推过来；"
-           + "② 或者在下面手动填「服务地址 / 端口 / 令牌」"
+           + "最简单的办法：**打开一次你的 KiraAI 页面**（平时聊天用的"
+           + "那个地址就行），扩展会从页面地址认出端口并自动配对；"
+           + "或者在下面手动填「服务地址 / 端口 / 令牌」"
            + "（令牌在插件面板上点「复制」拿）。",
     };
   }
@@ -494,9 +498,52 @@ function scheduleReconnect(link) {
     const cfg = await getConfig();
     if (!cfg.autoConnect) return;
     if (await isUserDisconnected()) return;
+    // ⚠️ 反复失败时，问题多半**不是"连不上"，而是"令牌作废了"**：
+    //    插件侧的令牌与 KiraAI 的鉴权状态**绑定** —— KiraAI 重启、或轮换
+    //    access_token 之后旧令牌**当场作废**。而扩展这边只会拿旧令牌一遍遍
+    //    重连、**永远不会回去重新配对**，于是面板上「扩展连接」永远显示未连接
+    //    （"昨天还好好的，今天又连不上了"）。这里补上自救。
+    if (link.reconnectAttempt >= REPAIR_AFTER_ATTEMPTS) {
+      if (await repainKnownInstance(link)) {
+        link.reconnectAttempt = 0;
+        await link.connect();
+        return;
+      }
+    }
     await link.connect();
   }, delay);
 }
+
+/** 连续失败几次之后，就回**已知的那个地址**重新领一枚令牌并重连。
+ *
+ *  为什么不重扫端口：地址我们是知道的（就是 link.inst 里的 host:port），
+ *  直接回那个地址问一次 `/pair` 就行 —— 快，而且**不依赖候选端口列表**
+ *  （KiraAI 装在 5274 这种非常见端口时，重扫是扫不到的）。
+ *
+ *  返回 true 表示拿到了新令牌（调用方接着重连）。
+ */
+async function repainKnownInstance(link) {
+  const { host, port } = link.inst || {};
+  if (!host || !port) return false;
+  try {
+    const r = await fetch(`http://${host}:${port}${PAIR_PATH}`, { cache: "no-store" });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j || !j.ok || !j.token) return false;
+    if (j.token === link.inst.token) return false;   // 令牌没变，重连也没用
+    console.log("[KiraBridge] 令牌已失效，重新配对成功", link.label);
+    await upsertInstance({ host, port: Number(port), token: j.token,
+                           label: link.inst.label || "" });
+    link.inst.token = j.token;
+    return true;
+  } catch (_) {
+    return false;      // 网络不通 / 不是 KiraAI —— 下次再说
+  }
+}
+
+/** 连续失败几次之后就去重新配对（令牌作废是最常见的"连不上"原因）。
+ *  取 3：前两次给真实的网络抖动留余地，第三次基本可以断定是令牌问题了。 */
+const REPAIR_AFTER_ATTEMPTS = 3;
 
 /** 保活与自愈：alarms 唤醒后调用（对所有连接生效）。 */
 export async function ensureAlive() {
@@ -1054,7 +1101,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const changed = before.token !== p.token || Number(before.port) !== Number(p.port);
         const saved = await applyPair(p);
         if (!changed) {
-          sendResponse({ ok: true, single: saved, unchanged: true });
+          // ⚠️⚠️ **但"信息没变"不等于"什么都不用做"**。
+          //    原来这里直接 break —— 于是"令牌没变、可连接就是掉了"这种
+          //    情况**永远不会被这一路救回来**。用户明明正开着 KiraAI 面板、
+          //    明明扩展就是断的，它却什么都不做（"又连不上了"就是这个）。
+          //    正确规则：
+          //      · 用户手动点过「断开」→ 尊重他，别动（保持原意）
+          //      · 否则，这条实例**现在没连上** → 连它
+          const live = links.get(`${p.host}:${p.port}`);
+          if (live && live.open) {
+            sendResponse({ ok: true, single: saved, unchanged: true });
+            break;
+          }
+          if (await isUserDisconnected()) {
+            sendResponse({ ok: true, single: saved, unchanged: true,
+                           skipped: "用户已手动断开" });
+            break;
+          }
+          await connect();
+          sendResponse({ ok: true, single: saved, reconnected: true });
           break;
         }
         // 用户主动打开面板来的，就别让他再点一次「连接」
