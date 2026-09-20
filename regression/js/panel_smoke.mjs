@@ -76,12 +76,18 @@ function makeFetch(window) {
       }
       return json({
         ok: true,
+        // ⚠️ 故意**不给** command_timeout 的值：真后端一定会回退成 schema 默认值，
+        //    这里模拟"后端没给"，看前端是不是至少用占位符把默认值亮出来。
         values: { backend_strategy: "auto", vlm_model: "", read_only: false },
         fields: {
-          backend_strategy: { type: "string", name: "Backend" },
-          vlm_model: { type: "model_select", name: "VLM model" },
-          read_only: { type: "switch", name: "Read only" },
-          blocked_domains: { type: "array", name: "Blocked" },
+          backend_strategy: { type: "string", name: "Backend", default: "auto",
+                              options: ["auto", "extension", "headless"] },
+          browser_channel: { type: "string", name: "Channel", default: "bundled",
+                             options: ["auto", "bundled"] },
+          command_timeout: { type: "float", name: "Command timeout", default: 20 },
+          vlm_model: { type: "model_select", name: "VLM model", default: "" },
+          read_only: { type: "switch", name: "Read only", default: false },
+          blocked_domains: { type: "list", name: "Blocked", default: ["*.bank*"] },
         },
       });
     }
@@ -163,10 +169,10 @@ if (!sel) {
 }
 
 // 对照组：文本框也要照旧能点亮（不能只顾下拉）
+// ⚠️ 顺序要紧：先跑这条对照组，再**清掉标记**，最后才改模型下拉 ——
+//    这样保存时就只剩"模型"一项是改动过的，"只提交改动项"那条断言才有意义。
 const txt = doc.querySelector('#config input[type="text"], #config textarea');
 if (txt) {
-  const box = doc.getElementById("config");
-  box.querySelectorAll(".field.changed").forEach((f) => f.classList.remove("changed"));
   txt.value = "changed-by-probe";
   txt.dispatchEvent(new window.Event("input", { bubbles: true }));
   await sleep(40);
@@ -174,6 +180,47 @@ if (txt) {
        $("saveBar").style.display === "flex" && has(txt.closest(".field"), "changed"),
        `bar=${$("saveBar").style.display}`);
 }
+// 清掉所有"已改动"标记，回到干净状态
+doc.getElementById("config").querySelectorAll(".field.changed")
+  .forEach((f) => f.classList.remove("changed"));
+$("saveBar").style.display = "none";
+// 再把"改过模型"这件事重新标上 —— 保存时应当只提交它一项
+if (sel) {
+  sel.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(60);
+}
+
+// ── ③b 枚举字段必须是**下拉**（用户报：后端策略等被当成了填写框）──────
+const bsel = doc.querySelector('#config select[data-k="backend_strategy"]');
+push("枚举字段渲染成下拉（不是让用户手打）",
+     !!bsel && bsel.tagName === "SELECT" && bsel.options.length === 3,
+     bsel ? `选项=${[...bsel.options].map((o) => o.value).join("/")}` : "找不到 select");
+push("下拉里标出了默认项",
+     !!bsel && [...bsel.options].some((o) => o.value === "auto" && /默认/.test(o.textContent)),
+     bsel ? [...bsel.options].map((o) => o.textContent).join(" | ") : "");
+
+// ── ③c 数值字段：框里要有值，或者至少把默认值亮出来 ─────────────────
+const num = doc.querySelector('#config input[data-k="command_timeout"]');
+push("数值字段是数字输入框（float 也认）",
+     !!num && num.type === "number",
+     num ? `type=${num.type}` : "找不到该输入框");
+push("数值字段空着时要把默认值显示出来",
+     !!num && (num.value === "20" || /默认/.test(num.placeholder || "")),
+     num ? `value=${JSON.stringify(num.value)} placeholder=${JSON.stringify(num.placeholder)}` : "");
+
+// ── ③d 眼睛：点一下要能看到明文，再点遮回去 ─────────────────────────
+const tokEl = $("tok");
+const eyeEl = $("eye");
+const before = tokEl.textContent;
+if (eyeEl) eyeEl.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(60);
+const shown = tokEl.textContent;
+if (eyeEl) eyeEl.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(60);
+push("点眼睛能看到明文令牌（再点遮回去）",
+     !!eyeEl && before !== shown && shown.includes(TOKEN)
+       && tokEl.textContent !== shown && !tokEl.textContent.includes(TOKEN),
+     `前=${JSON.stringify(before.slice(0, 10))} 点后=${JSON.stringify(shown.slice(0, 10))}`);
 
 // ── ④ 保存：下拉的值要真的提交；保存条要收起；提示条要自己消失 ──────
 $("save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -184,6 +231,11 @@ const sent = (post && post.body && post.body.values) || {};
 push("保存时把下拉的值一起提交",
      sent[FIELD_NAME] === PICK,
      `${FIELD_NAME}=${JSON.stringify(sent[FIELD_NAME])}`);
+// ⚠️ 只该提交**用户改过**的那一项：把没动过的也存下去，等于把"当前默认值"
+//    钉成覆盖值，以后插件改默认值这些用户就再也跟不上了 ✗
+push("只提交改动过的字段（不把默认值一起钉死）",
+     Object.keys(sent).length === 1 && sent[FIELD_NAME] === PICK,
+     `提交了 ${JSON.stringify(sent)}`);
 push("保存成功后保存条立刻收起",
      $("saveBar").style.display === "none",
      `display=${$("saveBar").style.display}`);

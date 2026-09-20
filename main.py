@@ -1906,11 +1906,35 @@ class BrowserPlugin(BasePlugin):
             return {}
 
     def _config_snapshot(self) -> dict:
-        """当前**生效**的值（含 WebUI 覆盖）。给界面回显用。"""
-        keys = set(self._schema_fields().keys())
+        """当前**生效**的值（含 WebUI 覆盖），给界面回显用。
+
+        ⚠️ 这里必须**每个字段都有值** —— 否则面板上就是一个空框，
+        用户会以为"没设置"，而不是"在用默认值"（用户明确提过这个问题：
+        命令超时 / 页面加载超时 / 交互操作超时 / 浏览器来源 / profile 模式
+        这些框全是空的）。
+
+        为什么会空：这些键（timeout、op_timeout、browser_channel、
+        headless_profile_mode …）根本不在插件实例上，它们是**传给后端**的，
+        由 `backends/headless_backend.py` 自己 `cfg.get(key, 默认值)` 读。
+        所以回退顺序是：
+
+          实例属性 → 框架配置里写过的 → 面板覆盖过的 → schema 里的 default
+
+        最后那一步是安全的：这些键的**代码默认值与 schema 默认值一致**
+        （有检查盯着，见回归里的"schema 默认值 = 代码默认值"）。
+        """
+        fields = self._schema_fields()
+        cfg = getattr(self, "plugin_cfg", None) or {}
+        overrides = getattr(self, "_cfg_overrides", None) or {}
         out = {}
-        for k in sorted(keys):
+        for k, meta in sorted(fields.items()):
             v = getattr(self, k, None)
+            if v is None:
+                v = cfg.get(k)
+            if v is None:
+                v = overrides.get(k)
+            if v is None:
+                v = (meta or {}).get("default")
             if isinstance(v, (str, int, float, bool)) or v is None:
                 out[k] = v
             elif isinstance(v, (list, tuple)):

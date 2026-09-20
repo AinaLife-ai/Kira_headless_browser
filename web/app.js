@@ -322,25 +322,82 @@ function fmt(s) {
     .replace(/\n/g, "<br>");
 }
 
+/** 放进 HTML 属性里的转义（placeholder / value 用，不能带标签）。 */
+function attr(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** 默认值的**人话**写法（给占位符和提示用）。 */
+function defaultText(meta) {
+  const d = meta && meta.default;
+  if (d === undefined || d === null) return "";
+  if (typeof d === "boolean") return d ? "开" : "关";
+  if (Array.isArray(d)) return d.length ? d.join("、") : "空";
+  if (d === "") return "";
+  return String(d);
+}
+
+/** 输入框空了但确实有默认值时，用占位符把默认值显示出来。 */
+function defaultPlaceholder(meta, v) {
+  const t = defaultText(meta);
+  if (!t) return "";
+  if (v === "" || v === null || v === undefined) return ` placeholder="默认：${attr(t)}"`;
+  return "";
+}
+
+/* ⚠️ 类型判断要和**框架认的那套**对齐（见框架的 configFieldTypes.ts）：
+   数值 = integer / float / number，开关 = switch / boolean / bool，
+   列表 = list，多选 = multi_select。
+   以前面板只认 integer/number ✗ —— schema 里的 `float`（命令超时、
+   跟随框架的比例）就被当成**文本框**渲染，值也可能以字符串提交。
+   框架自己的设置页是认全的，两边不能不一样。 */
+const NUM_TYPES = ["integer", "float", "number"];
+const BOOL_TYPES = ["switch", "boolean", "bool"];
+const LIST_TYPES = ["list", "array"];
+
 function fieldHTML(key) {
   const meta = SCHEMA[key] || {};
   const type = meta.type || "string";
   const v = VALUES[key];
   const lab = `<div class="lab">${fmt(labelOf(key, meta))}</div>`;
   const sub = hintOf(key, meta) ? `<div class="sub">${fmt(hintOf(key, meta))}</div>` : "";
-  if (type === "switch") {
+  if (BOOL_TYPES.includes(type)) {
     const on = v !== false && v !== "false";
     return `<div class="field" data-k="${key}">${lab}${sub}
       <label class="sw"><input type="checkbox" data-k="${key}" ${on ? "checked" : ""}>
       <span class="track"></span><span class="knob"></span></label></div>`;
   }
-  if (Array.isArray(v)) {
+  // ⚠️ **带 `options` 的枚举字段必须渲染成下拉**（后端策略、浏览器来源、
+  //    profile 模式、等待策略…）。
+  //    以前只认 `model_select`，于是这些字段在面板里是**自由文本框** ✗ ——
+  //    用户手打 `Auto` / `chrome ` 这种拼错的值会被原样存下去，谁也不知道
+  //    哪个才对；而框架自己的设置页里它们本来就是下拉（`hasOptions(field)`
+  //    → CustomSelect）。两边行为要一致。
+  const opts = Array.isArray(meta.options) ? meta.options
+    : (Array.isArray(meta.enum) ? meta.enum : []);
+  if (opts.length) {
+    // 当前值拿不到时用 schema 默认值兜底 —— 下拉必须**始终反映真实取值**，
+    // 否则第一项会被浏览器默认选中，用户看到的就不是实际生效的值 ✗
+    const cur = String(v ?? (meta.default ?? ""));
+    const def = meta.default;
+    const label = (o) => (String(o) === String(def) ? `${o}（默认）` : String(o));
+    const has = opts.some((o) => String(o) === cur);
+    return `<div class="field" data-k="${key}">${lab}
+      <select data-k="${key}">
+        ${opts.map((o) => `<option value="${attr(o)}"${String(o) === cur ? " selected" : ""}>`
+                          + `${fmt(label(o))}</option>`).join("")}
+        ${cur && !has ? `<option value="${attr(cur)}" selected>${fmt(cur)}（当前值，已不在可选列表里）</option>` : ""}
+      </select>${sub}</div>`;
+  }
+  if (LIST_TYPES.includes(type) || Array.isArray(v)) {
     return `<div class="field full" data-k="${key}">${lab}
       <textarea data-k="${key}" spellcheck="false">${(v || []).join("\n")}</textarea>${sub}</div>`;
   }
-  if (type === "integer" || type === "number") {
+  if (NUM_TYPES.includes(type)) {
     return `<div class="field" data-k="${key}">${lab}
-      <input type="number" data-k="${key}" value="${v ?? ""}">${sub}</div>`;
+      <input type="number" data-k="${key}" value="${attr(v ?? "")}"${defaultPlaceholder(meta, v)}>${sub}</div>`;
   }
   // ⚠️ `model_select` 要渲染成**下拉**，不是文本框 —— 框架那边就是这么给的
   //    （它的设置页里这类字段是下拉框）。模型列表是从框架的
@@ -365,13 +422,18 @@ function fieldHTML(key) {
       </select>${sub}</div>`;
   }
   // 长文本用 textarea
-  const long = key.endsWith("_prompt") || String(v || "").length > 60;
+  // ⚠️ 判断条件别只看长度：目录/路径字段现在**回显的是绝对路径**
+  //    （快照会填真实值），几十个字符很正常 —— 用长度一刀切会让
+  //    「截图目录」这种字段变成大文本框 ✗。
+  //    只有**真有多行**、或者明显是长文（提示词/正文）才用 textarea。
+  const long = type === "textarea" || key.endsWith("_prompt")
+    || String(v || "").includes("\n") || String(v || "").length > 120;
   if (long) {
     return `<div class="field full" data-k="${key}">${lab}
       <textarea data-k="${key}" spellcheck="false">${v ?? ""}</textarea>${sub}</div>`;
   }
   return `<div class="field" data-k="${key}">${lab}
-    <input type="text" data-k="${key}" value="${v ?? ""}">${sub}</div>`;
+    <input type="text" data-k="${key}" value="${attr(v ?? "")}"${defaultPlaceholder(meta, v)}>${sub}</div>`;
 }
 
 function renderConfig() {
@@ -443,12 +505,19 @@ function collect() {
     // ⚠️ `select` 必须在内 —— 以前只写 input/textarea，
     //    结果模型下拉选完**根本不提交**（保存了也没生效）✗
     if (!el.matches("input,textarea,select")) return;
+    // ⚠️ 只提交**用户改过**的那些字段。
+    //    原因：后端快照现在会把没设置过的键**回退成 schema 默认值**
+    //    （否则面板上是空框），如果连这些一起存下去，就等于把"当前的默认值"
+    //    钉成覆盖值 —— 以后插件升级改了默认值，这些用户再也跟不上 ✗
+    //    没动过的字段不提交 = 保持"跟随默认"的语义。
+    const box = el.closest(".field");
+    if (!box || !box.classList.contains("changed")) return;
     const k = el.dataset.k;
     const meta = SCHEMA[k] || {};
     const t = meta.type;
-    if (t === "switch") out[k] = !!el.checked;
-    else if (t === "integer" || t === "number") out[k] = el.value === "" ? null : Number(el.value);
-    else if (Array.isArray(VALUES[k]))
+    if (BOOL_TYPES.includes(t)) out[k] = !!el.checked;
+    else if (NUM_TYPES.includes(t)) out[k] = el.value === "" ? null : Number(el.value);
+    else if (LIST_TYPES.includes(t) || Array.isArray(VALUES[k]))
       out[k] = el.value.split("\n").map((x) => x.trim()).filter(Boolean);
     else out[k] = el.value;
   });
@@ -468,7 +537,8 @@ async function saveConfig() {
     renderDiag();
     $("config").classList.add("pulse");
     setTimeout(() => $("config").classList.remove("pulse"), 800);
-    toast("已保存并立刻生效（不用重启）");
+    const n = Object.keys((r.applied || [])).length || (r.applied || []).length;
+    toast(n ? `已保存 ${n} 项，立刻生效（不用重启）` : "已保存并立刻生效（不用重启）");
   } catch (e) {
     _lastErr = "保存配置：" + String((e && e.message) || e);
     renderDiag();
@@ -569,6 +639,12 @@ document.addEventListener("click", (e) => {
 
 const _regen = $("regen"); if (_regen) _regen.addEventListener("click", regen);
 const _copy = $("copy");   if (_copy)  _copy.addEventListener("click", copyToken);
+// ⚠️ 眼睛按钮以前**根本没绑事件** ✗ —— 图标画出来了、点了没反应
+//    （用户报的"点眼睛并不显示"）。这里补上：点一下显示明文，再点遮回去。
+const _eye = $("eye");     if (_eye)  _eye.addEventListener("click", () => {
+  _tokShown = !_tokShown;
+  renderToken();
+});
 const _save = $("save");   if (_save)  _save.addEventListener("click", saveConfig);
 const _reload = $("reload"); if (_reload) _reload.addEventListener("click", () => {
   // 模型列表也一起重取 —— 用户刚在框架设置里加/删了模型，这里点一下就该跟上
