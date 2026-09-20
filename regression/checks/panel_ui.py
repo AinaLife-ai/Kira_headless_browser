@@ -72,6 +72,72 @@ def _ids_defined(*sources: str) -> set:
     return out
 
 
+def _snapshot_probe(schema=None):
+    """真跑一遍插件，取 `/config` 用的那份快照（S24 用）。
+
+    返回 ``(snapshot, error)``。
+    """
+    import importlib.util
+    import json as _json
+    import sys
+    import tempfile
+    import types
+    from pathlib import Path
+
+    from ..harness import install_stubs
+
+    install_stubs()
+    if str(PLUGIN_DIR.parent) not in sys.path:
+        sys.path.insert(0, str(PLUGIN_DIR.parent))
+
+    pkg = "hb_panel_snap"
+    if pkg not in sys.modules:
+        m = types.ModuleType(pkg)
+        m.__path__ = [str(PLUGIN_DIR)]
+        sys.modules[pkg] = m
+
+    def load(name, path):
+        full = f"{pkg}.{name}"
+        spec = importlib.util.spec_from_file_location(full, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[full] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    order = ["setup_guide", "protocol", "security", "cookies", "vlm", "tokens",
+             "backends", "backends.base", "backends.router",
+             "backends.headless_backend", "bridge", "main"]
+    mods = {}
+    for name in order:
+        path = PLUGIN_DIR / (name.replace(".", "/") + ".py")
+        if not path.is_file():
+            continue
+        mods[name] = load(name, path)
+    M = mods.get("main")
+    if M is None:
+        return {}, "main.py 没能加载"
+
+    class _Ctx:
+        def __init__(self, d):
+            self._d = Path(d)
+
+        def get_plugin_data_dir(self):
+            return self._d
+
+    tmp = tempfile.mkdtemp(prefix="panel_snap_")
+    # ⚠️ 要**模拟框架的行为**：KiraAI 在建插件配置时会把 schema 里每个键的
+    #    default 灌进配置（`_ensure_plugin_config`，升级时也会补齐缺的键）。
+    #    不这么做的话，`blocked_domains` 这类"代码里读配置、自己不带默认值"
+    #    的字段在探针里会是空列表，看起来像产品 bug —— 其实是探针不真实 ✗
+    seeded = {"enabled": True}
+    for _k, _v in (schema or {}).items():
+        if isinstance(_v, dict) and _v.get("type") not in ("info", "section") \
+                and "default" in _v:
+            seeded.setdefault(_k, _v["default"])
+    plugin = M.BrowserPlugin(_Ctx(tmp), seeded)
+    return plugin._config_snapshot(), ""
+
+
 def run(r) -> None:
     js = src_safe("web/app.js")
     html = src_safe("web/index.html")
@@ -221,3 +287,98 @@ def run(r) -> None:
          not _bad20,
          f"问题={_bad20[:6] or '无'}（这类符号在框架设置页里是纯文本，"
          f"渲染出来就是一堆星号）")
+
+    # ── S21 有默认值的字段，帮助文本必须写清默认值（用户明确要求）────
+    #    "要么框里就有，要么 hint 里写有" —— 框里那份由 S24 盯着，
+    #    hint 这份在这里盯着（中英都算）。
+    _bad21, _checked = [], 0
+    for _k, _v in (_schema or {}).items():
+        if not isinstance(_v, dict) or _v.get("type") in ("info", "section"):
+            continue
+        if "default" not in _v:
+            continue
+        _checked += 1
+        _loc = _v.get("locales") or {}
+        _zh = ((_loc.get("zh") or {}).get("hint") or _v.get("hint") or "")
+        _en = ((_loc.get("en") or {}).get("hint") or _v.get("hint") or "")
+        if "默认" not in _zh:
+            _bad21.append(f"{_k}: 中文提示没写默认值")
+        if "default" not in _en.lower():
+            _bad21.append(f"{_k}: 英文提示没写默认值")
+    # 反向自检：把某条的默认值提法从提示里去掉，判据必须能发现
+    _probe_v = {"default": 20, "hint": "只有说明，没有那个词"}
+    _self21 = "默认" not in (_probe_v.get("hint") or "")
+    r.ok("S21 有默认值的字段都在提示里写清了默认值（中英都要，含反自检）",
+         not _bad21 and _self21 and _checked > 30,
+         f"漏了={_bad21[:6] or '无'}（共检查 {_checked} 项）；"
+         f"反向自检={'通过' if _self21 else '失败'}")
+
+    # ── S22 枚举字段必须是下拉（不能再让用户手打）────────────────────
+    _bad22 = []
+    if "meta.options" not in js and "meta.enum" not in js:
+        _bad22.append("app.js 没有按 options 渲染下拉的分支")
+    if "（默认）" not in js:
+        _bad22.append("下拉里没有把默认项标出来")
+    _with_opts = [k for k, v in (_schema or {}).items()
+                  if isinstance(v, dict) and (v.get("options") or v.get("enum"))]
+    for k in _with_opts:
+        v = _schema[k]
+        if v.get("type") not in ("string", "integer", "float", "number"):
+            _bad22.append(f"{k}: 带 options 但类型是 {v.get('type')!r}，"
+                          f"框架只在普通标量上给下拉")
+        if v.get("default") is not None and v["default"] not in (v.get("options") or []):
+            _bad22.append(f"{k}: default={v['default']!r} 不在 options 里")
+    r.ok("S22 带 options 的枚举字段渲染成下拉，且默认项在选项内",
+         not _bad22, f"问题={_bad22 or '无'}（共 {len(_with_opts)} 个枚举字段）")
+
+    # ── S23 字段类型判断必须与**框架认的那套**对齐 ────────────────────
+    #    ⚠️ 踩过：schema 里的 `float`（命令超时、跟随比例）框架当数值，
+    #       我们只认 integer/number → 退化成文本框，值还可能被当字符串提交。
+    def _type_set(src_text: str, name: str):
+        mm = re.search(rf"const {name} = \[(.*?)\];", src_text, re.S)
+        if not mm:
+            return None
+        return {x.strip().strip('"').strip("'") for x in mm.group(1).split(",") if x.strip()}
+
+    _need = {"NUM_TYPES": {"integer", "float", "number"},
+             "BOOL_TYPES": {"switch", "boolean", "bool"},
+             "LIST_TYPES": {"list"}}
+    _bad23 = []
+    for _n, _want in _need.items():
+        _got = _type_set(js, _n)
+        if _got is None:
+            _bad23.append(f"没有 {_n}（类型判断散在各处，容易漏）")
+        elif not _want <= _got:
+            _bad23.append(f"{_n} 少了 {sorted(_want - _got)}")
+    # 反向自检：喂一段少了 float 的源码，判据必须报出来
+    _self23 = _type_set("const NUM_TYPES = [\"integer\", \"number\"];",
+                        "NUM_TYPES") != {"integer", "float", "number"}
+    r.ok("S23 字段类型判断与框架对齐（float / boolean / list 都要认，含反自检）",
+         not _bad23 and _self23,
+         f"问题={_bad23 or '无'}；反向自检={'通过' if _self23 else '失败'}")
+
+    # ── S24 面板上不许出现"该有值却是空框"的字段 ──────────────────────
+    #    ⚠️ 用户报过：命令超时 / 页面加载超时 / 浏览器来源 …全是空框。
+    #       根因是这些键**不在插件实例上**（它们由后端自己读），
+    #       快照就给了 undefined → 界面渲染成空框，用户以为没设置。
+    #       这里直接跑**真插件**取那份快照来对账。
+    try:
+        snap, err = _snapshot_probe(_schema)
+        if err:
+            r.ok("S24 /config 快照覆盖所有字段（面板上不该有空框）", False, err)
+        else:
+            _empty = []
+            for _k, _v in (_schema or {}).items():
+                if not isinstance(_v, dict) or _v.get("type") in ("info", "section"):
+                    continue
+                d = _v.get("default")
+                if d in (None, "", []):
+                    continue          # 默认值本来就是空，空着是对的
+                got = snap.get(_k)
+                if got in (None, "", []):
+                    _empty.append(f"{_k}（默认 {d!r}）")
+            r.ok("S24 /config 快照覆盖所有字段（面板上不该有空框）",
+                 not _empty, f"空框={_empty[:8] or '无'}")
+    except Exception as e:                                  # pragma: no cover
+        r.ok("S24 /config 快照覆盖所有字段（面板上不该有空框）", False,
+             f"{type(e).__name__}: {e}"[:160])
