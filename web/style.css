@@ -194,14 +194,27 @@ body::after{
   .field{grid-template-columns:1fr}
   .field .lab{margin-bottom:6px}
 }
+/* ⚠️ "减少动效"偏好（Windows：设置 → 辅助功能 → 视觉效果 → 动画效果；
+   Chrome 的 prefers-reduced-motion 跟着它变）—— 这里踩过**两个**坑，都别再犯：
+
+   ① 只写 `*{animation:none!important}` → 连载入动画的**收尾**（boot-out）
+      一起灭掉 → 那块盖住整个页面的层**永远不消失**
+      （用户原话："不会动、也不会自动消失"）✗
+   ② 于是改成 `.boot{display:none!important}` → 对这个用户干脆
+      **一次都不出现** ✗（他明确要看开屏动画，"特效呢？"）
+
+   正解（照 Z 插件那套已经跑通的做法）：
+   · 装饰性动效照关：但**把载入动画那一整块排除出去**（`:not(.boot):not(.boot *)`
+     —— 尤其 `:not(.boot *)` 不能少，否则收尾动画又会被灭掉，退回坑 ①）；
+   · 载入动画**照播**，只是更短更干脆；真正想彻底关掉的人用「启动动画」开关
+     （那个是渲染前就隐藏，一帧都不闪）；
+   · 想要全量动效的用户，可以给 <html> 加 `data-motion="force"`。 */
 @media (prefers-reduced-motion:reduce){
-  *{transition:none!important;animation:none!important}
-  /* ⚠️ 载入动画是**例外**：上面那条 `*{animation:none!important}` 会连它的
-     收尾动画（boot-out）一起杀掉 ✗ → 那块盖住整个页面的层**永远不会消失**
-     （用户看到的就是"不会动、也不会自动消失"）。
-     对"不想要动效"的用户，最干净的做法是**根本不显示这一层** ——
-     不动，而且绝不会挡住界面。 */
-  .boot{display:none!important}
+  html:not([data-motion="force"]) *{transition:none!important}
+  html:not([data-motion="force"]) *:not(.boot):not(.boot *){animation:none!important}
+  html:not([data-motion="force"]) .boot:not(.skip){
+    animation:boot-out .5s cubic-bezier(.7,0,.2,1) 1.9s forwards!important;
+  }
 }
 
 /* ── 令牌显示 ─────────────────────────────────────────────────────

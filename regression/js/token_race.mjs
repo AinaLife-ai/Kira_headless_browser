@@ -63,22 +63,38 @@ if (src) {
   const pending = [];
   const api = (_path) => new Promise((resolve) => { pending.push(resolve); });
 
-  // ⚠️ `loadToken()` 现在把"怎么显示"交给 `renderToken()`（令牌默认遮住、
-  //    点眼睛才看）。只抽 loadToken 的话它会在沙箱里 ReferenceError，
-  //    被自己的 catch 吞掉 → 界面显示"读取失败"—— 看着像守卫失效，
-  //    其实是**探针没跟上重构** ✗ 所以把相关声明一起抽进来。
-  const extra = (() => {
-    const out = [];
-    const i0 = html.indexOf("let _tokShown =");
-    if (i0 >= 0) out.push(html.slice(i0, html.indexOf("\n", i0) + 1));
-    const i1 = html.indexOf("function renderToken(");
-    if (i1 >= 0) {
-      const rest = html.slice(i1);
-      const e = rest.indexOf("\n}\n");
-      out.push(e >= 0 ? rest.slice(0, e + 2) : "");
-    }
-    return out.join("\n");
-  })();
+  // ⚠️ `loadToken()` 现在把"怎么显示/怎么存值"交给了几个小助手
+  //    （`tokStore` / `tokValue` / `setTokValue` / `renderToken`），
+  //    并且 finally 里会调 `renderDiag()` 刷新自检那一行。
+  //    只抽 loadToken 的话它们会在沙箱里 ReferenceError →
+  //    被自己的 catch 吞掉 → 看着像守卫失效，其实是**探针没跟上重构** ✗
+  //    所以这里按名字把用到的助手**一起抽进来**（不复制一份，永远跟源码一致）。
+  const extractFn = (name) => {
+    const re = new RegExp(`^(?:async )?function ${name}\\(`, "m");
+    const m = re.exec(html);
+    if (!m) return "";
+    const rest = html.slice(m.index);
+    const end = rest.indexOf("\n}\n");
+    return end >= 0 ? rest.slice(0, end + 2) : "";
+  };
+  const extractLet = (name) => {
+    const i = html.indexOf(`let ${name} =`);
+    if (i < 0) return "";
+    const j = html.indexOf(";", i);
+    return j >= 0 ? html.slice(i, j + 1) : "";
+  };
+  const extra = [
+    extractLet("_tokShown"),
+    extractFn("tokStore"),
+    extractFn("tokValue"),
+    extractFn("setTokValue"),
+    extractFn("renderToken"),
+    "const renderDiag = () => {};",   // 自检那行与竞态无关
+  ].join("\n");
+  // 抽不到就明确报出来 —— 免得"探针没跟上"被误读成"守卫失效"
+  for (const fn of ["tokStore", "tokValue", "setTokValue", "renderToken"]) {
+    if (!extractFn(fn)) push(`可定位 ${fn}（探针抽取）`, false, "app.js 里找不到");
+  }
 
   // `renderToken()` 里会调 `icon()` 画那只眼睛 —— 沙箱里没有它就会
   // ReferenceError（又被 catch 吞成"读取失败"）。这里给个空壳就行：

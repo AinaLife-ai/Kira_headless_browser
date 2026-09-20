@@ -35,10 +35,13 @@ const $ = (id) => document.getElementById(id);
 
 function toast(msg) {
   const el = $("toast");
+  if (!el) return;
   el.textContent = msg;
   el.classList.add("show");
   clearTimeout(el._t);
-  el._t = setTimeout(() => el.classList.remove("show"), 2000);
+  // ⚠️ 一定要**自己收掉**：这个提示条是 fixed 定位的，赖着不走会挡住
+  //    右下角那排按钮（用户报过"保存的弹窗不消失"）。
+  el._t = setTimeout(() => el.classList.remove("show"), 2200);
 }
 
 /** 打**框架自己**的接口（不带插件前缀）。
@@ -86,6 +89,9 @@ async function refresh() {
       $("conn").innerHTML = `<span class="dot err"></span>读取失败`;
       $("connHint").style.display = "";
       $("connHint").innerHTML = "状态读取失败：" + String(e.message || e);
+      // 自检行也记一笔：用户截图就能看出是"状态接口"挂了而不是别的
+      _lastErr = "读取状态：" + String(e.message || e);
+      renderDiag();
     }
     return;
   }
@@ -169,12 +175,29 @@ function renderConfirmLog(log) {
   });
 }
 
+/* 令牌值的**存取口**：既要能显示，也要能暂存真值（复制按钮用它）。
+   ⚠️ 这里原来是裸的 `$("tokBox").dataset.token` —— 而 HTML 里**没有这个 id** ✗
+      → `null.dataset` 抛 TypeError → 被 loadToken 的 catch 吞掉 →
+      面板永远显示"读取失败"（用户报的问题 ②，真根因就在这）。
+   现在：拿不到那个容器也**绝不能**变成"读取失败"，退回到 #tok 本身。 */
+function tokStore() {
+  return $("tokBox") || $("tok") || null;
+}
+function tokValue() {
+  const el = tokStore();
+  return (el && el.dataset && el.dataset.token) || "";
+}
+function setTokValue(t) {
+  const el = tokStore();
+  if (el && el.dataset) el.dataset.token = t || "";
+}
+
 /* 令牌显示：**默认遮住** —— 它是连接凭据，不该一打开就摊在屏幕上
    （旁边有人、或者投屏的时候特别尴尬）。点眼睛才显示。
    ⚠️ 值一直存在 dataset 里，复制按钮用的也是它，所以遮住不影响复制。 */
 let _tokShown = false;
 function renderToken() {
-  const t = $("tokBox").dataset.token || "";
+  const t = tokValue();
   if (!t) { $("tok").textContent = "（无）"; return; }
   $("tok").textContent = _tokShown ? t : "•".repeat(28);
   const eye = $("eye");
@@ -186,6 +209,7 @@ function renderToken() {
 
 /* ── 令牌 ────────────────────────────────────────────────────── */
 let _tokenSeq = 0;
+let _lastErr = "";          // 最近一次接口错误（面板自检那一行会显示）
 
 async function loadToken(force) {
   const seq = ++_tokenSeq;
@@ -200,12 +224,25 @@ async function loadToken(force) {
       method: "POST",
     });
     if (seq !== _tokenSeq) return;
+    // 后端把失败包在 200 里返回（{ok:false, error}）—— 也要当失败，
+    // 但要把**它给的原因**显示出来，而不是笼统一句"读取失败"。
+    if (!r || r.ok === false) throw new Error((r && r.error) || "接口没有返回令牌");
     const t = r.token || "";
-    $("tokBox").dataset.token = t;
+    if (!t) throw new Error("接口返回了空令牌");
+    setTokValue(t);
+    _lastErr = "";
     renderToken();                       // 默认遮住，点了眼睛才显示
     pairWithExtension(t);
   } catch (e) {
-    if (seq === _tokenSeq) $("tok").textContent = "读取失败";
+    if (seq !== _tokenSeq) return;
+    const why = String((e && e.message) || e);
+    _lastErr = "读取令牌：" + why;
+    // ⚠️ 别只说"读取失败"：用户没法据此判断到底是没登录、404 还是后端报错，
+    //    上一轮就是被这句笼统的话带偏的。
+    $("tok").textContent = "读取失败（" + why + "）";
+    $("tok").title = why;
+  } finally {
+    if (seq === _tokenSeq) renderDiag();
   }
 }
 
@@ -215,8 +252,8 @@ async function regen() {
   try {
     // 重新生成：这才是 force=true（旧令牌当场作废）
     const r = await api("/token?force=true", { method: "POST" });
-    if (!r.ok) throw new Error(r.error || "失败");
-    $("tokBox").dataset.token = r.token || "";
+    if (!r || r.ok === false) throw new Error((r && r.error) || "失败");
+    setTokValue(r.token || "");
     renderToken();
     pairWithExtension(r.token || "");
     toast(r.changed ? "已生成新令牌（旧令牌已作废）" : "令牌未变化");
@@ -228,7 +265,7 @@ async function regen() {
 }
 
 function copyToken() {
-  const t = $("tokBox").dataset.token || "";
+  const t = tokValue();
   if (!t) { toast("还没有令牌"); return; }
   navigator.clipboard.writeText(t).then(
     () => toast("已复制到剪贴板"),
@@ -368,21 +405,44 @@ function renderConfig() {
     </section>`);
   }
   $("config").innerHTML = out.join("");
-  $("config").querySelectorAll("input,textarea").forEach((el) => {
-    el.addEventListener("change", () => markChanged(el));
-  });
+  // ⚠️ 事件用**委托**绑在容器上（只绑一次，见文件末尾），
+  //    别在这里逐个绑 —— 那样每处都要记得把 select 列进去，
+  //    而"漏了 select"正是"改了模型下拉却没反应"的原因 ✗
+}
+
+/* ── 改动标记 / 保存条 ──────────────────────────────────────── */
+function countChanged() {
+  const box = $("config");
+  return box ? box.querySelectorAll(".field.changed").length : 0;
+}
+function showSaveBar() {
+  const n = countChanged();
+  const lab = $("saveBarLabel");
+  if (lab) lab.textContent = n ? `有 ${n} 项未保存的改动` : "有未保存的改动";
+  const bar = $("saveBar");
+  if (bar) bar.style.display = "flex";
+}
+function hideSaveBar() {
+  const bar = $("saveBar");
+  if (bar) bar.style.display = "none";
 }
 
 function markChanged(el) {
   const f = el.closest(".field");
   if (f) f.classList.add("changed");
-  $("saveBar").style.display = "flex";
+  // 让用户**看得见**"改了哪几项、一共几项" —— 下拉框改完也是同一条路
+  // （用户报的问题 ④：选了别的模型却没有任何反馈，无从判断会不会生效）
+  showSaveBar();
 }
 
 function collect() {
   const out = {};
   $("config").querySelectorAll("[data-k]").forEach((el) => {
-    if (!el.matches("input,textarea")) return;
+    // ⚠️ 只收**控件本身**：`data-k` 在外层 .field 上也有一份，
+    //    用 matches 把它过滤掉。
+    // ⚠️ `select` 必须在内 —— 以前只写 input/textarea，
+    //    结果模型下拉选完**根本不提交**（保存了也没生效）✗
+    if (!el.matches("input,textarea,select")) return;
     const k = el.dataset.k;
     const meta = SCHEMA[k] || {};
     const t = meta.type;
@@ -397,21 +457,29 @@ function collect() {
 
 async function saveConfig() {
   const btn = $("save");
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   try {
     const r = await api("/config", { method: "POST", body: JSON.stringify({ values: collect() }) });
-    if (!r.ok) throw new Error(r.error || "保存失败");
+    if (!r || r.ok === false) throw new Error((r && r.error) || "保存失败");
     VALUES = r.values || VALUES;
-    renderConfig();
-    $("saveBar").style.display = "none";
+    renderConfig();          // 重渲染 = 所有"已改动"标记一起清掉
+    hideSaveBar();
+    _lastErr = "";
+    renderDiag();
     $("config").classList.add("pulse");
     setTimeout(() => $("config").classList.remove("pulse"), 800);
     toast("已保存并立刻生效（不用重启）");
   } catch (e) {
+    _lastErr = "保存配置：" + String((e && e.message) || e);
+    renderDiag();
     toast("保存失败：" + (e.message || e));
+    showSaveBar();           // 失败才留着，方便改完再存
   } finally {
-    btn.disabled = false;
-    $("saveBar").style.display = "flex";
+    if (btn) btn.disabled = false;
+    // ⚠️⚠️ 这里**不能**再 `saveBar.style.display="flex"` ✗
+    //    原来的 finally 无条件把保存条又打开了一遍，于是"点了保存、
+    //    弹窗还挂在那儿、还写着有未保存的改动"（用户报的问题 ③）。
+    //    成功已经在 try 里收起，失败在 catch 里保留 —— finally 只管按钮。
   }
 }
 
@@ -468,7 +536,7 @@ async function loadConfig() {
       if (VALUES.boot_replay_seconds != null) {
         localStorage.setItem("kb_boot_cool", String(Number(VALUES.boot_replay_seconds) || 0));
       }
-      if (VALUES.boot_animation === false) endBoot();
+      if (VALUES.boot_animation === false) endBoot("配置里已关闭");
     } catch (e) { /* 隐私模式下 localStorage 可能不可用，忽略 */ }
     renderConfig();
     $("cfgCount").textContent = Object.keys(SCHEMA).length;
@@ -503,55 +571,143 @@ const _regen = $("regen"); if (_regen) _regen.addEventListener("click", regen);
 const _copy = $("copy");   if (_copy)  _copy.addEventListener("click", copyToken);
 const _save = $("save");   if (_save)  _save.addEventListener("click", saveConfig);
 const _reload = $("reload"); if (_reload) _reload.addEventListener("click", () => {
+  // 模型列表也一起重取 —— 用户刚在框架设置里加/删了模型，这里点一下就该跟上
+  loadModelOptions().then(() => renderConfig());
   loadConfig(); refresh(); toast("已重新读取");
 });
 
-/** 载入动画的收尾 —— 结构照 Z 插件那套（它已经跑通了）。
+/* 配置区的事件**委托**：一份监听管住所有控件（含后面重渲染出来的）。
+   ⚠️ 三个都收：input / textarea / **select** ——
+      漏掉 select 就是"模型下拉改了没有任何反馈"的那个 bug（用户报的问题 ④）。
+   同时听 `input` 和 `change`：文本框 typing 时也能立刻亮起保存条。 */
+(function bindConfigEvents() {
+  const box = $("config");
+  if (!box) return;
+  const onEdit = (e) => {
+    const el = e.target && e.target.closest && e.target.closest("[data-k]");
+    if (el && el.matches("input,textarea,select")) markChanged(el);
+  };
+  box.addEventListener("input", onEdit);
+  box.addEventListener("change", onEdit);
+})();
+
+/** 面板自检：出问题时用户截一张图就够了（载入动画有没有播、
+ *  系统是不是开了"减少动效"、最近一次接口报错）。 */
+function renderDiag() {
+  const el = $("diag");
+  if (!el) return;
+  const rm = !!(window.matchMedia
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const b = $("boot");
+  const state = !b ? "元素不存在"
+    : (b.hidden ? "已结束" : (bootPlaying ? "播放中" : "正在收起"));
+  el.textContent = `面板自检：载入动画 ${state}`
+    + (bootWhy ? `（${bootWhy}）` : "")
+    + ` · 减少动效偏好：${rm ? "开" : "关"}`
+    + (_lastErr ? ` · 最近错误：${_lastErr}` : " · 无接口错误");
+}
+
+/** 载入动画的收尾 —— 结构照 Z 插件那套（它已经跑通了，别再自创）。
  *
- *  ⚠️ **收尾的主力是 CSS**（`.boot` 上写了 `animation: boot-out ... 3.1s forwards`），
- *     不靠 JS 掐时间 —— 接口快慢都不会影响它，JS 只负责"点击跳过"和兜底。
+ *  ⚠️ 三条保险，缺一条就会出"不消失"或"不出现"：
+ *    ① CSS 自己收（`.boot` 上 `animation: boot-out … forwards`）——
+ *       不依赖 JS 的时机，接口慢也照收；
+ *    ② `animationend` 再确认一次 —— CSS 真收完了就把节点 hidden；
+ *    ③ **JS 硬兜底超时** —— 万一动画根本没跑（样式没加载 /
+ *       被别的规则覆盖 / 浏览器把动效关了），也必须收掉。
+ *       没有这一条，那一层会**永远盖住整个面板**。
+ *  ⚠️ 也**不要**再按 sessionStorage 里的时间戳"跳过播放" ——
+ *     用户在 90 秒内重开面板就再也看不到开屏动画了（"根本不出现"的
+ *     另一个原因）。重播冷却只用在"页面被切回来重新显示"这一种情形。
  */
 let bootPlaying = true;
 let bootTimer = null;
+let bootHiddenAt = 0;
+let bootWhy = "";
+const BOOT_MAX_MS = 5000;        // 硬兜底：超过这个时间一定收掉
 
-function endBoot() {
+function endBoot(why) {
   const b = $("boot");
   if (!b || !bootPlaying) return;
+  bootPlaying = false;
+  bootHiddenAt = Date.now();
+  bootWhy = why || "手动跳过";
   b.classList.add("skip");                  // 立刻走一段短动画抹掉
   clearTimeout(bootTimer);
   bootTimer = setTimeout(() => {
     b.hidden = true;                        // [hidden] → display:none
     b.classList.remove("skip");
-    bootPlaying = false;
+    renderDiag();
   }, 320);
+  renderDiag();
 }
 
-(async function boot() {
-  // 重播冷却：同一标签页里短时间内（默认 90 秒）不重复播 ——
-  // 不然在页面间来回切会一遍遍放，很烦。照 Z 插件的做法。
+function armBoot() {
+  const b = $("boot");
+  clearTimeout(bootTimer);
+  // ② CSS 的收尾动画播完 → 立刻确认收掉（正常路径，不用等兜底）
+  if (b) {
+    // ⚠️ 这里**不能**用 `{once:true}` ✗ —— 里面那些装饰动画
+    //    （bootInk / bootRing / bootStar）的 animationend 也会**冒泡**到 .boot 上，
+    //    第一个冒上来的就把监听器吃掉了，真正的 boot-out 事件再也收不到
+    //    （实测：只能靠 5 秒兜底才收掉，中间那段时间还会挡住点击）。
+    const onEnd = (e) => {
+      if (e.animationName !== "boot-out") return;
+      b.removeEventListener("animationend", onEnd);
+      endBoot("CSS 收尾动画结束");
+    };
+    b.addEventListener("animationend", onEnd);
+  }
+  // ③ 硬兜底（见上）
+  bootTimer = setTimeout(() => endBoot("兜底超时"), BOOT_MAX_MS);
+}
+
+/** 页面被切回来时**重播**（可选）。冷却时间来自配置
+ *  `boot_replay_seconds`（默认 90 秒）。没有冷却的话，来来回回切页面
+ *  会一遍遍放，很烦 —— 但**首次打开一定是播的**。 */
+function replayBootIfDue() {
+  const b = $("boot");
+  if (!b || bootPlaying || !bootHiddenAt) return;
+  const gap = (Date.now() - bootHiddenAt) / 1000;
+  const cool = Number(localStorage.getItem("kb_boot_cool") || 90) || 0;
+  if (!(cool > 0 && gap >= cool)) return;
   try {
-    const last = Number(sessionStorage.getItem("kb_boot_at") || 0);
-    const cool = Number(localStorage.getItem("kb_boot_cool") || 90) * 1000;
-    if (last && Date.now() - last < cool) {
-      const b = $("boot");
-      if (b) b.hidden = true;
-      bootPlaying = false;
-    } else {
-      sessionStorage.setItem("kb_boot_at", String(Date.now()));
-    }
-  } catch (e) { /* 隐私模式下 sessionStorage 可能不可用 */ }
-  // 点击任意处跳过
-  document.addEventListener("click", () => endBoot(), true);
+    // 换一个新节点 = 所有 CSS 动画从头再跑一遍（照 Z 插件的做法）
+    const fresh = b.cloneNode(true);
+    b.replaceWith(fresh);
+  } catch (e) { return; }
+  bootHiddenAt = 0;
+  bootPlaying = true;
+  bootWhy = "";
+  const cur = $("boot");
+  if (cur) { cur.hidden = false; cur.classList.remove("skip"); }
+  armBoot();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") replayBootIfDue();
+  else if (!bootHiddenAt) bootHiddenAt = Date.now();
+});
+
+(async function boot() {
+  // 点击任意处 / Esc 跳过
+  document.addEventListener("click", () => endBoot("点击跳过"), true);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") endBoot("Esc 跳过");
+  });
+  armBoot();                       // 静态标记一进来就在动，这里只负责收尾
   _regen.innerHTML = icon("refresh") + "重新生成";
   _copy.innerHTML = icon("copy") + "复制令牌";
   _save.innerHTML = icon("save") + "保存并立刻生效";
   _reload.innerHTML = icon("activity") + "重新读取";
   $("ver").textContent = "v—";  // 真正的版本号由 /status 回填
+  renderDiag();
 
   await loadConfig();
   loadModelOptions().then(() => renderConfig());   // 拿到模型列表后重渲染一次，换成下拉
   spy();
   await loadToken();
   await refresh();
+  renderDiag();
   setInterval(refresh, 3000);
 })();
