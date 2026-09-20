@@ -28,6 +28,7 @@ from . import (
     pair_e2e,
     origin_detect,
     one_step,
+    panel_ui,
 )
 
 #: 检查**模块**列表（按顺序执行）。
@@ -57,6 +58,7 @@ ALL_CHECKS = [
     lost_features,       # v2.1.0 重写时丢掉的能力（cookie 自动加载 / 下载浏览器 / VLM 自查）
     timeout_semantics,   # 「结果不确定」链路（超时不得触发换后端重试）
     execjs_gates,        # 扩展执行 JS 的两道关口（USER_SCRIPT world CSP / 端口值域）
+    panel_ui,            # 侧边栏面板（真 DOM 行为 + id/表单/保存条/开屏动画守卫）
 ]
 
 __all__ = ["ALL_CHECKS"]

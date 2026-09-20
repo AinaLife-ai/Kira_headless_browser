@@ -41,7 +41,15 @@ const extra = ["function renderStatus(", "function _renderDomains(",
   const rest = html.slice(i);
   const e = rest.indexOf("\n}\n");
   return e >= 0 ? rest.slice(0, e + 3) : "";
-}).join("\n");
+}).join("\n")
+  // ⚠️ refresh() 的 catch 里现在会记一笔自检（`_lastErr` + `renderDiag()`）——
+  //    沙箱里没有这两个名字的话，"迟到的失败响应"那条用例会直接
+  //    ReferenceError 退出，看着像守卫失效，又是**探针没跟上重构** ✗
+  + "\n" + (() => {
+    const i = html.indexOf("let _lastErr =");
+    return i >= 0 ? html.slice(i, html.indexOf(";", i) + 1) : "";
+  })()
+  + "\nconst renderDiag = () => {};\n";
 
 const out = [];
 
