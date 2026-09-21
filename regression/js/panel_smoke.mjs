@@ -37,6 +37,11 @@ const html = readFileSync(`${PLUGIN}/web/index.html`, "utf8");
 const appjs = readFileSync(`${PLUGIN}/web/app.js`, "utf8");
 
 const TOKEN = "e2e-token-abcdef0123456789";
+//: 扩展更新状态：探针中途会把它改成"已是最新"，验证提示会自己消失
+let extState = {
+  state: "update_available", needs_update: true,
+  bundled_version: "9.9.9", connected_version: "1.0.0", protocol_ok: true,
+};
 const FIELD_NAME = "vlm_model";
 const PICK = "p-openai:gpt-4o-mini";
 
@@ -57,8 +62,17 @@ function makeFetch(window) {
         plugin_version: "2.1.78", connected: false,
         bridge: { connected: false, commands_sent: 0, commands_failed: 0 },
         router: { strategy: "auto", describe: "auto" },
+        extension: extState,
         policy: { allowed_domains: [], blocked_domains: [], local_access: true },
         confirm_log: [],
+      });
+    }
+    if (u.includes("/extension")) {
+      return json({
+        packaged: true, path: "/plugins/headless_browser/browser-bridge",
+        connected: true, extensions_url: "chrome://extensions",
+        steps: ["打开 chrome://extensions", "打开开发者模式", "加载已解压的扩展"],
+        browsers_found: [], compatibility: "",
       });
     }
     if (u.includes("/token")) {
@@ -221,6 +235,35 @@ push("点眼睛能看到明文令牌（再点遮回去）",
      !!eyeEl && before !== shown && shown.includes(TOKEN)
        && tokEl.textContent !== shown && !tokEl.textContent.includes(TOKEN),
      `前=${JSON.stringify(before.slice(0, 10))} 点后=${JSON.stringify(shown.slice(0, 10))}`);
+
+// ── ③e 旧版扩展要在面板上被点名（用户要求"未来都可以检测"）──────
+const notice = $("extNotice");
+const noticeText = notice ? notice.textContent : "";
+push("旧版扩展时出现更新提示（含两个版本号）",
+     !!notice && notice.style.display !== "none"
+       && noticeText.includes("1.0.0") && noticeText.includes("9.9.9"),
+     `display=${notice && notice.style.display} text=${JSON.stringify(noticeText.slice(0, 60))}`);
+if (notice) {
+  const btn = doc.getElementById("extStepsBtn");
+  push("提示里给了「查看更新步骤」的入口", !!btn);
+  if (btn) {
+    btn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(300);
+    const stepsBox = doc.getElementById("extSteps");
+    push("点开就能看到更新步骤（复用 /extension 接口）",
+         !!stepsBox && /开发者模式/.test(stepsBox.textContent || ""),
+         JSON.stringify((stepsBox || {}).textContent || "").slice(0, 80));
+  }
+}
+// 扩展更新之后，提示要自己消失（不用用户手动关）
+extState = { state: "up_to_date", needs_update: false,
+             bundled_version: "9.9.9", connected_version: "9.9.9",
+             protocol_ok: true };
+try { window.refresh(); } catch (_) { await sleep(3200); }   // 拿不到就等轮询
+await sleep(200);
+push("扩展更新后提示自动消失",
+     $("extNotice").style.display === "none",
+     `display=${$("extNotice").style.display}`);
 
 // ── ④ 保存：下拉的值要真的提交；保存条要收起；提示条要自己消失 ──────
 $("save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

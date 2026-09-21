@@ -99,6 +99,94 @@ async function refresh() {
   renderStatus(s);
 }
 
+/* ── 扩展版本提示 ────────────────────────────────────────────────
+   ⚠️ 判断全在**后端**（setup_guide.extension_update_state → /status.extension）：
+      前端只按 state 取文案、把版本号显示出来。
+      **这里不许出现任何版本号字面量** —— 否则以后插件升级扩展版本，
+      提示就不会自己出现（用户装的是旧扩展却没人告诉他）。
+   以后要加状态：后端加一个 state + 这里加一条文案即可。 */
+const EXT_TEXT = {
+  zh: {
+    update_available: (e) =>
+      `扩展可以更新了：你现在用的是 v${e.connected_version}，插件自带的已经是 v${e.bundled_version}。` +
+      `旧版扩展可能缺一些修复与新能力（例如连接空闲时的自愈），更新后功能才完整。`,
+    outdated_protocol: () =>
+      "扩展与插件的协议版本对不上（有些能力可能调用失败）。建议更新扩展 —— " +
+      "扩展是随插件打包的，用插件目录里的那份重新加载即可。",
+    unknown: () =>
+      "扩展没有上报版本号，可能是很久以前的版本。建议重新加载一次扩展；" +
+      "如果仍是这样，按下面的步骤用插件自带的那份覆盖安装。",
+  },
+  en: {
+    update_available: (e) =>
+      `The extension can be updated: you are running v${e.connected_version}, ` +
+      `while the plugin bundles v${e.bundled_version}. Older builds miss recent ` +
+      `fixes (for example the idle-link self-healing), so updating keeps everything working.`,
+    outdated_protocol: () =>
+      "The extension and the plugin disagree on the protocol version, so some " +
+      "capabilities may fail. Please update the extension - it ships inside the " +
+      "plugin folder, so just reload that copy.",
+    unknown: () =>
+      "The extension did not report a version, which usually means a very old " +
+      "build. Reload the extension; if it stays like this, reinstall the copy " +
+      "bundled with the plugin using the steps below.",
+  },
+};
+
+let _extStepsShown = false;
+
+function renderExtNotice(ext) {
+  const box = $("extNotice");
+  if (!box) return;
+  ext = ext || {};
+  if (!ext.needs_update) {
+    box.style.display = "none";
+    box.textContent = "";
+    // 更新好了就把步骤也收起来（用户不会再需要它）
+    const st = $("extSteps");
+    if (st) { st.style.display = "none"; st.textContent = ""; }
+    _extStepsShown = false;
+    return;
+  }
+  const t = (EXT_TEXT[LOCALE] || EXT_TEXT.zh)[ext.state];
+  const msg = t ? t(ext) : "扩展与插件版本不一致，建议更新扩展。";
+  box.style.display = "flex";
+  box.innerHTML = icon("alert")
+    + `<div><b>扩展建议更新</b><br>${fmt(msg)}`
+    + ` <button class="btn ghost" id="extStepsBtn" type="button" style="margin-top:8px">`
+    + `查看更新步骤</button></div>`;
+  const btn = $("extStepsBtn");
+  if (btn) btn.addEventListener("click", loadExtSteps);
+  // 已经点开过的话，让内容跟着新的提示一起保留
+  if (_extStepsShown) loadExtSteps();
+}
+
+/** 「查看更新步骤」：拉 /extension（安装步骤 + 扩展在插件目录里的绝对路径）。
+ *  复用现成接口，不另造一份文案 —— 步骤改了这里自动跟上。 */
+async function loadExtSteps() {
+  const box = $("extSteps");
+  if (!box) return;
+  box.style.display = "";
+  box.innerHTML = `<div class="hint">正在读取安装步骤…</div>`;
+  try {
+    const d = await api("/extension");
+    const steps = (d && d.steps) || [];
+    const path = (d && d.path) || "";
+    const url = (d && d.extensions_url) || "";
+    box.innerHTML = `<div class="note"><div>`
+      + `<b>扩展所在位置</b><br><span class="mono">${fmt(path)}</span>`
+      + `<br><span class="hint">在浏览器地址栏打开 <span class="mono">${fmt(url)}</span>，`
+      + `删掉旧的「Kira Browser Bridge」，再用下面的方式加载上面这个目录。</span>`
+      + `<ol style="margin:8px 0 0 18px;padding:0">`
+      + steps.map((s) => `<li>${fmt(s)}</li>`).join("")
+      + `</ol></div></div>`;
+    _extStepsShown = true;
+  } catch (e) {
+    box.innerHTML = `<div class="hint">读取安装步骤失败：${fmt(e.message || String(e))}</div>`;
+    _extStepsShown = false;
+  }
+}
+
 /* ── 连接状态 ────────────────────────────────────────────────── */
 function renderStatus(s) {
   const b = s.bridge || {};
@@ -125,9 +213,17 @@ function renderStatus(s) {
   $("route").textContent = rt.describe || "—";
   $("strategy").textContent = rt.strategy || "—";
   $("cmds").textContent = (b.commands_sent || 0) + " / " + (b.commands_failed || 0);
-  $("extVer").textContent = b.extension_version || "—";
+  const _ext = s.extension || {};
+  $("extVer").textContent = _ext.connected_version
+    ? `v${_ext.connected_version}` + (_ext.bundled_version
+        && _ext.connected_version !== _ext.bundled_version
+        ? `（插件自带 v${_ext.bundled_version}）` : " ✓")
+    : "—";
   $("browser").textContent = b.browser || "—";
   if (s.plugin_version) $("ver").textContent = "v" + s.plugin_version;
+
+  // 扩展版本提示（旧版/协议不匹配/没上报版本 → 提示可以更新）
+  renderExtNotice(s.extension);
 
   const pol = s.policy || {};
   _renderDomains($("domains"), pol.allowed_domains, pol.blocked_domains, pol.local_access);

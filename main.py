@@ -1816,11 +1816,30 @@ class BrowserPlugin(BasePlugin):
 
     @register.api("GET", "/status", auth=True)
     async def api_status(self):
+        # 扩展"该不该更新"：**后端算一次**，面板只渲染 state。
+        # 版本号来自两处真源：插件自带的 browser-bridge/manifest.json，
+        # 以及扩展握手时上报的 chrome.runtime.getManifest().version。
+        # ⇒ 以后插件把扩展升到 1.6.0，用户那边还是 1.5.0，提示会自动出现，
+        #   前端一行都不用改（"未来都可以检测"）。
+        try:
+            _bundled = setup_guide.bundled_extension_version(
+                Path(__file__).resolve().parent)
+            _hello = getattr(self.bridge, "_hello", None)
+            _ext_state = setup_guide.extension_update_state(
+                bundled=_bundled,
+                connected=getattr(_hello, "extension_version", None),
+                is_connected=self.bridge.connected,
+                protocol_ok=(getattr(_hello, "protocol", None) in (None, P.PROTOCOL_VERSION)),
+            )
+        except Exception as e:                     # 提示功能不能拖垮 /status
+            logger.warning(f"计算扩展更新状态失败：{type(e).__name__}: {e}")
+            _ext_state = setup_guide.extension_update_state(None, None, False)
         return {
             "enabled": self.enabled,
             "plugin_version": getattr(self, "PLUGIN_VERSION", "") or "",
             "connected": self.bridge.connected,
             "bridge": self.bridge.info,
+            "extension": _ext_state,
             "router": {
                 "strategy": self.backend_strategy,
                 "active": self.router.active.display if (self.router and self.router.active) else None,

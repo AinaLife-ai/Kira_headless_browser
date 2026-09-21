@@ -121,6 +121,10 @@
         </div>
         <div class="hint" id="route">—</div>
         <div class="hint" id="connHint" style="display:none"></div>
+        <!-- 扩展版本提示：由 /status 的 extension.state 驱动（后端算好，前端只渲染）。
+             旧版扩展 / 协议不匹配 / 没上报版本时出现，并给出更新步骤。 -->
+        <div class="note warn" id="extNotice" style="display:none"></div>
+        <div id="extSteps" style="display:none"></div>
         <div id="domains" style="margin-top:10px"></div>
         <div id="clog" style="margin-top:6px"></div>
         <!-- 面板自检：把"载入动画有没有播 / 是不是开了减少动效 / 最近一次接口错误"

@@ -49,6 +49,16 @@ const extra = ["function renderStatus(", "function _renderDomains(",
     const i = html.indexOf("let _lastErr =");
     return i >= 0 ? html.slice(i, html.indexOf(";", i) + 1) : "";
   })()
+  // ⚠️ renderStatus 现在还会调 renderExtNotice（扩展版本提示）与 renderDiag ——
+  //    沙箱里缺名字的话，整段 refresh 会抛错，用例会**看起来像守卫失效** ✗
+  //    （又一次"探针没跟上重构"，所以这里按名字抽，抽不到就补个空壳）
+  + "\n" + (() => {
+    const i = html.indexOf("function renderExtNotice(");
+    if (i < 0) return "const renderExtNotice = () => {};";
+    const rest = html.slice(i);
+    const e = rest.indexOf("\n}\n");
+    return e >= 0 ? rest.slice(0, e + 2) : "const renderExtNotice = () => {};";
+  })()
   + "\nconst renderDiag = () => {};\n";
 
 const out = [];
