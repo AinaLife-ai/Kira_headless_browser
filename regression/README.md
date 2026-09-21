@@ -109,6 +109,7 @@ regression/
 │   └── panel_ui.py         侧边栏面板（jsdom 真 DOM 行为 + id/表单/保存条/开屏动画守卫）
 │   └── bridge_idle.py      桥接空闲判死与半开连接自愈（“假断开”刷屏）
 │   └── ext_update.py       扩展版本提示（旧版扩展要能发现 / 前后端状态名一致）
+│   └── ext_icons.py        扩展图标（尺寸 / 格式 / 体积预算，含反向自检）
 ├── stubs/                  让插件能被 import 的最小替身（不需要真的 KiraAI）
 │   ├── core/               框架接口的最小实现
 │   └── playwright/         **语义忠实的**假 Playwright（见下）
