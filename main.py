@@ -201,6 +201,10 @@ class BrowserPlugin(BasePlugin):
         #: 默认是否描述。**每次截图时模型也可以自己用 describe 参数覆盖** ——
         # 「要不要看图」应该由模型按当前任务决定（有时它只想把图发给用户）。
         self.auto_describe_screenshot = _b(cfg.get("auto_describe_screenshot", True))
+        #: 截图时窗口最小化/被完全遮挡 → 让扩展"借窗口一瞬"：恢复窗口 → 截 → 还原。
+        #: 默认开（bot 的常见用法就是"浏览器丢后台自己截图看"）；不想被弹窗的人可关，
+        #: 关了之后最小化状态下截图就直接如实失败。
+        self.screenshot_restore_window = _b(cfg.get("screenshot_restore_window", True))
 
         # ⚠️ 本机 / 内网默认**允许**访问：本插件就是给 AI 当浏览器用的，
         #    localhost:3000 这类开发服务器和 KiraAI 自己的面板都是正常工作目标。
@@ -386,6 +390,7 @@ class BrowserPlugin(BasePlugin):
                 content_page_size=self._headless_cfg.get("content_page_size", 8000),
                 require_confirm=self.require_confirm,
                 confirm_timeout=CONFIRM_WAIT_SECONDS,
+                screenshot_restore_window=self.screenshot_restore_window,
             ))
         if self.headless_enabled:
             self.router.register(self._headless)
@@ -461,12 +466,22 @@ class BrowserPlugin(BasePlugin):
             parts.append(f"📄 页面内容（截断）：\n{body}")
         return "\n\n".join(parts)
 
-    async def _call(self, method: str, *, for_write: bool = False, **kw):
+    async def _call(self, method: str, *, for_write: bool = False,
+                    no_fallback: bool = False, **kw):
         """在候选后端上依次尝试某个能力。
 
         优先用扩展桥（用户自己的浏览器）；它没连上或调用失败时，
         如果策略允许就自动切到无头，并把降级原因带回给模型 ——
         不做"静默降级"，否则用户会莫名其妙发现自己在看另一个浏览器。
+
+        ⚠️ 「不静默」不只是标个来源（用户明确要求）：只要这次结果是**换过后端**
+           才拿到的，返回文本必须以「🔁 后端已切换」开头，写清原因、并提醒
+           "两者是两套浏览器"。原因：`（来源：…）` 只是标注，不是**事件** ——
+           bot 不会因为一个小括号就意识到"我原本要操作的那套失败了"，
+           截图尤其危险：它会把图当成用户看到的东西。
+        ⚠️ `no_fallback=True` 用于**换了后端就换了语义**的操作。典型：截用户浏览器
+           的可视区域 —— 无头后端拍的是另一个浏览器，那张图毫无意义。
+           这类操作宁可直接失败，也不给一张"看起来成功"的错图。
         """
         if self.router is None:
             return "❌ 插件尚未初始化完成，请稍后重试。"
@@ -476,10 +491,13 @@ class BrowserPlugin(BasePlugin):
             return f"❌ {self.router.hint()}"
 
         tried = []
+        first_tried = None          # 第一个**真的尝试过**的后端（切换起点的判据）
         for backend in candidates:
             if not backend.available and not await self._probe(backend):
                 tried.append(f"{backend.display}（不可用）")
                 continue
+            if first_tried is None:
+                first_tried = backend
             if for_write:
                 # 写操作前校验目标页面（扩展后端能拿到 URL，无头后端用当前页）
                 err = await self._check_write(backend, kw.get("url"))
@@ -492,6 +510,9 @@ class BrowserPlugin(BasePlugin):
             res = await fn(**kw)
             if res.ok:
                 out = self._render(method, res, backend)
+                # 换过后端才拿到的结果 → 明确说出来（见 docstring）
+                if first_tried is not None and backend is not first_tried:
+                    out = self._switch_notice(method, first_tried, backend, tried) + out
                 # ⚠️ **动作与结果一体返回**。
                 #    框架有每轮工具调用上限（max_tool_calls_per_turn，
                 #    默认 5），"点一下 → 再看一眼"各占一次的话 5 次只够
@@ -527,11 +548,46 @@ class BrowserPlugin(BasePlugin):
             #    留着会让人以为"某处会用最后一次错误"，实际只用 tried 列表。
             tried.append(f"{backend.display}: {res.error}")
             logger.warning(f"[{method}] {backend.display} 失败：{res.error}")
+            if no_fallback:
+                # 换后端就换语义的操作（典型：截用户浏览器可视区域）——
+                # 如实失败，绝不给一张"看起来成功"的错图。
+                return self._no_fallback_failure(method, tried)
 
         detail = "；".join(tried)
         msg = (f"❌ 操作失败。已尝试：{detail}\n"
                f"（若希望只用其中一种，可在插件配置里调整「后端策略」）")
         return self._attach_setup_notice(msg)
+
+    def _switch_notice(self, method: str, frm, to, tried) -> str:
+        """换了后端必须在结果里说清楚 —— 切换要**让 bot 有感知**。
+
+        ⚠️ 不能只靠 `_render` 里那个「（来源：…）」：那是标注，不是**事件**。
+           bot 看到 `✅ 截图已保存: …（来源：无头浏览器）` 时，很容易把图
+           当成"用户浏览器现在长这样"。截图尤其危险，所以这里单独把话说死。
+        """
+        why = "；".join(tried)
+        head = f"🔁 后端已切换：{frm.display} → {to.display}\n"
+        if why:
+            head += f"原因：{why}\n"
+        if method == "screenshot":
+            return (head
+                    + "⚠️ 这张图来自**另一个浏览器**（无头后端是独立的一套）："
+                      "它拍的**不是**用户浏览器当前画面/标签。"
+                      "要看用户看到的画面，请让用户把浏览器窗口恢复出来再重试。\n\n")
+        return (head
+                + "⚠️ 两个后端是**两套独立的浏览器**：这条结果来自后者，"
+                  "它的页面不等于用户浏览器当前页面 —— 接着操作前先确认对象。\n\n")
+
+    def _no_fallback_failure(self, method: str, tried) -> str:
+        """「换后端就换语义」的操作失败时的回话：宁可失败，也不要假成功。"""
+        detail = "；".join(tried)
+        extra = ""
+        if method == "screenshot":
+            extra = ("\n（可视区域截图**只能**由用户浏览器完成 —— 无头后端拍的是另"
+                     "一个浏览器，那张图不是你要看的画面，所以没有替你换后端。"
+                     "让用户把窗口恢复出来（或把「截图时临时恢复窗口」开着）再试。）")
+        return (f"❌ 操作失败。已尝试：{detail}{extra}\n"
+                f"（若希望只用其中一种，可在插件配置里调整「后端策略」）")
 
     async def _probe(self, backend) -> bool:
         """懒启动：无头后端第一次被用到时才拉起，不拖慢插件加载。"""
@@ -1202,8 +1258,13 @@ class BrowserPlugin(BasePlugin):
             _d = _base / "temp"
             os.makedirs(_d, exist_ok=True)
             path = os.path.join(str(_d), f"{prefix}_{int(time.time())}.png")
+        # ⚠️ 截「用户浏览器的可视区域」时**不许换后端**：无头后端拍的是另一个
+        #    浏览器，换过去只会得到一张"看起来成功"的错图 —— 正是要防的假成功。
+        #    （整页 / 元素截图是另一回事：扩展**根本做不到**，本来就得交给无头，
+        #      那种切换由 `_switch_notice` 明确说出来，bot 看得见。）
+        visible_only = not full_page and not selector
         r = await self._call("screenshot", path=path, full_page=full_page,
-                             selector=selector or None)
+                             selector=selector or None, no_fallback=visible_only)
 
         # 截图失败：直接回错，不要再去发图/描述
         if not (isinstance(r, str) and r.startswith("✅")):

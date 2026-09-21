@@ -32,6 +32,8 @@ from . import (
     bridge_idle,
     ext_update,
     ext_icons,
+    failover_notice,
+    screenshot_restore,
 )
 
 #: 检查**模块**列表（按顺序执行）。
@@ -65,6 +67,8 @@ ALL_CHECKS = [
     bridge_idle,         # 桥接空闲判死与半开连接自愈（"假断开"刷屏）
     ext_update,          # 扩展版本提示（旧版扩展要能发现）
     ext_icons,           # 扩展图标（尺寸 / 格式 / 体积预算）
+    failover_notice,     # 换后端必须被 bot 感知（不许静默回退）
+    screenshot_restore,  # 截图·窗口最小化自愈（借窗口一瞬，用完还回去）
 ]
 
 __all__ = ["ALL_CHECKS"]

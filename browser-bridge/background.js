@@ -948,8 +948,77 @@ async function screenshot(params) {
       `请先用 activate_tab 切过去，或改为对当前活动标签截图。`
     );
   }
-  const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-  return { url: tab.url, title: tab.title, image: url };
+  const image = await captureVisibleWithRestore(
+    tab.windowId, { restoreWindow: params.restore_window !== false });
+  return { url: tab.url, title: tab.title, image };
+}
+
+//: 窗口不可见时：恢复窗口后等多久、最多试几次（等合成器出一帧）
+const SHOT_RESTORE_WAIT_MS = 220;
+const SHOT_RESTORE_TRIES = 3;
+
+/** 是不是"拿不到画面"这一类错误？
+ *
+ *  ⚠️ 只有这一类才值得去**动用户的窗口**。别的错误（没权限、标签不对…）
+ *     一律原样抛出，绝不为了重试把用户的窗口弹出来 —— 那是打扰。
+ */
+function isCaptureUnavailable(e) {
+  const m = String((e && e.message) || e || "");
+  return /readback|capture tab|capturevisibletab|no frame|not visible|minimi[sz]ed|hidden/i.test(m);
+}
+
+function captureUnavailableMessage(wasMinimized, triedRestore) {
+  const why = wasMinimized
+    ? "浏览器窗口当前是「最小化」状态"
+    : "浏览器窗口当前完全不可见（最小化，或被别的窗口完全挡住）";
+  return `${why}，系统读不到画面，所以截图失败。`
+    + (triedRestore ? "已尝试临时恢复窗口再截一次，仍然拿不到画面。" : "")
+    + "把浏览器窗口恢复出来（或让它至少露出一部分）再重试即可。";
+}
+
+/** 截可视区域；窗口最小化/被遮挡时**短暂借一下窗口**，截完恢复原状。
+ *
+ *  ⚠️ 为什么要有它（用户报的）：bot 的常见用法正是"把浏览器丢在后台自己截图看"，
+ *     而窗口最小化时 captureVisibleTab 必然失败 —— Chromium 拿不到可回读的帧，
+ *     抛的是 "Failed to capture tab: image readback failed"。以前我们把这句原文
+ *     直接丢给用户：看不懂，也没法照做。
+ *  ⚠️ 恢复原状是**义务**：我们是借用户的窗口一瞬，用完必须还回去（原来最小化就
+ *     还它最小化）。
+ *  ⚠️ 不抢焦点：只用 `state`，不加 `focused: true`。
+ */
+async function captureVisibleWithRestore(winId, { restoreWindow = true } = {}) {
+  const attempt = () => chrome.tabs.captureVisibleTab(winId, { format: "png" });
+
+  let wasMinimized = false;
+  try {
+    const win = await chrome.windows.get(winId);
+    wasMinimized = !!(win && win.state === "minimized");
+  } catch (_) { /* 拿不到窗口信息也不影响截图本身 */ }
+
+  try {
+    return await attempt();
+  } catch (e) {
+    if (!isCaptureUnavailable(e)) throw e;
+    if (!restoreWindow) throw new Error(captureUnavailableMessage(wasMinimized, false));
+
+    let image = null;
+    try {
+      await chrome.windows.update(winId, { state: "normal" });
+      for (let i = 0; i < SHOT_RESTORE_TRIES && !image; i++) {
+        await new Promise((r) => setTimeout(r, SHOT_RESTORE_WAIT_MS));
+        try { image = await attempt(); } catch (_) { /* 再等一帧 */ }
+      }
+    } finally {
+      if (wasMinimized) {
+        try { await chrome.windows.update(winId, { state: "minimized" }); } catch (_) {}
+      }
+    }
+    if (image) {
+      console.log("[KiraBridge] 截图时窗口不可见：已临时恢复窗口，截完还原");
+      return image;
+    }
+    throw new Error(captureUnavailableMessage(wasMinimized, true));
+  }
 }
 
 // ─── 写命令实现 ──────────────────────────────────────────────────────────────

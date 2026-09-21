@@ -48,7 +48,8 @@ class ExtensionBackend(Backend):
     def __init__(self, bridge, protocol, max_upload_bytes=None,
                  max_download_bytes=None, download_timeout=None,
                  content_page_size=8000,
-                 require_confirm=False, confirm_timeout=45):
+                 require_confirm=False, confirm_timeout=45,
+                 screenshot_restore_window=True):
         self._bridge = bridge
         self._P = protocol
         self.max_upload_bytes = int(max_upload_bytes or self.MAX_UPLOAD_BYTES)
@@ -59,6 +60,9 @@ class ExtensionBackend(Backend):
         # （配置项存在、扩展也实现了，但如果不在这里传下去，整套确认就是死的）
         self.require_confirm = bool(require_confirm)
         self.confirm_timeout = int(confirm_timeout or 45)
+        #: 截图时窗口最小化 → 让扩展"借窗口一瞬"（截完还原）。同 require_confirm，
+        #: 必须随命令下发，否则配置项等于不存在。
+        self.screenshot_restore_window = bool(screenshot_restore_window)
 
     # ─── Backend 接口 ────────────────────────────────────────────────
 
@@ -112,6 +116,10 @@ class ExtensionBackend(Backend):
         if self.require_confirm and cmd in (self.WRITE_CMDS | self.CONFIRM_ONLY_CMDS):
             p.setdefault("require_confirm", True)
             p.setdefault("confirm_timeout", self.confirm_timeout)
+        # 截图：窗口最小化/被遮挡时要不要"借窗口一瞬"（截完还原）。
+        # 同 require_confirm —— 不下发的话，扩展那边永远拿默认值，配置项形同虚设。
+        if cmd == self._P.CMD_SCREENSHOT:
+            p.setdefault("restore_window", self.screenshot_restore_window)
         try:
             data = await self._bridge.send_command(cmd, p,
                                                    timeout=timeout, cmd_id=cmd_id)
