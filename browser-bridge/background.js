@@ -26,6 +26,7 @@ import {
   resolveTab, assertInjectable, callContent, detectBrowser,
   askUser, confirmTimeoutMs, resolveConfirm,
   NEEDS_CONFIRM_COMMANDS, confirmPromptFor,
+  isLinkStale, WS_STALE_MS,
 } from "./shared.js";
 import {
   getInfo, goBack, refresh, hover, keyPress, keyDownUp,
@@ -267,6 +268,9 @@ export class Link {
     this.reconnectAttempt = 0;
     this.lastError = "";
     this.connecting = null;
+    //: 最后一次收到服务端数据的时间（epoch ms）。保活闹钟醒来时用它判断
+    //: "看着 OPEN、其实半开"的链路（见 shared.js 的 isLinkStale）。
+    this.lastInboundAt = 0;
   }
 
   get key() { return `${this.inst.host}:${this.inst.port}`; }
@@ -346,6 +350,7 @@ export class Link {
         clearTimeout(openTimeout);
         this.reconnectAttempt = 0;
         this.lastError = "";
+        this.lastInboundAt = Date.now();
         console.log("[KiraBridge] 已连接", this.label);
         this.sendRaw({
           type: MSG.HELLO,
@@ -359,6 +364,8 @@ export class Link {
 
       ws.onmessage = (ev) => {
         if (this.ws !== ws) return;
+        // 记下"最后一帧是什么时候到的" —— 保活闹钟醒来时会用它判断链路是否半开
+        this.lastInboundAt = Date.now();
         handleMessage(ev.data, this)
           .catch((e) => console.error("[KiraBridge] 消息处理异常", e));
       };
@@ -576,6 +583,29 @@ export async function ensureAlive() {
         || l.ws.readyState === WebSocket.CLOSING) {
       l.reconnectAttempt = 0;
       await l.connect();
+      continue;
+    }
+    // ── 看着 OPEN、其实不通的"半开连接" ────────────────────────────
+    //  服务端每 25 秒发一次心跳 ping，正常情况绝不会静默 60 秒。
+    //  静默这么久 = 对面已经收不到我们的东西（典型场景：Service Worker
+    //  被回收又唤醒，socket 留在半开状态）。
+    //  ⚠️ 由**扩展自己**换一条新连接，而不是等服务端把这条判死：
+    //     前者是"主动重连"，日志干净；后者在服务端是"判定连接已失效"，
+    //     看起来像故障，还会刷屏。
+    if (l.ws.readyState === WebSocket.OPEN && isLinkStale(l.lastInboundAt)) {
+      console.log("[KiraBridge] 超过", Math.round(WS_STALE_MS / 1000),
+                  "秒没收到服务端数据，链路已半开，主动换一条新连接", l.label);
+      l.reconnectAttempt = 0;
+      try { l.ws.close(4000, "stale"); } catch (_) {}
+      continue;      // onclose 里会自动重连
+    }
+    // 还活着：发一条保活 ping 让服务端也看得见"扩展这边醒着"。
+    //  MV3 里这条尤其有用 —— 保活闹钟每次唤醒 Service Worker 都会走到这里，
+    //  服务端的空闲计时因此被重置，就不会出现"对面明明活着却被判死"。
+    if (l.ws.readyState === WebSocket.OPEN) {
+      try {
+        l.sendRaw({ type: MSG.PING, ts: Date.now() });
+      } catch (_) { /* 发不出去也不额外处理：下一轮会走上面的陈旧分支 */ }
     }
   }
 }

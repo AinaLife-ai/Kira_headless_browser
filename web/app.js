@@ -132,6 +132,14 @@ function renderStatus(s) {
   const pol = s.policy || {};
   _renderDomains($("domains"), pol.allowed_domains, pol.blocked_domains, pol.local_access);
   renderConfirmLog(s.confirm_log);
+
+  // 桥接的"空闲探活 / 判死"计数：扩展一断一合到底正不正常，看这两个数最清楚
+  _bridgeIdle = {
+    probes: b.idle_probes || 0,
+    disconnects: b.idle_disconnects || 0,
+    ago: b.last_inbound_ago,
+  };
+  renderDiag();
 }
 
 /* ── 域名与确认记录 ──────────────────────────────────────────────
@@ -669,6 +677,8 @@ const _reload = $("reload"); if (_reload) _reload.addEventListener("click", () =
 
 /** 面板自检：出问题时用户截一张图就够了（载入动画有没有播、
  *  系统是不是开了"减少动效"、最近一次接口报错）。 */
+let _bridgeIdle = null;      // 桥接的空闲探活统计（/status 回填）
+
 function renderDiag() {
   const el = $("diag");
   if (!el) return;
@@ -677,9 +687,13 @@ function renderDiag() {
   const b = $("boot");
   const state = !b ? "元素不存在"
     : (b.hidden ? "已结束" : (bootPlaying ? "播放中" : "正在收起"));
+  const idle = _bridgeIdle
+    ? ` · 桥接空闲探活 ${_bridgeIdle.probes} 次 / 判死 ${_bridgeIdle.disconnects} 次`
+    : "";
   el.textContent = `面板自检：载入动画 ${state}`
     + (bootWhy ? `（${bootWhy}）` : "")
     + ` · 减少动效偏好：${rm ? "开" : "关"}`
+    + idle
     + (_lastErr ? ` · 最近错误：${_lastErr}` : " · 无接口错误");
 }
 
