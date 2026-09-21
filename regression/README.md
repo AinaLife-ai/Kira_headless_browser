@@ -18,6 +18,19 @@ KIRA_PLUGIN_DIR=/path/to/other-copy python3 regression/run_all.py
 
 退出码：全过 `0`，有失败 `1`（可直接接进 CI）。
 
+### 自查工具：扩展版本戳
+
+```bash
+python3 regression/ext_version_stamp.py           # 按当前内容刷新戳
+python3 regression/ext_version_stamp.py --check   # 只检查（不一致退出码 1）
+```
+
+**改了 `browser-bridge/` 里的任何东西，就必须把 `browser-bridge/manifest.json`
+的 version 往上加一级，然后跑一次刷新。** 为什么：扩展是随插件打包的，
+用户浏览器里那份不会自动更新 —— 插件靠比对"两边版本号"来提示用户更新。
+改了代码却没升版本 ⇒ 两边版本号一样 ⇒ 面板判定"已是最新"⇒ 用户永远收不到更新
+（2026-09-22 真踩过：扩展改了 4 个文件、版本号还是 1.5.0）。回归里的 V8 盯着这件事。
+
 ### 自查工具：删文件矩阵
 
 ```bash
