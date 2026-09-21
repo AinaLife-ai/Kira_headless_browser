@@ -36,6 +36,53 @@ export const links = new Map();
  *  页面可能已经不是我记忆里的样子了。 */
 export const activity = { lastWriter: "", lastWriteTs: 0 };
 
+/** 多久没收到服务端任何一帧，就认为这条链路"看着 OPEN、其实不通"（毫秒）。
+ *
+ *  为什么需要：MV3 的 Service Worker 被回收再唤醒之后，WebSocket 可能变成
+ *  **半开连接** —— `readyState` 还是 `OPEN`，但对面的数据永远到不了。
+ *  只看 readyState 的话，扩展会一直以为"已连接"，而每个命令都卡到超时。
+ *
+ *  服务端每 25 秒发一次心跳 ping，所以正常情况下永远不该静默这么久；
+ *  60 秒没动静 = 链路确实不通了 —— 主动换一条新连接**比**等服务端
+ *  把这条判死要好：重连是扩展自己的事，日志里也不会出现
+ *  "服务端判定连接已失效"那种惊悚告警。
+ */
+export const WS_STALE_MS = 60000;
+
+/** 这条连接是不是已经"静默过久"了？（纯函数，方便测试）
+ *
+ *  `lastInboundAt` 为 0/空 表示"还没收到过任何一帧"（刚建连）→ 不算陈旧。
+ */
+export function isLinkStale(lastInboundAt, now = Date.now(), limit = WS_STALE_MS) {
+  if (!lastInboundAt) return false;
+  return (now - lastInboundAt) > limit;
+}
+
+/** "换一条新连接"这条日志的**降噪窗口**（毫秒）。
+ *
+ *  为什么也要降噪：链路真半开时，这个动作每分钟都会发生一次（阈值 60 秒），
+ *  一条条打出来就是新的刷屏 —— 而它本来是为了让日志变干净的。
+ *  同一个窗口内只喊一次，其余只累加计数（数字可以去弹窗里看）。
+ */
+export const STALE_LOG_WINDOW_MS = 5 * 60 * 1000;
+
+/** 这次"换连接"要不要**打日志**？（纯函数，方便测试）
+ *
+ *  `box` 是一个可变状态对象：`{count, logAt, suppressed}`。
+ *  返回值：true = 这次该喊（其余情况只累加计数）。
+ */
+export function staleLogDecision(box, now = Date.now(),
+                                windowMs = STALE_LOG_WINDOW_MS) {
+  box.count = (box.count || 0) + 1;              // 计数**always**要加
+  if (box.logAt && (now - box.logAt) < windowMs) {
+    box.suppressed = (box.suppressed || 0) + 1;
+    return false;
+  }
+  box.logAt = now;
+  box.suppressed = 0;
+  return true;
+}
+
 /** 这次要给这条连接带回"页面被别的实例动过"的提示吗？
  *
  *  条件：另一个实例写过，**且**写的时间晚于这条连接上次收到结果的时间。

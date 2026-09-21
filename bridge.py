@@ -53,8 +53,42 @@ class BrowserBridge:
     #: 这个间隔决定了回收后多久能被发现。
     HEARTBEAT_INTERVAL = 25.0
 
-    def __init__(self, command_timeout: float = 20.0):
+    #: 判定"对面彻底没动静"要经历几个心跳周期。
+    #:
+    #: ⚠️ **别调小**（调小就会重演"假断开"）：扩展的 MV3 Service Worker 被
+    #:    浏览器回收时，会有几十秒完全不回话，然后被保活闹钟唤醒、自己回来 ——
+    #:    从服务端看，"睡着了"和"真死了"**长得一模一样**。
+    #:    所以容错窗口要盖过一个完整的"回收 → 唤醒"周期（实测 30~60 秒）。
+    IDLE_HEARTBEATS = 3
+
+    #: 探测窗口（秒）：静默超过上限后**先发一个探测包**再等这么久。
+    #: 回来了就是虚惊一场（不计断开、不刷日志、session 不变），
+    #: 还是没动静才判死。
+    IDLE_PROBE_GRACE = 6.0
+
+    #: 同一时间窗内"探测后判死"的日志只喊一次（秒）。
+    #: 连接抖动本身没什么可看性，但整页刷屏会淹掉真正的错误。
+    IDLE_LOG_WINDOW = 300.0
+
+    def __init__(self, command_timeout: float = 20.0,
+                 heartbeat_interval: Optional[float] = None,
+                 idle_probe_grace: Optional[float] = None,
+                 idle_timeout: Optional[float] = None):
         self.command_timeout = command_timeout
+        # 这三个开放成实例参数，测试里可以压到毫秒级（否则一条用例要等一分多钟）
+        self.heartbeat_interval = float(
+            self.HEARTBEAT_INTERVAL if heartbeat_interval is None else heartbeat_interval)
+        self.idle_probe_grace = float(
+            self.IDLE_PROBE_GRACE if idle_probe_grace is None else idle_probe_grace)
+        self.idle_timeout = idle_timeout          # None → 按下面的公式推
+
+        # 空闲与探活的统计（面板自检 / 诊断用）
+        self.idle_probes = 0            # 发过多少次探测包
+        self.idle_disconnects = 0       # 探测后仍然没动静、真判死了多少次
+        self._idle_log_at = 0.0
+        self._idle_log_suppressed = 0
+        self._last_inbound = 0.0
+        self._probing = False
 
         self._ws = None
         self._session_id: Optional[str] = None
@@ -91,12 +125,36 @@ class BrowserBridge:
 
     @property
     def read_timeout(self) -> float:
-        """多久没收到扩展任何数据就判定连接已死。
+        """多久没收到扩展任何数据就**开始探测**（不是直接断开）。
 
-        取「心跳间隔的 2 倍」和「命令超时 + 余量」里更大的那个：
-        前者兜住半开连接，后者保证不会在正常等长命令时误判。
+        取「心跳间隔的 IDLE_HEARTBEATS 倍」和「命令超时 + 余量」里更大的那个：
+        前者盖住 MV3 那次"回收 → 唤醒"的静默（实测 30~60 秒），
+        后者保证不会在正常等长命令时误判。
         """
-        return max(self.HEARTBEAT_INTERVAL * 2, self.command_timeout + 10.0)
+        if self.idle_timeout:
+            return float(self.idle_timeout)
+        return max(self.heartbeat_interval * self.IDLE_HEARTBEATS,
+                   self.command_timeout + 10.0)
+
+    @property
+    def last_inbound_ago(self) -> float:
+        """距离上次收到扩展数据过了多久（秒）；从没收到过返回 0。"""
+        return (time.time() - self._last_inbound) if self._last_inbound else 0.0
+
+    def note_idle_disconnect(self, now: Optional[float] = None) -> bool:
+        """记一次"探测过、仍然没动静"的判死。
+
+        返回**这次要不要记 WARNING** —— 同一个 ``IDLE_LOG_WINDOW`` 窗口里
+        只喊一次，其余只累加计数（日志刷屏会把真正的错误淹掉）。
+        """
+        now = time.time() if now is None else now
+        self.idle_disconnects += 1
+        if self._idle_log_at and (now - self._idle_log_at) < self.IDLE_LOG_WINDOW:
+            self._idle_log_suppressed += 1
+            return False
+        self._idle_log_at = now
+        self._idle_log_suppressed = 0
+        return True
 
     @property
     def info(self) -> dict:
@@ -108,6 +166,11 @@ class BrowserBridge:
             "protocol": getattr(self._hello, "protocol", None),
             "connected_at": self._connected_at or None,
             "uptime": (time.time() - self._connected_at) if self._connected_at else 0,
+            # 空闲探活的诊断：探测过多少次、真判死过多少次、上次收到数据多久前。
+            # （面板上"扩展一断一合"到底是不是问题，看这三个数就清楚了）
+            "idle_probes": self.idle_probes,
+            "idle_disconnects": self.idle_disconnects,
+            "last_inbound_ago": round(self.last_inbound_ago, 1),
             "commands_sent": self.commands_sent,
             "commands_failed": self.commands_failed,
         }
@@ -179,23 +242,71 @@ class BrowserBridge:
 
             # 主接收循环。
             #
-            # 这里必须带读超时：只靠心跳发 ping 是不够的 —— 扩展被
-            # 休眠/唤醒、MV3 Service Worker 被系统回收之后，socket 会成为
-            # 半开连接：send 可能不报错，但对面永远不回。此时 `self._ws`
-            # 仍然非 None，`connected` 一直是 True，面板显示"已连接"，
-            # 而每个工具调用都卡到超时。读超时是唯一能兜住这种情况的闸门。
+            # 读超时的作用：只靠心跳 ping 是不够的 —— 扩展被休眠/唤醒、
+            # MV3 Service Worker 被系统回收之后，socket 会成为**半开连接**：
+            # send 可能不报错，但对面永远不回。此时 `self._ws` 仍然非 None，
+            # `connected` 一直是 True，面板显示"已连接"，而每个工具调用
+            # 都卡到超时。
+            #
+            # ⚠️⚠️ 但**不能一超时就断开** —— 那正是"假断开"的来源：
+            #     扩展的 Service Worker 被回收时会静默几十秒，从服务端看
+            #     跟"真死了"一模一样；等保活闹钟把它唤醒，它自己就回来了
+            #     （用户在日志里看到的就是"断开 → 1 秒后又连上"，还刷屏）。
+            #     所以走**两段式**：
+            #       第一段：静默超过 read_timeout → 只**发一个探测包**，
+            #               再用 IDLE_PROBE_GRACE 的短窗口等它回话；
+            #       第二段：探测窗口里依然一个字都没有 → 才判定失效、断开。
+            #     任何一帧数据（pong / 命令结果 / 事件）都会把状态清零。
+            self._last_inbound = time.time()
+            self._probing = False
             while True:
                 try:
-                    raw = await asyncio.wait_for(ws.receive_text(),
-                                                 timeout=self.read_timeout)
+                    raw = await asyncio.wait_for(
+                        ws.receive_text(),
+                        timeout=(self.idle_probe_grace if self._probing
+                                 else self.read_timeout))
                 except asyncio.TimeoutError:
-                    logger.warning(
-                        f"{self.read_timeout:.0f}s 没收到扩展任何数据，"
-                        f"判定连接已失效，主动断开 (session={session_id})"
-                    )
+                    if not self._probing:
+                        self._probing = True
+                        self.idle_probes += 1
+                        logger.info(
+                            f"{self.read_timeout:.0f}s 没收到扩展数据，发探测包确认"
+                            f"（MV3 的 Service Worker 休眠时就是这样，通常马上回来）"
+                            f" (session={session_id})"
+                        )
+                        try:
+                            await self._send({"type": P.MSG_PING,
+                                              "ts": int(time.time()),
+                                              "probe": True})
+                        except Exception as e:
+                            logger.warning(
+                                f"探测包发送失败（{type(e).__name__}），"
+                                f"判定连接已失效 (session={session_id})"
+                            )
+                            self.note_idle_disconnect()
+                            await self._force_close(ws, code=4002,
+                                                    reason="Heartbeat failed")
+                            break
+                        continue
+                    # 探测窗口内也没动静 → 这次是真死了
+                    if self.note_idle_disconnect():
+                        logger.warning(
+                            f"探测包也没有回应，判定连接已失效，主动断开"
+                            f" (session={session_id})"
+                            f"（最近 {self.IDLE_LOG_WINDOW:.0f} 秒内第 "
+                            f"{self.idle_disconnects} 次；扩展下次醒来会自动重连）"
+                        )
+                    else:
+                        logger.debug(
+                            f"连接判死后又被判死一次（静默超过 "
+                            f"{self.read_timeout:.0f}s），不再重复告警"
+                            f" (session={session_id})"
+                        )
                     await self._force_close(ws, code=4002,
                                             reason="No data from extension")
                     break
+                self._probing = False
+                self._last_inbound = time.time()
                 if raw is None:
                     # 显式收到关闭帧（部分实现回 None 而不是抛异常）
                     break
@@ -380,6 +491,13 @@ class BrowserBridge:
 
         elif mtype == P.MSG_PONG:
             pass
+
+        elif mtype == P.MSG_PING:
+            # 扩展也会**主动**发保活 ping（它每次被保活闹钟唤醒时发一条）。
+            # 回一条 pong 即可 —— 这条路径的意义是：让"扩展那边还活着"这件事
+            # 在服务端可见（收到任何一帧都会重置空闲计时），
+            # 于是 MV3 回收 Service Worker 造成的静默不会一点痕迹都不留。
+            await self._send({"type": P.MSG_PONG, "ts": int(time.time())})
 
         elif mtype == P.MSG_EVENT:
             await self._dispatch_event(str(msg.get("name", "")), msg.get("data") or {})

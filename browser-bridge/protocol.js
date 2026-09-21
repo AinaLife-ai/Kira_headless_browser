@@ -267,6 +267,10 @@ export const STORE = {
    *     会变成永久的后台噪音。所以按退避表拉开重试间隔。 */
   DISCOVER_TRIES: "kb_discover_tries",
   DISCOVER_AT: "kb_discover_at",
+  /** 扩展侧"看着 OPEN 其实不通、自己换了一条新连接"的累计次数（半开连接自愈）。
+   *  为什么落盘：MV3 的 Service Worker 会被回收，内存计数撑不过一次回收；
+   *  而用户问"它是不是老在断"时，要的是一个**能看的数字**，不是翻日志。 */
+  STALE_RECONNECTS: "kb_stale_reconnects",
 };
 
 // ─── 零配置接入（自动发现 KiraAI 实例）────────────────────────────────────

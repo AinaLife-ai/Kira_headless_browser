@@ -24,6 +24,9 @@ CLIENT_JS = r"""
 const PORT = Number(process.argv[2]);
 const url = `ws://127.0.0.1:${PORT}/?token=test`;
 let ws;
+//: 静默到什么时候（epoch ms）。模拟 MV3 的 Service Worker 被回收 ——
+//: 那几十秒里扩展**一个字都不发**，从服务端看和"真死了"一模一样。
+let mutedUntil = 0;
 
 function connect() {
   return new Promise((resolve) => {
@@ -38,10 +41,24 @@ function connect() {
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
       if (msg.type === "ping") {
+        if (Date.now() < mutedUntil) return;      // 静默期：假装没收到
         ws.send(JSON.stringify({type: "pong", ts: Date.now()})); return;
       }
       if (msg.type === "welcome") return;
       if (msg.type === "cmd") {
+        // 静默模式：回完这一条命令就闭嘴 ms 毫秒，然后**自己发一条 ping**
+        // （模拟扩展被保活闹钟唤醒后主动证明"我还活着" —— 这正是修复的一部分：
+        //   服务端因此不会把一次休眠误判成断线）
+        if (msg.params && msg.params.mute_ms) {
+          const ms = Number(msg.params.mute_ms) || 0;
+          ws.send(JSON.stringify({type: "result", id: msg.id, ok: true,
+                                  data: {ok: true, muted_ms: ms}}));
+          mutedUntil = Date.now() + ms;
+          setTimeout(() => {
+            try { ws.send(JSON.stringify({type: "ping", ts: Date.now()})); } catch (_) {}
+          }, ms + 30);
+          return;
+        }
         if (msg.name === "download") {
           // 分块回传（模拟扩展下载）
           const CHUNK = Buffer.alloc(256 * 1024, 65).toString("base64");
@@ -66,7 +83,15 @@ function connect() {
             ? {url: "https://github.com/x/y", title: "GitHub",
                content: "x".repeat(12000)}
             : {ok: true};
-        ws.send(JSON.stringify({type: "result", id: msg.id, ok: true, data}));
+        // delay_ms：故意拖一会儿再回结果 —— 用来验证"服务端因为空闲而发探测包、
+        // 期间取消了一次 recv"，这条迟到的结果**不能丢**（丢了下游会一直等到超时）
+        const delay = Number((msg.params && msg.params.delay_ms) || 0);
+        if (delay > 0) {
+          setTimeout(() => ws.send(JSON.stringify({type: "result", id: msg.id,
+                                                   ok: true, data})), delay);
+        } else {
+          ws.send(JSON.stringify({type: "result", id: msg.id, ok: true, data}));
+        }
       }
     };
     ws.onclose = () => {};
@@ -262,6 +287,82 @@ def run(r) -> None:
             results["dl_size"] = out.stat().st_size if out.exists() else 0
             results["dl_sink_cleared"] = cid not in bridge._sinks
 
+        # ── 空闲探活（"假断开"的回归）────────────────────────────────
+        #  把阈值压到毫秒级，否则一条用例要等一分多钟。
+        #  真实环境：read_timeout=75s（3 个心跳），探测窗口 6s。
+        #  ⚠️ 用 setattr/getattr：拿旧代码跑这套检查时要能给出"哪条不成立"，
+        #     而不是整个脚本 AttributeError 崩掉（那样什么也证明不了）
+        bridge.idle_timeout = 0.8
+        if hasattr(bridge, "idle_probe_grace"):
+            bridge.idle_probe_grace = 1.5
+        _p0 = getattr(bridge, "idle_probes", 0)
+        _d0 = getattr(bridge, "idle_disconnects", 0)
+        _sid0 = bridge._session_id
+
+        # ① 静默 1.2s 后自己醒来（= MV3 回收 SW → 被闹钟唤醒）
+        #    → **绝不能断开**，session 也不能换
+        await bridge.send_command(P.CMD_LIST_TABS, {"mute_ms": 1200})
+        await asyncio.sleep(1.6)
+        results["idle_probes_1"] = getattr(bridge, "idle_probes", 0) - _p0
+        results["idle_kept"] = (bridge.connected and bridge._session_id == _sid0
+                                and getattr(bridge, "idle_disconnects", 0) == _d0)
+        # 醒来之后立刻还能用
+        rr1 = None
+        try:
+            rr1 = await bridge.send_command(P.CMD_LIST_TABS)
+        except Exception as e:
+            results["idle_after_err"] = str(e)
+        results["idle_usable"] = bool(rr1 and rr1.get("tab_count") == 2)
+
+        # ② 探测窗口里也没动静 → 这次该真判死（并且计数 +1）
+        await bridge.send_command(P.CMD_LIST_TABS, {"mute_ms": 5000})
+        for _ in range(120):                      # 最多 6 秒
+            if not bridge.connected:
+                break
+            await asyncio.sleep(0.05)
+        results["idle_dead_detected"] = not bridge.connected
+        results["idle_disconnects"] = getattr(bridge, "idle_disconnects", 0) - _d0
+
+        # ③ 探测期间迟到的命令结果**不能丢**
+        #    （探测会把一次 recv 取消掉；丢消息会让调用方干等到超时）
+        proc3 = subprocess.Popen(["node", str(client_path), str(port)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _procs.append(proc3)
+        for _ in range(120):
+            if bridge.connected:
+                break
+            await asyncio.sleep(0.05)
+        bridge.idle_timeout = 0.5
+        if hasattr(bridge, "idle_probe_grace"):
+            bridge.idle_probe_grace = 1.2
+        try:
+            late = await bridge.send_command(P.CMD_LIST_TABS, {"delay_ms": 900})
+        except Exception as e:
+            late = None
+            results["late_err"] = str(e)
+        results["late_result_kept"] = bool(late and late.get("tab_count") == 2)
+        proc3.terminate()
+        try:
+            proc3.wait(timeout=5)
+        except Exception:
+            proc3.kill()
+        # 后面那组用例要一个"活着且有耐心"的连接，把阈值放回去
+        bridge.idle_timeout = 30.0
+        if hasattr(bridge, "idle_probe_grace"):
+            bridge.idle_probe_grace = 5.0
+        for _ in range(120):
+            if bridge.connected:
+                break
+            await asyncio.sleep(0.05)
+        if not bridge.connected:
+            proc4 = subprocess.Popen(["node", str(client_path), str(port)],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _procs.append(proc4)
+            for _ in range(120):
+                if bridge.connected:
+                    break
+                await asyncio.sleep(0.05)
+
         # 断线感知 + 重连
         proc.terminate()
         proc.wait(timeout=5)
@@ -346,6 +447,19 @@ def run(r) -> None:
          f"落盘 {results.get('dl_size')} 字节；sink 已清理="
          f"{results.get('dl_sink_cleared')}")
     r.ok("E7 扩展断开后立刻感知", results.get("offline_detected"))
+    r.ok("E9 扩展静默（MV3 回收 SW）不该被判死，session 保持不变",
+         results.get("idle_kept") and results.get("idle_usable")
+         and results.get("idle_probes_1", 0) >= 1,
+         f"探活={results.get('idle_probes_1')} 次；"
+         f"保持连接={results.get('idle_kept')}；醒来后可用={results.get('idle_usable')}"
+         f" {results.get('idle_after_err', '')}")
+    r.ok("E10 探测窗口内仍无回应才判死（并计数）",
+         results.get("idle_dead_detected") and results.get("idle_disconnects") == 1,
+         f"判死={results.get('idle_dead_detected')}；"
+         f"计数={results.get('idle_disconnects')}")
+    r.ok("E11 探测期间迟到的命令结果不丢",
+         results.get("late_result_kept"),
+         f"{results.get('late_err', '')}".strip() or "结果完整收到")
     r.ok("E8 扩展重连后立即可用",
          results.get("reconnected") and results.get("reconnect_ok"))
 

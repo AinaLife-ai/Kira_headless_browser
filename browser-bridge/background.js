@@ -26,6 +26,7 @@ import {
   resolveTab, assertInjectable, callContent, detectBrowser,
   askUser, confirmTimeoutMs, resolveConfirm,
   NEEDS_CONFIRM_COMMANDS, confirmPromptFor,
+  isLinkStale, WS_STALE_MS, staleLogDecision,
 } from "./shared.js";
 import {
   getInfo, goBack, refresh, hover, keyPress, keyDownUp,
@@ -256,6 +257,20 @@ export async function discover({ timeoutMs = 1500 } = {}) {
 //              所以每条命令的返回里都带上 `meta.url` 和 `meta.last_actor`
 //              （上次**写**操作来自哪个实例），让 bot 自己发现页面被动了。
 
+/** 扩展侧"半开连接自愈"的统计：换了几次、日志最后一次是什么时候喊的。
+ *
+ *  ⚠️ 为什么要降噪：链路真半开时这个动作**每分钟**都会发生（阈值 60 秒），
+ *     一条条打进控制台 = 换了个地方刷屏，而这件事本来是为了让日志变干净的。
+ *     同一窗口内只喊一次，其余只累加计数 —— 数字在弹窗里看得到。
+ *  ⚠️ 计数要落盘：MV3 的 Service Worker 会被回收，内存里的数字撑不过一次回收。
+ */
+const staleStat = { count: 0, logAt: 0, suppressed: 0 };
+
+// 启动时（每次 Service Worker 唤醒都会重跑）把累计数读回来
+chrome.storage.local.get([STORE.STALE_RECONNECTS])
+  .then((s) => { staleStat.count = Math.max(0, Number(s[STORE.STALE_RECONNECTS]) || 0); })
+  .catch(() => {});
+
 /** 一条到某个 KiraAI 实例的连接。 */
 export class Link {
   constructor(inst) {
@@ -267,6 +282,9 @@ export class Link {
     this.reconnectAttempt = 0;
     this.lastError = "";
     this.connecting = null;
+    //: 最后一次收到服务端数据的时间（epoch ms）。保活闹钟醒来时用它判断
+    //: "看着 OPEN、其实半开"的链路（见 shared.js 的 isLinkStale）。
+    this.lastInboundAt = 0;
   }
 
   get key() { return `${this.inst.host}:${this.inst.port}`; }
@@ -346,6 +364,7 @@ export class Link {
         clearTimeout(openTimeout);
         this.reconnectAttempt = 0;
         this.lastError = "";
+        this.lastInboundAt = Date.now();
         console.log("[KiraBridge] 已连接", this.label);
         this.sendRaw({
           type: MSG.HELLO,
@@ -359,6 +378,8 @@ export class Link {
 
       ws.onmessage = (ev) => {
         if (this.ws !== ws) return;
+        // 记下"最后一帧是什么时候到的" —— 保活闹钟醒来时会用它判断链路是否半开
+        this.lastInboundAt = Date.now();
         handleMessage(ev.data, this)
           .catch((e) => console.error("[KiraBridge] 消息处理异常", e));
       };
@@ -576,6 +597,42 @@ export async function ensureAlive() {
         || l.ws.readyState === WebSocket.CLOSING) {
       l.reconnectAttempt = 0;
       await l.connect();
+      continue;
+    }
+    // ── 看着 OPEN、其实不通的"半开连接" ────────────────────────────
+    //  服务端每 25 秒发一次心跳 ping，正常情况绝不会静默 60 秒。
+    //  静默这么久 = 对面已经收不到我们的东西（典型场景：Service Worker
+    //  被回收又唤醒，socket 留在半开状态）。
+    //  ⚠️ 由**扩展自己**换一条新连接，而不是等服务端把这条判死：
+    //     前者是"主动重连"，日志干净；后者在服务端是"判定连接已失效"，
+    //     看起来像故障，还会刷屏。
+    if (l.ws.readyState === WebSocket.OPEN && isLinkStale(l.lastInboundAt)) {
+      const shout = staleLogDecision(staleStat);
+      if (shout) {
+        console.log("[KiraBridge] 超过", Math.round(WS_STALE_MS / 1000),
+                    "秒没收到服务端数据，链路已半开，主动换一条新连接", l.label,
+                    `（累计第 ${staleStat.count} 次；同一窗口内只提示一次，`
+                    + `想复核请打开 KiraAI 面板的「连接状态」）`);
+      } else {
+        // 降噪：其它次只留一行 debug（控制台默认看不到），计数照记
+        console.debug("[KiraBridge] 半开链路换连接（已降噪，不重复告警）",
+                      l.label, `第 ${staleStat.count} 次`);
+      }
+      // 累计数落盘：弹窗要显示"换过几次"，重启 Service Worker 也不能丢
+      try {
+        chrome.storage.local.set({ [STORE.STALE_RECONNECTS]: staleStat.count });
+      } catch (_) {}
+      l.reconnectAttempt = 0;
+      try { l.ws.close(4000, "stale"); } catch (_) {}
+      continue;      // onclose 里会自动重连
+    }
+    // 还活着：发一条保活 ping 让服务端也看得见"扩展这边醒着"。
+    //  MV3 里这条尤其有用 —— 保活闹钟每次唤醒 Service Worker 都会走到这里，
+    //  服务端的空闲计时因此被重置，就不会出现"对面明明活着却被判死"。
+    if (l.ws.readyState === WebSocket.OPEN) {
+      try {
+        l.sendRaw({ type: MSG.PING, ts: Date.now() });
+      } catch (_) { /* 发不出去也不额外处理：下一轮会走上面的陈旧分支 */ }
     }
   }
 }
@@ -1236,12 +1293,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // 从**连接表**实时算，不用内存里的单 socket（那条路已经没有了）
         const _list = getLinks();
         const _n = _list.filter((x) => x.status === "connected").length;
+        // 扩展侧"半开连接自愈"的累计次数：弹窗上显示一个**数字**，
+        // 用户就不用去翻控制台了（也为回答"它是不是老在断"）
+        const _stale = (await chrome.storage.local.get(STORE.STALE_RECONNECTS))[
+          STORE.STALE_RECONNECTS];
         sendResponse({
           ...st,
           connected: _n > 0,          // 只要有一条通，就算"已连接"
           count: _n,
           instances: _list,           // 弹窗按这个渲染**实例列表**
           readyState: _n ? 1 : -1,
+          staleReconnects: Math.max(0, Number(_stale) || 0),
         });
         break;
       }

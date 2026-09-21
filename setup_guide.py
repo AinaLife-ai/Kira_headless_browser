@@ -52,6 +52,119 @@ def extension_exists(plugin_dir: Path) -> bool:
     return (d / "manifest.json").is_file()
 
 
+# ─── 扩展版本对比（面板「该更新扩展了」提示的唯一真源）──────────────────
+#  ⚠️ 判断**只在后端做一次**：面板只渲染 state，前端不许出现任何版本号字面量。
+#     这样以后插件升到 1.6.0、而用户浏览器里还是 1.5.0 时，提示会自动出现 ——
+#     不需要再改前端（"未来都可以检测"）。
+
+def parse_version(v: Optional[str]):
+    """把版本串解析成可比较的元组。
+
+    容忍 `v1.5.0` / `1.5` / `1.5.0-beta.2`（后缀记为"更小的预发布"），
+    解析不出来返回 None —— **不要**拿字符串比大小，`"1.10" < "1.9"` 是错的。
+    """
+    if v is None:
+        return None
+    s = str(v).strip().lstrip("vV")
+    if not s:
+        return None
+    head, _, tail = s.partition("-")
+    nums = []
+    for p in head.split("."):
+        if not p.isdigit():
+            return None
+        nums.append(int(p))
+    if not nums:
+        return None
+    while len(nums) < 3:
+        nums.append(0)
+    # 预发布（1.5.0-beta < 1.5.0）：正式版记 1、预发布记 0 ——
+    # ⚠️ 别写反：写反了会把 beta 当成"比正式版还新"，提示就永远不出现 ✗
+    return (tuple(nums[:3]), 0 if tail else 1)
+
+
+def compare_versions(a: Optional[str], b: Optional[str]) -> Optional[int]:
+    """`a` 相对 `b`：1=更新、0=相同、-1=更旧；任一侧解析不了返回 None。"""
+    pa, pb = parse_version(a), parse_version(b)
+    if pa is None or pb is None:
+        return None
+    return (pa > pb) - (pa < pb)
+
+
+def bundled_extension_version(plugin_dir: Path,
+                              manifest: Optional[dict] = None) -> Optional[str]:
+    """插件**自带**的扩展版本号（`browser-bridge/manifest.json`）。
+
+    这就是"应该是什么版本"的答案：用户浏览器里装的扩展只要比它旧就该提示。
+    读不到返回 None —— 拿不到就**不猜**，宁可不说。
+    """
+    if manifest is not None:
+        return str(manifest.get("version") or "").strip() or None
+    try:
+        import json as _json
+        p = extension_dir(plugin_dir) / "manifest.json"
+        if not p.is_file():
+            return None
+        data = _json.loads(p.read_text(encoding="utf-8"))
+        return str((data or {}).get("version") or "").strip() or None
+    except Exception as e:                                     # pragma: no cover
+        logger.warning(f"读取扩展 manifest 版本失败：{e}")
+        return None
+
+
+#: 面板要显示的几种状态（后端只给事实，前端按 state 取自己的文案）
+EXT_UP_TO_DATE = "up_to_date"
+EXT_UPDATE_AVAILABLE = "update_available"
+EXT_OUTDATED_PROTOCOL = "outdated_protocol"
+EXT_UNKNOWN = "unknown"
+EXT_NEWER = "newer"
+EXT_NOT_CONNECTED = "not_connected"
+
+#: 需要**提示用户更新**的那些状态。前端文案必须与这个集合一一对应
+#: （有检查盯着，见回归里的 V4：名字对不上 = "提示永远不显示"）。
+EXT_NOTICE_STATES = (EXT_UPDATE_AVAILABLE, EXT_OUTDATED_PROTOCOL, EXT_UNKNOWN)
+
+
+def extension_update_state(bundled: Optional[str],
+                           connected: Optional[str],
+                           is_connected: bool,
+                           protocol_ok: bool = True) -> dict:
+    """算出扩展"要不要更新"，给面板用。
+
+    判定顺序（越靠前越确定有问题）：
+      1. 没连上              → not_connected（面板本来就有未连接提示，不重复喊）
+      2. 连上了但版本读不到   → unknown（很旧的扩展不上报版本 / 握手没成）
+      3. 协议版本对不上       → outdated_protocol（版本号可能一样，但能力不匹配）
+      4. 比插件自带的旧       → update_available
+      5. 比插件自带的还新     → newer（用户自己换了新版，别催他"更新"）
+      6. 其它                → up_to_date
+    """
+    state = EXT_UP_TO_DATE
+    if not is_connected:
+        state = EXT_NOT_CONNECTED
+    elif not connected:
+        state = EXT_UNKNOWN
+    elif not protocol_ok:
+        state = EXT_OUTDATED_PROTOCOL
+    else:
+        cmp = compare_versions(connected, bundled)
+        if cmp is None:
+            state = EXT_UNKNOWN
+        elif cmp < 0:
+            state = EXT_UPDATE_AVAILABLE
+        elif cmp > 0:
+            state = EXT_NEWER
+
+    return {
+        "state": state,
+        # 前端据此决定要不要显示提示（= 三个"确实该更新"的状态）
+        "needs_update": state in EXT_NOTICE_STATES,
+        "bundled_version": bundled,
+        "connected_version": connected,
+        "protocol_ok": bool(protocol_ok),
+    }
+
+
 def detect_os() -> str:
     s = platform.system()
     return {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}.get(s, "unknown")
