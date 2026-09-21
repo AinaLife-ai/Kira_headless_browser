@@ -244,12 +244,16 @@ class ExtensionBackend(Backend):
         `full_page` / `selector` 是路由层会传下来的参数，但这里没法实现 ——
         过去是**默默忽略**它们、照样截一张视口图返回成功，
         调用方（和模型）以为拿到了整页/元素截图。这是**假成功**。
-        → 明确失败，让 BackendRouter 回退到无头后端（那边支持）。
+        → 现在明确失败，并告诉对方"想整页就显式切到无头后端"。
+        （2026-09-22 起插件**不再**自动换后端：换后端=换操作对象，
+          读/截图还会拿到另一套浏览器的画面。要换必须显式说要换。）
         """
         if full_page or selector:
             return OpResult.fail(
-                "扩展后端只支持可视区域截图（captureVisibleTab），"
-                "不支持整页/指定元素 —— 已跳过，交由无头后端处理",
+                "扩展后端只支持可视区域截图（captureVisibleTab），不支持整页/指定元素。"
+                "想截整页请**显式**切到无头后端（browser_backend(action=\"use\", "
+                "use=\"headless\")）—— 注意那是另一个浏览器；"
+                "或者只截可视区域。插件**不会**自动替你换后端。",
                 self.name)
         r = await self._send(self._P.CMD_SCREENSHOT, {})
         if not r.ok:

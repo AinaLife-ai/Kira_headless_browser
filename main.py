@@ -205,6 +205,12 @@ class BrowserPlugin(BasePlugin):
         #: 默认开（bot 的常见用法就是"浏览器丢后台自己截图看"）；不想被弹窗的人可关，
         #: 关了之后最小化状态下截图就直接如实失败。
         self.screenshot_restore_window = _b(cfg.get("screenshot_restore_window", True))
+        #: **运行时**显式切换的后端（`browser_backend` 工具写的）。
+        #: ⚠️ 只在「后端策略」= auto 时有效；且只在内存里 —— 插件重载后回到配置值。
+        #:    （不要让 bot 一次调用就永久改掉用户的配置 ✗）
+        self._backend_override = None
+        #: 降级提示是否已经把"两套浏览器"那句说全过（避免每次调用都刷一大段）
+        self._degrade_announced = False
 
         # ⚠️ 本机 / 内网默认**允许**访问：本插件就是给 AI 当浏览器用的，
         #    localhost:3000 这类开发服务器和 KiraAI 自己的面板都是正常工作目标。
@@ -466,38 +472,63 @@ class BrowserPlugin(BasePlugin):
             parts.append(f"📄 页面内容（截断）：\n{body}")
         return "\n\n".join(parts)
 
-    async def _call(self, method: str, *, for_write: bool = False,
-                    no_fallback: bool = False, **kw):
-        """在候选后端上依次尝试某个能力。
+    #: 失败之后要不要接着试下一个后端。
+    #: ⚠️ **产品里永远是 False**：用户明确要求"操作进行中不许自动切换后端"。
+    #:    中途换 = 换了操作对象，前面那步的结果就此断掉；读/截图更糟 ——
+    #:    会拿到**另一套浏览器**的画面却报成功（假成功）。
+    #: 之所以留成类属性，是为了让**反向自检**能把它翻成 True，
+    #: 证明"不换后端"这条判据真的会响（而不是摆着好看）。
+    allow_failover = False
 
-        优先用扩展桥（用户自己的浏览器）；它没连上或调用失败时，
-        如果策略允许就自动切到无头，并把降级原因带回给模型 ——
-        不做"静默降级"，否则用户会莫名其妙发现自己在看另一个浏览器。
+    def _candidates(self):
+        """本次实际可用的后端顺序。
 
-        ⚠️ 「不静默」不只是标个来源（用户明确要求）：只要这次结果是**换过后端**
-           才拿到的，返回文本必须以「🔁 后端已切换」开头，写清原因、并提醒
-           "两者是两套浏览器"。原因：`（来源：…）` 只是标注，不是**事件** ——
-           bot 不会因为一个小括号就意识到"我原本要操作的那套失败了"，
-           截图尤其危险：它会把图当成用户看到的东西。
-        ⚠️ `no_fallback=True` 用于**换了后端就换了语义**的操作。典型：截用户浏览器
-           的可视区域 —— 无头后端拍的是另一个浏览器，那张图毫无意义。
-           这类操作宁可直接失败，也不给一张"看起来成功"的错图。
+        - 用户把「后端策略」固定成某一类 → **只有一个候选**（bot 也改不了，
+          见 `browser_backend` 工具：那是用户的决定）
+        - `auto` + bot 显式切换过 → 只留它点名的那个（**不保留**"失败再试另一个"）
+        - `auto` → 扩展优先；无头只作为"首选从一开始就不可用"时的落点
+        """
+        if self.router is None:
+            return []
+        if self.backend_strategy != "auto":
+            return self.router.candidates()
+        if self._backend_override:
+            b = self.router.by_name(self._backend_override)
+            return [b] if b is not None else self.router.candidates()
+        return self.router.candidates()
+
+    async def _call(self, method: str, *, for_write: bool = False, **kw):
+        """调用某个能力：**一个后端，一次机会**。
+
+        用哪个由「后端策略」决定（`auto` = 扩展优先，其次无头）。
+        bot 想换，只能**显式**调 `browser_backend`（且仅当策略是 `auto`）。
+
+        ⚠️ **中途绝不自动换后端**（用户明确要求，2026-09-22）：
+           首选可用、但这次调用失败 → **如实失败**，绝不接着试下一个。
+           理由：换后端 = 换了操作对象，前面那步的结果就此断掉；
+           读/截图更糟 —— 会拿到**另一套浏览器**的画面却报"成功"，
+           模型会把别人的图当成用户看到的页面（真正的假成功）。
+        ⚠️ 唯一例外：首选**从一开始就不可用**（没连上 / 没启动）→ 用下一个，
+           但必须在结果里**明说**（bot 得知道自己看的是另一套浏览器）。
         """
         if self.router is None:
             return "❌ 插件尚未初始化完成，请稍后重试。"
 
-        candidates = self.router.candidates()
+        candidates = self._candidates()
         if not candidates:
             return f"❌ {self.router.hint()}"
 
         tried = []
-        first_tried = None          # 第一个**真的尝试过**的后端（切换起点的判据）
-        for backend in candidates:
+        for idx, backend in enumerate(candidates):
             if not backend.available and not await self._probe(backend):
                 tried.append(f"{backend.display}（不可用）")
                 continue
-            if first_tried is None:
-                first_tried = backend
+            # ⚠️ 走到这里 = 这次就用它了。**后面无论成败都不再换后端**（见 docstring）
+            if idx == 0:
+                self._degrade_announced = False          # 首选回来了 → 重新允许提示
+                degrade = ""
+            else:
+                degrade = self._degrade_notice(method, candidates[0], backend, tried)
             if for_write:
                 # 写操作前校验目标页面（扩展后端能拿到 URL，无头后端用当前页）
                 err = await self._check_write(backend, kw.get("url"))
@@ -505,17 +536,16 @@ class BrowserPlugin(BasePlugin):
                     return err
             fn = getattr(backend, method, None)
             if fn is None:
-                tried.append(f"{backend.display}（不支持 {method}）")
-                continue
+                return (f"❌ {backend.display} 不支持「{method}」。\n"
+                        f"{self._switch_hint()}")
             res = await fn(**kw)
             if res.ok:
                 out = self._render(method, res, backend)
-                # 换过后端才拿到的结果 → 明确说出来（见 docstring）
-                if first_tried is not None and backend is not first_tried:
-                    out = self._switch_notice(method, first_tried, backend, tried) + out
+                if degrade:
+                    out = degrade + out
                 # ⚠️ **动作与结果一体返回**。
                 #    框架有每轮工具调用上限（max_tool_calls_per_turn，
-                #    默认 5），"点一下 → 再看一眼"各占一次的话 5 次只够
+                #    默认 5），"点一下 → 再看一眼"如果各占一次调用，5 次只够
                 #    两轮半 —— 日志里满屏 "Tool call limit exceeded ...
                 #    skipping tool 'browser_page'" 就是这么来的。
                 #    而**扩展/后端的内部命令不计次**，所以在 `_call` 这一层
@@ -544,50 +574,66 @@ class BrowserPlugin(BasePlugin):
                 #    这比没有确认机制更糟，因为它让人以为自己拦住了。
                 logger.info(f"[{method}] 用户拒绝了本次操作，已终止（不再尝试其它后端）")
                 return f"🚫 {res.error}。已按你的决定终止，没有改用其它方式执行。"
-            # ⚠️ 不要再留 `last_err = res.error` —— 它从来没被读过，
-            #    留着会让人以为"某处会用最后一次错误"，实际只用 tried 列表。
-            tried.append(f"{backend.display}: {res.error}")
+
+            # ── 失败：**不换后端**（用户明确要求）─────────────────────────
             logger.warning(f"[{method}] {backend.display} 失败：{res.error}")
-            if no_fallback:
-                # 换后端就换语义的操作（典型：截用户浏览器可视区域）——
-                # 如实失败，绝不给一张"看起来成功"的错图。
-                return self._no_fallback_failure(method, tried)
+            if self.allow_failover:
+                # ⚠️ 这条分支是**故意留着的反向自检通道**：它正是"中途自动换后端"
+                #    的老行为，产品里永远走不到（allow_failover 恒为 False）。
+                #    守卫会把它翻成 True，验证"不许换"这条判据真的能抓到回退。
+                tried.append(f"{backend.display}: {res.error}")
+                continue
+            return self._no_switch_failure(method, backend, res)
 
+        # 所有候选都不可用
         detail = "；".join(tried)
-        msg = (f"❌ 操作失败。已尝试：{detail}\n"
-               f"（若希望只用其中一种，可在插件配置里调整「后端策略」）")
-        return self._attach_setup_notice(msg)
+        return self._attach_setup_notice(
+            f"❌ 这次没有可用的浏览器后端：{detail}\n{self._switch_hint()}")
 
-    def _switch_notice(self, method: str, frm, to, tried) -> str:
-        """换了后端必须在结果里说清楚 —— 切换要**让 bot 有感知**。
+    def _degrade_notice(self, method: str, preferred, backend, tried) -> str:
+        """首选后端**从一开始就不可用**、这次用了别的 → 必须让 bot 知道。
 
-        ⚠️ 不能只靠 `_render` 里那个「（来源：…）」：那是标注，不是**事件**。
-           bot 看到 `✅ 截图已保存: …（来源：无头浏览器）` 时，很容易把图
-           当成"用户浏览器现在长这样"。截图尤其危险，所以这里单独把话说死。
+        ⚠️ 这是唯一允许"落到下一个后端"的情形（用户规则），而且**必须说出来**：
+           不说的话，模型会以为它操作的是用户自己的浏览器。
+        ⚠️ 只有状态**刚变化**时把话说全（"两套浏览器"），之后每次只留一行 ——
+           每次调用都刷一大段就成了新的噪音。
         """
         why = "；".join(tried)
-        head = f"🔁 后端已切换：{frm.display} → {to.display}\n"
-        if why:
-            head += f"原因：{why}\n"
+        line = f"ℹ️ 本次用的是「{backend.display}」" + (f"（{why}）" if why else "") + "\n"
+        if getattr(self, "_degrade_announced", False):
+            return line
+        self._degrade_announced = True
         if method == "screenshot":
-            return (head
-                    + "⚠️ 这张图来自**另一个浏览器**（无头后端是独立的一套）："
-                      "它拍的**不是**用户浏览器当前画面/标签。"
-                      "要看用户看到的画面，请让用户把浏览器窗口恢复出来再重试。\n\n")
-        return (head
-                + "⚠️ 两个后端是**两套独立的浏览器**：这条结果来自后者，"
-                  "它的页面不等于用户浏览器当前页面 —— 接着操作前先确认对象。\n\n")
+            extra = ("⚠️ 这张图来自**另一个浏览器**：它拍的**不是**用户浏览器当前画面/标签。"
+                     "要看用户看到的画面，请先让用户把浏览器放开（窗口/扩展）。\n")
+        else:
+            extra = ("⚠️ 两个后端是**两套独立的浏览器**：这条结果来自后者，"
+                     "它的页面不等于用户浏览器当前页面 —— 接着操作前先确认对象。\n")
+        return line + extra + "\n"
 
-    def _no_fallback_failure(self, method: str, tried) -> str:
-        """「换后端就换语义」的操作失败时的回话：宁可失败，也不要假成功。"""
-        detail = "；".join(tried)
-        extra = ""
-        if method == "screenshot":
-            extra = ("\n（可视区域截图**只能**由用户浏览器完成 —— 无头后端拍的是另"
-                     "一个浏览器，那张图不是你要看的画面，所以没有替你换后端。"
-                     "让用户把窗口恢复出来（或把「截图时临时恢复窗口」开着）再试。）")
-        return (f"❌ 操作失败。已尝试：{detail}{extra}\n"
-                f"（若希望只用其中一种，可在插件配置里调整「后端策略」）")
+    def _no_switch_failure(self, method: str, backend, res) -> str:
+        """失败了就是失败了：**不换后端**，并告诉对方"想换该怎么换"。"""
+        msg = (f"❌ {backend.display} 执行「{method}」失败：{res.error}\n"
+               f"（这次**没有**自动换后端 —— 中途换会换掉操作对象，"
+               f"读/截图还会拿到另一套浏览器的画面。）")
+        hint = self._switch_hint()
+        if hint:
+            msg += "\n" + hint
+        return self._attach_setup_notice(msg)
+
+    def _switch_hint(self) -> str:
+        """告诉 bot「想换后端该怎么换」；用户把策略固定时，明确说"不许换"。"""
+        if self.backend_strategy != "auto":
+            label = {"extension": "只用扩展桥", "headless": "只用无头浏览器"}.get(
+                self.backend_strategy, self.backend_strategy)
+            return (f"当前「后端策略」被用户固定为「{label}」，插件**不会**换后端，"
+                    f"你也不要试着换 —— 需要换请让用户在插件配置里改。")
+        cur = self._backend_override or "auto"
+        other, label = (("extension", "用户自己的浏览器") if cur == "headless"
+                        else ("headless", "无头浏览器"))
+        return (f"确实要用另一套的话：调 browser_backend(action=\"use\", use=\"{other}\") "
+                f"显式切换 —— 注意那是**另一个浏览器**（{label}），"
+                f"它的页面不是当前这个。")
 
     async def _probe(self, backend) -> bool:
         """懒启动：无头后端第一次被用到时才拉起，不拖慢插件加载。"""
@@ -1258,13 +1304,11 @@ class BrowserPlugin(BasePlugin):
             _d = _base / "temp"
             os.makedirs(_d, exist_ok=True)
             path = os.path.join(str(_d), f"{prefix}_{int(time.time())}.png")
-        # ⚠️ 截「用户浏览器的可视区域」时**不许换后端**：无头后端拍的是另一个
-        #    浏览器，换过去只会得到一张"看起来成功"的错图 —— 正是要防的假成功。
-        #    （整页 / 元素截图是另一回事：扩展**根本做不到**，本来就得交给无头，
-        #      那种切换由 `_switch_notice` 明确说出来，bot 看得见。）
-        visible_only = not full_page and not selector
+        # ⚠️ 这里**不再**有"可视区域截图不许回退"的特例参数 —— 因为从 2026-09-22 起
+        #    `_call` 对**所有**操作都禁止中途换后端（用户要求）。扩展做不到整页/元素时
+        #    就如实失败，并给出"想用无头请显式切换"的提示。
         r = await self._call("screenshot", path=path, full_page=full_page,
-                             selector=selector or None, no_fallback=visible_only)
+                             selector=selector or None)
 
         # 截图失败：直接回错，不要再去发图/描述
         if not (isinstance(r, str) and r.startswith("✅")):
@@ -1777,6 +1821,83 @@ class BrowserPlugin(BasePlugin):
             "不能放「图像」组。",
         ])
         return "\n".join(info)
+
+    @register.tool(
+        name="browser_backend",
+        description=(
+            "查看 / 显式选择用哪个浏览器后端。action=status 看当前用哪一个；"
+            "action=use 显式切换（use=extension 用户自己的浏览器 / headless 无头浏览器 / "
+            "auto 回到配置里的策略）。\n"
+            "⚠️ 两者是**两套独立的浏览器**：切到 headless 之后，你看的、动的都是无头那套，"
+            "页面不是用户浏览器里的那个（用户也看不到你在里面做什么）。\n"
+            "⚠️ 只有「后端策略」是 auto 时才切得动；用户把策略固定成某一类时本工具会拒绝 "
+            "—— 那是用户的决定，要改请让用户去插件配置里改。\n"
+            "⚠️ 插件**不会**自动切换后端：操作失败就是失败，不会偷偷换一套浏览器接着做。"
+        ),
+        params={"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["status", "use"]},
+            "use": {"type": "string", "enum": ["extension", "headless", "auto"]},
+        }, "required": ["action"]},
+    )
+    async def tool_backend(self, event, action: str = "status", use: str = "", **_):
+        if not self.enabled:
+            return "浏览器插件未启用"
+        a = (action or "status").lower()
+        if a == "status":
+            return self._describe_backend_choice()
+        if a != "use":
+            return "action 只能是 status / use"
+        # ⚠️ 用户把策略固定成某一类 = 用户的决定，**谁也别改**（用户明确要求）
+        if self.backend_strategy != "auto":
+            label = {"extension": "只用扩展桥", "headless": "只用无头浏览器"}.get(
+                self.backend_strategy, self.backend_strategy)
+            return (f"🚫 不改：用户把「后端策略」固定成了「{label}」—— 那是用户的决定，"
+                    f"插件不会换后端。需要换的话，请让用户在插件配置里改「后端策略」。")
+        want = (use or "").lower()
+        if want == "auto":
+            self._backend_override = None
+            self._degrade_announced = False
+            return ("✅ 已回到配置里的「后端策略」（auto：扩展优先，扩展不可用时才用无头）。\n"
+                    + self._describe_backend_choice())
+        if want not in ("extension", "headless"):
+            return "use 只能是 extension / headless / auto"
+        b = self.router.by_name(want) if self.router else None
+        if b is None:
+            return (f"❌ 这个后端在插件里没启用（配置里关掉了？）：{want}。"
+                    "要启用请让用户在插件配置里改。")
+        if not b.available:
+            if not await self._probe(b):
+                if want == "extension":
+                    return ("❌ 切不过去：扩展还没连上。请在浏览器里打开一次你的 KiraAI 页面，"
+                            "或点扩展图标确认显示「已连接」，然后再试。")
+                return ("❌ 切不过去：无头浏览器起不来。"
+                        "可用 browser_diag(action=\"status\") 看具体原因。")
+        self._backend_override = want
+        self._degrade_announced = False
+        what = ("无头浏览器（独立的一套 —— 它的页面不是用户浏览器里的那个）"
+                if want == "headless" else "用户自己的浏览器")
+        return (f"✅ 已切换：本次运行都用「{b.display}」= {what}。\n"
+                f"⚠️ 这是**运行时**切换，插件重载后回到配置里的「后端策略」。\n"
+                + self._describe_backend_choice())
+
+    def _describe_backend_choice(self) -> str:
+        """把"现在到底用哪一个、还能不能换"讲清楚（给 bot 和用户都看得懂）。"""
+        cands = self._candidates()
+        cur = cands[0] if cands else None
+        strategy_note = ("（auto = 扩展优先，扩展不可用时才落到无头）"
+                         if self.backend_strategy == "auto"
+                         else "（用户固定成这一类，插件不换后端）")
+        lines = ["🔍 后端选择",
+                 f"配置里的「后端策略」: {self.backend_strategy}{strategy_note}",
+                 f"运行时覆盖: {self._backend_override or '无'}",
+                 f"当前会用: {cur.display if cur else '没有可用的后端'}"]
+        if self.backend_strategy == "auto":
+            lines.append("切换方式: browser_backend(action=\"use\", "
+                         "use=\"extension|headless|auto\")")
+        else:
+            lines.append("切换方式: 无 —— 用户把策略固定成某一类了"
+                         "（要改请让用户在插件配置里改）")
+        return "\n".join(lines)
 
     @register.tool(
         name="browser_diag",

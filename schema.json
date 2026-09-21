@@ -62,11 +62,11 @@
       "headless"
     ],
     "default": "auto",
-    "hint": "auto = prefer the extension (your own browser, zero conflict) and fall back to a plugin-owned headless browser when the extension is not connected. extension = only your browser; never silently downgrade. headless = only the plugin's own browser.",
+    "hint": "auto = prefer the extension (your own browser). If the extension is NOT connected, the plugin uses its own headless browser and tells you which one it used. The plugin never switches backends in the middle of an operation - if a call fails, it fails; switching is explicit only (the bot can call browser_backend, and only when this setting is auto). extension = only your browser, never the headless one. headless = only the plugin's own browser.",
     "locales": {
       "zh": {
         "name": "后端策略",
-        "hint": "auto=优先扩展（用你自己的浏览器，零冲突），扩展没连上就自动回退到插件自己的无头浏览器；extension=只用你的浏览器，连不上也不偷偷降级；headless=只用插件自己的无头浏览器。\n\n默认：auto。"
+        "hint": "auto=优先用你的浏览器；只有扩展没连上时才用插件自带的无头浏览器（会明确告诉你这次用的是哪一套）。使用时插件不会中途自动换后端 —— 失败就是失败，要换得显式切换（bot 调 browser_backend，而且只有本项是 auto 时它才切得动）。extension=只用你的浏览器，不会用无头。headless=只用插件自己的无头浏览器。\n\n默认：auto。"
       },
       "en": {
         "hint": "auto = prefer the extension (your own browser, zero conflict) and fall back to the plugin's headless browser when it is not connected; extension = only your browser, never silently downgrade; headless = only the plugin's own headless browser.\n\nDefault: auto."
