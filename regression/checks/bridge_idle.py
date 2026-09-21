@@ -63,7 +63,12 @@ def _run_js_probe(r) -> None:
         return
     need = ("静默超过阈值判为陈旧（半开连接）",
             "保活时用 isLinkStale 判断并主动换连接",
-            "保活时发一条 ping 证明自己还活着（服务端就不会误判空闲）")
+            "保活时发一条 ping 证明自己还活着（服务端就不会误判空闲）",
+            # 这条是用户问出来的："换一条新连接"这句话本身会不会刷屏？
+            # 会 —— 链路真半开时每分钟一次。所以它也必须降噪。
+            "换连接的日志有降噪：同一窗口只喊一次（计数照记）",
+            "换连接走降噪入口（不是每次都 console.log）",
+            "弹窗里能看到这个次数（用户不用翻控制台）")
     names = [str(x.get("name", "")) for x in items]
     miss = [n for n in need if n not in names]
     if miss:

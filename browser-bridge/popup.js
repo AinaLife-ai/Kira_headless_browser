@@ -61,6 +61,7 @@ async function refresh() {
   const list = r.instances || [];
   const n = r.count || 0;
   renderInstances(list);
+  setStaleHint(r.staleReconnects || 0);   // 半开自愈次数（数字，代替翻日志）
   if (n > 0) {
     setDot("on");
     setStatus(`已连接 ${n} 个实例` + (list.length > n ? `（共配对 ${list.length} 个）` : ""));
@@ -77,6 +78,24 @@ async function refresh() {
 }
 
 /** 在状态下面补一行"试过的端口"（只在发现失败时出现）。 */
+/** 半开连接自愈的次数：正常应长期是 0（或个位数，比如网络切换/休眠了几次）。
+ *  数字明显一直涨 = 链路真的有问题，比"控制台里一段段日志"好判断得多。 */
+function setStaleHint(n) {
+  let el = $("staleHint");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "staleHint";
+    el.className = "hint";
+    const st = $("status");
+    if (st && st.parentNode) st.parentNode.insertBefore(el, st.nextSibling);
+    else document.body.appendChild(el);
+  }
+  if (!n) { el.style.display = "none"; el.textContent = ""; return; }
+  el.style.display = "";
+  el.textContent = "半开连接自愈：扩展自己换过 " + n + " 次连接"
+    + "（服务端没动静超过 60 秒才会发生；偶尔几次正常，持续增长说明链路不稳）";
+}
+
 function setTriedPorts(ports) {
   let el = $("tried");
   if (!el) {

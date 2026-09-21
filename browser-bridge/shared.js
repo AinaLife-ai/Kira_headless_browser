@@ -58,6 +58,31 @@ export function isLinkStale(lastInboundAt, now = Date.now(), limit = WS_STALE_MS
   return (now - lastInboundAt) > limit;
 }
 
+/** "换一条新连接"这条日志的**降噪窗口**（毫秒）。
+ *
+ *  为什么也要降噪：链路真半开时，这个动作每分钟都会发生一次（阈值 60 秒），
+ *  一条条打出来就是新的刷屏 —— 而它本来是为了让日志变干净的。
+ *  同一个窗口内只喊一次，其余只累加计数（数字可以去弹窗里看）。
+ */
+export const STALE_LOG_WINDOW_MS = 5 * 60 * 1000;
+
+/** 这次"换连接"要不要**打日志**？（纯函数，方便测试）
+ *
+ *  `box` 是一个可变状态对象：`{count, logAt, suppressed}`。
+ *  返回值：true = 这次该喊（其余情况只累加计数）。
+ */
+export function staleLogDecision(box, now = Date.now(),
+                                windowMs = STALE_LOG_WINDOW_MS) {
+  box.count = (box.count || 0) + 1;              // 计数**always**要加
+  if (box.logAt && (now - box.logAt) < windowMs) {
+    box.suppressed = (box.suppressed || 0) + 1;
+    return false;
+  }
+  box.logAt = now;
+  box.suppressed = 0;
+  return true;
+}
+
 /** 这次要给这条连接带回"页面被别的实例动过"的提示吗？
  *
  *  条件：另一个实例写过，**且**写的时间晚于这条连接上次收到结果的时间。
