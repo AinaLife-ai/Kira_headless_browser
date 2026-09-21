@@ -133,6 +133,18 @@ body::after{
 .note.warn{background:var(--amber-w);border-color:rgba(200,135,58,.24)}
 .note.warn svg{color:var(--amber)}
 
+/* ── 可收放块（更新步骤）───────────────────────────────────────────
+   ⚠️ 别退回 `display:none` 硬切：那样只有"闪现"没有"收放"，
+      而且高度是 0 → 有高度 之间直接跳，看着就是闪。
+      grid-template-rows 0fr→1fr 对**内容高度未知**的块也能平滑过渡，
+      且纯 CSS 计时（不靠 transitionend）—— 减少动效时瞬时开合，不会卡半开。
+      收起时连 visibility 一起关掉，里面的链接/按钮不会还被 Tab 键选中。 */
+.fold{display:grid;grid-template-rows:0fr;opacity:0;
+  transition:grid-template-rows .26s var(--ease), opacity .2s var(--ease)}
+.fold.open{grid-template-rows:1fr;opacity:1}
+.fold > .fold-in{overflow:hidden;min-height:0;visibility:hidden}
+.fold.open > .fold-in{visibility:visible}
+
 /* ── 表单控件 ───────────────────────────────────────────── */
 .field{display:grid;grid-template-columns:1fr auto;gap:6px 18px;align-items:center;
   padding:15px 0;border-bottom:1px solid var(--line-2)}

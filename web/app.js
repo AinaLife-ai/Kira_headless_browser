@@ -133,57 +133,98 @@ const EXT_TEXT = {
   },
 };
 
-let _extStepsShown = false;
+// 「扩展建议更新」提示 + 更新步骤块的状态。
+//   三个变量缺一不可：
+//     _extStepsOpen   —— 用户有没有把步骤块展开（收放开关的样子）
+//     _extStepsLoaded —— 步骤内容是否已经拉过一次（拉过就不再重拉）
+//     _extNoticeSig   —— 上次渲染提示块的签名（内容没变就不重绘）
+//
+// ⚠️ 为什么必须有这三个（用户报的"点查看更新步骤，那块一闪一闪"）：
+//    面板每 3 秒 refresh 一次 → renderStatus → renderExtNotice。
+//    以前这个函数**每次调用都重建整个提示块**，又因为 _extStepsShown 为真
+//    **每次都重新拉一次 /extension** —— 于是用户点开的步骤块每 3 秒被
+//    清成"正在读取安装步骤…"再填满一次 = 一闪一闪；
+//    按钮也只会重拉、根本没有"收"这个动作。
+let _extStepsOpen = false;
+let _extStepsLoaded = false;
+let _extNoticeSig = "";
+
+function extStepsInner() { return $("extStepsInner") || $("extSteps"); }
+
+/** 展开/收起步骤块：只切 class 与按钮状态，动画交给 CSS（见 .fold）。 */
+function setExtSteps(open) {
+  _extStepsOpen = !!open;
+  const box = $("extSteps");
+  if (box) box.classList.toggle("open", _extStepsOpen);
+  const btn = $("extStepsBtn");
+  if (btn) {
+    btn.setAttribute("aria-expanded", _extStepsOpen ? "true" : "false");
+    btn.textContent = _extStepsOpen ? "收起更新步骤" : "查看更新步骤";
+  }
+}
 
 function renderExtNotice(ext) {
   const box = $("extNotice");
   if (!box) return;
   ext = ext || {};
   if (!ext.needs_update) {
-    box.style.display = "none";
-    box.textContent = "";
-    // 更新好了就把步骤也收起来（用户不会再需要它）
-    const st = $("extSteps");
-    if (st) { st.style.display = "none"; st.textContent = ""; }
-    _extStepsShown = false;
+    // 只在**真的显示过**的时候才动 DOM：平时每 3 秒的轮询什么都不该碰
+    if (_extNoticeSig || box.firstChild) {
+      box.style.display = "none";
+      box.textContent = "";
+      _extNoticeSig = "";
+      // 更新好了就把步骤收起来并清掉缓存（下次需要时重新拉最新的步骤）
+      setExtSteps(false);
+      _extStepsLoaded = false;
+      const inner = extStepsInner();
+      if (inner) inner.textContent = "";
+    }
     return;
   }
+  // ★ 内容没变就别重绘：重绘会重建按钮，也会把用户展开的步骤块打回初始态
+  //   （这正是"一闪一闪"的来源）。状态/版本任何一个变了才重画。
+  const sig = [ext.state, ext.connected_version, ext.bundled_version].join("|");
+  if (sig === _extNoticeSig && box.firstChild) return;
+  _extNoticeSig = sig;
   const t = (EXT_TEXT[LOCALE] || EXT_TEXT.zh)[ext.state];
   const msg = t ? t(ext) : "扩展与插件版本不一致，建议更新扩展。";
   box.style.display = "flex";
   box.innerHTML = icon("alert")
     + `<div><b>扩展建议更新</b><br>${fmt(msg)}`
-    + ` <button class="btn ghost" id="extStepsBtn" type="button" style="margin-top:8px">`
-    + `查看更新步骤</button></div>`;
+    + ` <button class="btn ghost" id="extStepsBtn" type="button" `
+    + `aria-expanded="${_extStepsOpen ? "true" : "false"}" style="margin-top:8px">`
+    + `${_extStepsOpen ? "收起更新步骤" : "查看更新步骤"}</button></div>`;
   const btn = $("extStepsBtn");
   if (btn) btn.addEventListener("click", loadExtSteps);
-  // 已经点开过的话，让内容跟着新的提示一起保留
-  if (_extStepsShown) loadExtSteps();
 }
 
 /** 「查看更新步骤」：拉 /extension（安装步骤 + 扩展在插件目录里的绝对路径）。
- *  复用现成接口，不另造一份文案 —— 步骤改了这里自动跟上。 */
+ *  复用现成接口，不另造一份文案 —— 步骤改了这里自动跟上。
+ *
+ *  行为：**没拉过** → 拉一次并展开；**已经拉过** → 只做展开/收起，不再请求。
+ *  （以前每点一次、每次轮询都重拉一次 —— 那正是"一闪一闪"的根源。） */
 async function loadExtSteps() {
-  const box = $("extSteps");
-  if (!box) return;
-  box.style.display = "";
-  box.innerHTML = `<div class="hint">正在读取安装步骤…</div>`;
+  const inner = extStepsInner();
+  if (!inner) return;
+  if (_extStepsLoaded) { setExtSteps(!_extStepsOpen); return; }
+  setExtSteps(true);
+  inner.innerHTML = `<div class="hint">正在读取安装步骤…</div>`;
   try {
     const d = await api("/extension");
     const steps = (d && d.steps) || [];
     const path = (d && d.path) || "";
     const url = (d && d.extensions_url) || "";
-    box.innerHTML = `<div class="note"><div>`
+    inner.innerHTML = `<div class="note"><div>`
       + `<b>扩展所在位置</b><br><span class="mono">${fmt(path)}</span>`
       + `<br><span class="hint">在浏览器地址栏打开 <span class="mono">${fmt(url)}</span>，`
       + `删掉旧的「Kira Browser Bridge」，再用下面的方式加载上面这个目录。</span>`
       + `<ol style="margin:8px 0 0 18px;padding:0">`
       + steps.map((s) => `<li>${fmt(s)}</li>`).join("")
       + `</ol></div></div>`;
-    _extStepsShown = true;
+    _extStepsLoaded = true;
   } catch (e) {
-    box.innerHTML = `<div class="hint">读取安装步骤失败：${fmt(e.message || String(e))}</div>`;
-    _extStepsShown = false;
+    inner.innerHTML = `<div class="hint">读取安装步骤失败：${fmt(e.message || String(e))}</div>`;
+    _extStepsLoaded = false;   // 失败不算"已加载"，下次点还能再试
   }
 }
 

@@ -247,12 +247,60 @@ if (notice) {
   const btn = doc.getElementById("extStepsBtn");
   push("提示里给了「查看更新步骤」的入口", !!btn);
   if (btn) {
+    const extCalls = () => calls.filter((c) => String(c.url).includes("/extension")).length;
     btn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     await sleep(300);
     const stepsBox = doc.getElementById("extSteps");
     push("点开就能看到更新步骤（复用 /extension 接口）",
          !!stepsBox && /开发者模式/.test(stepsBox.textContent || ""),
          JSON.stringify((stepsBox || {}).textContent || "").slice(0, 80));
+    push("展开是「收放」（块带 open + 按钮变「收起更新步骤」+ aria-expanded）",
+         !!stepsBox && stepsBox.classList.contains("open")
+           && /收起更新步骤/.test(btn.textContent || "")
+           && btn.getAttribute("aria-expanded") === "true",
+         `class=${stepsBox && stepsBox.className} btn=${JSON.stringify(btn.textContent)}`);
+    const fetches = extCalls();
+
+    // ── 用户报的 bug：这块"一闪一闪"而不是正确收放 ──────────────────
+    //    根因：面板每 3 秒 refresh → renderStatus → renderExtNotice，
+    //    它以前**每次都重建提示块**、又因为 _extStepsShown 为真**每次都重拉
+    //    /extension** ⇒ 展开的内容被清成"正在读取…"再填满一次 = 闪。
+    const btnBefore = doc.getElementById("extStepsBtn");
+    // 用 MutationObserver 直接盯"内容有没有被改动过" —— 比"事后看内容对不对"
+    // 灵敏得多（旧代码里那一闪是瞬时的，轮询间隙根本抓不到最终状态）。
+    let stepMutations = 0;
+    const mo = new window.MutationObserver((recs) => { stepMutations += recs.length; });
+    mo.observe(stepsBox, { childList: true, subtree: true, characterData: true });
+    for (let i = 0; i < 3; i++) {
+      try { await window.refresh(); } catch (_) { await sleep(60); }
+      await sleep(60);
+    }
+    mo.disconnect();
+    push("轮询刷新时提示块不重绘（按钮还是同一个 DOM 元素）",
+         doc.getElementById("extStepsBtn") === btnBefore,
+         doc.getElementById("extStepsBtn") === btnBefore ? "元素保持" : "元素被重建 = 会闪");
+    push("轮询刷新期间步骤块内容零改动（不再被清空重填 = 不闪）",
+         stepMutations === 0
+           && !/正在读取/.test(stepsBox.textContent || "")
+           && /开发者模式/.test(stepsBox.textContent || ""),
+         `DOM 变更 ${stepMutations} 次`);
+    push("步骤只拉一次 /extension（轮询不重复请求）",
+         extCalls() === fetches, `调用次数 ${fetches} → ${extCalls()}`);
+
+    // 再点一次 = 收起；再点回来 = 展开；两次都不重新请求
+    const btn2 = doc.getElementById("extStepsBtn");
+    btn2.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(140);
+    push("再点一次收起（open 去掉、按钮回到「查看更新步骤」）",
+         !stepsBox.classList.contains("open")
+           && /查看更新步骤/.test(btn2.textContent || "")
+           && btn2.getAttribute("aria-expanded") === "false",
+         `class=${stepsBox.className} btn=${JSON.stringify(btn2.textContent)}`);
+    btn2.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(140);
+    push("再点回来能展开，且不重新请求 /extension",
+         stepsBox.classList.contains("open") && extCalls() === fetches,
+         `open=${stepsBox.classList.contains("open")} 请求 ${extCalls()}`);
   }
 }
 // 扩展更新之后，提示要自己消失（不用用户手动关）
@@ -264,6 +312,11 @@ await sleep(200);
 push("扩展更新后提示自动消失",
      $("extNotice").style.display === "none",
      `display=${$("extNotice").style.display}`);
+push("扩展更新后步骤块收起并清空（不再占位、下次会重拉最新步骤）",
+     !doc.getElementById("extSteps").classList.contains("open")
+       && !(doc.getElementById("extSteps").textContent || "").trim(),
+     `class=${doc.getElementById("extSteps").className} 内容长度=${
+       (doc.getElementById("extSteps").textContent || "").length}`);
 
 // ── ④ 保存：下拉的值要真的提交；保存条要收起；提示条要自己消失 ──────
 $("save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

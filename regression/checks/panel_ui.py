@@ -386,3 +386,40 @@ def run(r) -> None:
     except Exception as e:                                  # pragma: no cover
         r.ok("S24 /config 快照覆盖所有字段（面板上不该有空框）", False,
              f"{type(e).__name__}: {e}"[:160])
+
+    # ── S25「查看更新步骤」必须是**收放**，且不许每轮重建 / 重拉 ──────────
+    #    用户报的原话："前端点查看更新步骤，那个块是一闪一闪的而不是正确收放"。
+    #    根因：面板每 3 秒 refresh → renderStatus → renderExtNotice，而它
+    #    ① 每次都重建整个提示块（按钮被换掉、步骤块被打回初始态）
+    #    ② 因为 _extStepsShown 为真，每次都**重新拉一次 /extension**
+    #    ⇒ 展开的内容被清成"正在读取安装步骤…"再填满 = 一闪一闪；
+    #    而且按钮只会重拉，根本没有"收"这个动作。
+    #    真行为由 panel_smoke.mjs 探针钉住（拿修复前代码跑：6 条报红，
+    #    /extension 被拉 1 → 4 次、步骤块 DOM 变更 6 次）；这里再把**形状**
+    #    钉死，防止哪天重构顺手把守卫删掉又退回去。
+    _js = src_safe("web/app.js")
+    _html25 = src_safe("web/index.html")
+    _css25 = src_safe("web/style.css")
+    _bad25 = []
+
+    def _need25(cond, msg):
+        if not cond:
+            _bad25.append(msg)
+
+    _need25("sig === _extNoticeSig" in _js,
+            "renderExtNotice 少了「内容没变就不重绘」的签名守卫（⇒ 每 3 秒重建，会闪）")
+    _need25(re.search(r"if \(_extStepsLoaded\)", _js) is not None,
+            "loadExtSteps 少了「已经拉过就不再拉」的守卫（⇒ 每次点击/轮询都重拉）")
+    _need25('class="fold"' in _html25 and 'id="extStepsInner"' in _html25,
+            "#extSteps 不是可收放结构（缺 class=fold / 内层 #extStepsInner）")
+    _need25(re.search(r"\.fold\s*\{[^}]*grid-template-rows:0fr", _css25) is not None
+            and re.search(r"\.fold\.open\s*\{[^}]*grid-template-rows:1fr", _css25) is not None,
+            "收放过渡不在（.fold 需要 grid-template-rows 0fr ↔ 1fr）")
+    _need25("收起更新步骤" in _js and "查看更新步骤" in _js and "aria-expanded" in _js,
+            "按钮不是开关（缺「查看/收起」文案切换或 aria-expanded）")
+    # 反向自检：把签名守卫那一行删掉，判据必须报出来
+    _mut25 = _js.replace("if (sig === _extNoticeSig && box.firstChild) return;", "")
+    _self25 = "sig === _extNoticeSig" not in _mut25
+    r.ok("S25 更新步骤是「收放」且不每轮重建/重拉（静态形状 + 反自检）",
+         not _bad25 and _self25,
+         f"问题={_bad25 or '无'}；反向自检={'通过' if _self25 else '失败'}")

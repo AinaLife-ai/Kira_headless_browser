@@ -124,7 +124,10 @@
         <!-- 扩展版本提示：由 /status 的 extension.state 驱动（后端算好，前端只渲染）。
              旧版扩展 / 协议不匹配 / 没上报版本时出现，并给出更新步骤。 -->
         <div class="note warn" id="extNotice" style="display:none"></div>
-        <div id="extSteps" style="display:none"></div>
+        <!-- 更新步骤：**可收放**（.fold 用 grid-template-rows 0fr↔1fr 过渡，
+             纯 CSS 计时，不依赖 transitionend —— 减少动效时直接瞬时开合，
+             不会卡在半开；内容高度未知也能平滑）。 -->
+        <div id="extSteps" class="fold"><div class="fold-in" id="extStepsInner"></div></div>
         <div id="domains" style="margin-top:10px"></div>
         <div id="clog" style="margin-top:6px"></div>
         <!-- 面板自检：把"载入动画有没有播 / 是不是开了减少动效 / 最近一次接口错误"
