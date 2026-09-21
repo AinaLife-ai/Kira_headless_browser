@@ -59,6 +59,26 @@ const extra = ["function renderStatus(", "function _renderDomains(",
     const e = rest.indexOf("\n}\n");
     return e >= 0 ? rest.slice(0, e + 2) : "const renderExtNotice = () => {};";
   })()
+  // ⚠️ renderExtNotice 里现在还会调 setExtSteps()（"更新步骤"块的收放）——
+  //    沙箱里缺这个名字，整段 refresh 会抛错、用例**看起来像守卫失效** ✗
+  //    ⇒ 同样按名字抽，抽不到就补空壳；三个状态变量也要带上（不然赋值报错）
+  + "\n" + (() => {
+    const names = ["let _extStepsOpen = false;", "let _extStepsLoaded = false;",
+                   'let _extNoticeSig = "";'];
+    return names.filter((n) => html.includes(n)).join("\n")
+      + (html.includes("let _extStepsOpen") ? "" : "\nlet _extStepsOpen = false;");
+  })()
+  + "\n" + (() => {
+    const pick = (mk, shell) => {
+      const i = html.indexOf(mk);
+      if (i < 0) return shell;
+      const rest = html.slice(i);
+      const e = rest.indexOf("\n}\n");
+      return e >= 0 ? rest.slice(0, e + 2) : shell;
+    };
+    return pick("function extStepsInner(", "const extStepsInner = () => null;")
+      + "\n" + pick("function setExtSteps(", "const setExtSteps = () => {};");
+  })()
   + "\nconst renderDiag = () => {};\n";
 
 const out = [];
@@ -73,6 +93,23 @@ function makeEl() {
     get innerHTML() { return this._html; },
     set innerHTML(v) { this._html = String(v); },
     appendChild(c) { this.children.push(c); },
+    // ⚠️ 真 DOM 有的东西，桩里就得有 —— 缺 classList / setAttribute 时，
+    //    面板代码里正常的一句 `btn.setAttribute(...)` 会在沙箱里抛错，
+    //    用例看起来像"守卫失效"，其实是**探针没跟上重构** ✗（第 4 次了）
+    classList: {
+      _s: new Set(),
+      add(c) { this._s.add(c); },
+      remove(c) { this._s.delete(c); },
+      contains(c) { return this._s.has(c); },
+      toggle(c, on) {
+        const want = on === undefined ? !this._s.has(c) : !!on;
+        if (want) this._s.add(c); else this._s.delete(c);
+        return want;
+      },
+    },
+    _attrs: {},
+    setAttribute(k, v) { this._attrs[k] = String(v); },
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k) ? this._attrs[k] : null; },
   };
   return el;
 }
