@@ -31,6 +31,7 @@ from . import (
     panel_ui,
     bridge_idle,
     ext_update,
+    ext_icons,
 )
 
 #: 检查**模块**列表（按顺序执行）。
@@ -63,6 +64,7 @@ ALL_CHECKS = [
     panel_ui,            # 侧边栏面板（真 DOM 行为 + id/表单/保存条/开屏动画守卫）
     bridge_idle,         # 桥接空闲判死与半开连接自愈（"假断开"刷屏）
     ext_update,          # 扩展版本提示（旧版扩展要能发现）
+    ext_icons,           # 扩展图标（尺寸 / 格式 / 体积预算）
 ]
 
 __all__ = ["ALL_CHECKS"]
