@@ -186,7 +186,38 @@ def run(r) -> None:
     r.ok("V6 接线完整：/status 出数据 → 面板渲染 → 给出更新步骤",
          not _bad6, f"问题={_bad6 or '无'}")
 
-    # ── V7 真跑一遍 api_status（形状对不上的话前端会静默不显示）───────
+    # ── V8 改了扩展代码就必须升扩展版本（否则用户永远收不到更新）────
+    #    ⚠️ 真事故（2026-09-22）：插件侧加了"空闲先探测再判死"、扩展侧加了
+    #       "半开连接自愈"，扩展代码改了四个文件，`browser-bridge/manifest.json`
+    #       的 version 却还是 1.5.0 ⇒ 面板比对两边版本号一样 → 判定"已是最新"
+    #       → **一个字都不提示**，用户永远停在旧扩展上。
+    #       而这套提示本来就是为了防这个的 —— 只能说守卫不够。
+    try:
+        import importlib.util
+        _stamp_tool = PLUGIN_DIR / "regression" / "ext_version_stamp.py"
+        spec = importlib.util.spec_from_file_location("hb_ext_stamp", _stamp_tool)
+        _mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_mod)
+        _problems = _mod.check()
+
+        # 反向自检：把扩展代码"改一个字节"，判据必须能发现（证明指纹真的覆盖内容）
+        import tempfile
+        import shutil
+        with tempfile.TemporaryDirectory(prefix="extstamp_") as _td:
+            _copy = Path(_td) / "browser-bridge"
+            shutil.copytree(PLUGIN_DIR / "browser-bridge", _copy)
+            _js = _copy / "background.js"
+            _js.write_text(_js.read_text(encoding="utf-8") + "\n// touched\n",
+                           encoding="utf-8")
+            _self8 = bool(_mod.check(ext_dir=_copy))
+        r.ok("V8 改了扩展代码就必须升扩展版本（含反自检）",
+             not _problems and _self8,
+             f"问题={_problems or '无'}；反向自检={'通过' if _self8 else '失败'}"
+             f"（不一致时跑 regression/ext_version_stamp.py 刷新戳）")
+    except Exception as e:                                  # pragma: no cover
+        r.ok("V8 扩展版本戳检查", False, f"{type(e).__name__}: {e}"[:160])
+
+    # ── V9 真跑一遍 api_status（形状对不上的话前端会静默不显示）───────
     try:
         import asyncio
         import tempfile
@@ -215,7 +246,7 @@ def run(r) -> None:
         _need = {"state", "needs_update", "bundled_version",
                  "connected_version", "protocol_ok"}
         _miss = sorted(_need - set(_ext))
-        r.ok("V7 api_status 真跑：extension 块的字段齐全且判定正确",
+        r.ok("V9 api_status 真跑：extension 块的字段齐全且判定正确",
              not _miss and _ext.get("state") == "update_available"
              and _ext.get("needs_update") is True,
              f"缺字段={_miss or '无'}；state={_ext.get('state')}；"
@@ -228,9 +259,9 @@ def run(r) -> None:
             "extension_version": _ext.get("bundled_version"), "browser": "Chrome"})
         st2 = asyncio.run(plugin.api_status())
         ext2 = st2.get("extension") or {}
-        r.ok("V7 同版本时不提示（不会无脑催用户更新）",
+        r.ok("V9 同版本时不提示（不会无脑催用户更新）",
              ext2.get("needs_update") is False
              and ext2.get("state") == "up_to_date",
              f"state={ext2.get('state')}")
     except Exception as e:                                  # pragma: no cover
-        r.ok("V7 api_status 真跑一遍", False, f"{type(e).__name__}: {e}"[:180])
+        r.ok("V9 api_status 真跑一遍", False, f"{type(e).__name__}: {e}"[:180])
