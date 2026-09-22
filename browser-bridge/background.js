@@ -968,12 +968,10 @@ function isCaptureUnavailable(e) {
 }
 
 function captureUnavailableMessage(wasMinimized, triedRestore) {
-  const why = wasMinimized
-    ? "浏览器窗口当前是「最小化」状态"
-    : "浏览器窗口当前完全不可见（最小化，或被别的窗口完全挡住）";
-  return `${why}，系统读不到画面，所以截图失败。`
-    + (triedRestore ? "已尝试临时恢复窗口再截一次，仍然拿不到画面。" : "")
-    + "把浏览器窗口恢复出来（或让它至少露出一部分）再重试即可。";
+  const why = wasMinimized ? "窗口处于「最小化」" : "窗口完全不可见（最小化或被挡住）";
+  return `${why}，系统读不到画面，截图失败。`
+    + (triedRestore ? "已试着临时恢复窗口，仍然拿不到画面。" : "")
+    + "把窗口恢复出来（至少露出一部分）再试。";
 }
 
 /** 截可视区域；窗口最小化/被遮挡时**短暂借一下窗口**，截完恢复原状。

@@ -250,10 +250,8 @@ class ExtensionBackend(Backend):
         """
         if full_page or selector:
             return OpResult.fail(
-                "扩展后端只支持可视区域截图（captureVisibleTab），不支持整页/指定元素。"
-                "想截整页请**显式**切到无头后端（browser_backend(action=\"use\", "
-                "use=\"headless\")）—— 注意那是另一个浏览器；"
-                "或者只截可视区域。插件**不会**自动替你换后端。",
+                "扩展只能截可视区域。要整页请显式切到无头"
+                "（browser_backend use=headless，那是另一个浏览器）。",
                 self.name)
         r = await self._send(self._P.CMD_SCREENSHOT, {})
         if not r.ok:

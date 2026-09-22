@@ -178,7 +178,7 @@ def run(r) -> None:
         obj, ext, headless = _make_plugin(main_mod, ext_available=False)
         out = _run(obj._call("get_page", chars=100))
         ok = (headless.calls == 1 and out.startswith("ℹ️ 本次用的是")
-              and "两套" in out and "（来源：无头浏览器）" in out)   # 渲染结果本身也要在
+              and "另一套" in out and "（来源：无头浏览器）" in out)  # 渲染结果本身也要在
         r.ok("J2 首选从一开始不可用 → 降级到无头，并在结果里明说（两套浏览器）",
              ok, f"无头被调用={headless.calls} 次；回话={out[:70]!r}")
     except Exception as e:
@@ -205,7 +205,7 @@ def run(r) -> None:
         headless.available = False          # 没启动 → 工具应把它拉起来
         tool_out = _run(obj.tool_backend(None, action="use", use="headless"))
         cands = obj._candidates()
-        ok = (tool_out.startswith("✅") and "运行时" in tool_out and "独立的一套" in tool_out
+        ok = (tool_out.startswith("✅") and "运行时" in tool_out and "另一套" in tool_out
               and cands and cands[0].name == "headless" and headless.started == 1)
         r.ok("J4 auto 下 browser_backend 显式切换：生效 + 说清运行时/另一套浏览器",
              ok, f"当前候选={[b.name for b in cands]}；回话={tool_out[:60]!r}")

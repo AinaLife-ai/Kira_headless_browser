@@ -604,18 +604,15 @@ class BrowserPlugin(BasePlugin):
             return line
         self._degrade_announced = True
         if method == "screenshot":
-            extra = ("⚠️ 这张图来自**另一个浏览器**：它拍的**不是**用户浏览器当前画面/标签。"
-                     "要看用户看到的画面，请先让用户把浏览器放开（窗口/扩展）。\n")
+            extra = "⚠️ 那是另一套浏览器：这张图不是用户浏览器的当前画面。\n"
         else:
-            extra = ("⚠️ 两个后端是**两套独立的浏览器**：这条结果来自后者，"
-                     "它的页面不等于用户浏览器当前页面 —— 接着操作前先确认对象。\n")
+            extra = "⚠️ 那是另一套浏览器：它的页面不等于用户浏览器的当前页面。\n"
         return line + extra + "\n"
 
     def _no_switch_failure(self, method: str, backend, res) -> str:
         """失败了就是失败了：**不换后端**，并告诉对方"想换该怎么换"。"""
         msg = (f"❌ {backend.display} 执行「{method}」失败：{res.error}\n"
-               f"（这次**没有**自动换后端 —— 中途换会换掉操作对象，"
-               f"读/截图还会拿到另一套浏览器的画面。）")
+               f"（没有自动换后端：中途换会换掉操作对象。）")
         hint = self._switch_hint()
         if hint:
             msg += "\n" + hint
@@ -626,14 +623,11 @@ class BrowserPlugin(BasePlugin):
         if self.backend_strategy != "auto":
             label = {"extension": "只用扩展桥", "headless": "只用无头浏览器"}.get(
                 self.backend_strategy, self.backend_strategy)
-            return (f"当前「后端策略」被用户固定为「{label}」，插件**不会**换后端，"
-                    f"你也不要试着换 —— 需要换请让用户在插件配置里改。")
+            return f"「后端策略」被用户固定为「{label}」，不换后端；要改请让用户改配置。"
         cur = self._backend_override or "auto"
-        other, label = (("extension", "用户自己的浏览器") if cur == "headless"
-                        else ("headless", "无头浏览器"))
-        return (f"确实要用另一套的话：调 browser_backend(action=\"use\", use=\"{other}\") "
-                f"显式切换 —— 注意那是**另一个浏览器**（{label}），"
-                f"它的页面不是当前这个。")
+        other = "extension" if cur == "headless" else "headless"
+        return (f"要换请显式说：browser_backend(action=\"use\", use=\"{other}\") "
+                f"—— 那是另一个浏览器，页面不是这个。")
 
     async def _probe(self, backend) -> bool:
         """懒启动：无头后端第一次被用到时才拉起，不拖慢插件加载。"""
@@ -1825,14 +1819,12 @@ class BrowserPlugin(BasePlugin):
     @register.tool(
         name="browser_backend",
         description=(
-            "查看 / 显式选择用哪个浏览器后端。action=status 看当前用哪一个；"
-            "action=use 显式切换（use=extension 用户自己的浏览器 / headless 无头浏览器 / "
-            "auto 回到配置里的策略）。\n"
-            "⚠️ 两者是**两套独立的浏览器**：切到 headless 之后，你看的、动的都是无头那套，"
-            "页面不是用户浏览器里的那个（用户也看不到你在里面做什么）。\n"
-            "⚠️ 只有「后端策略」是 auto 时才切得动；用户把策略固定成某一类时本工具会拒绝 "
-            "—— 那是用户的决定，要改请让用户去插件配置里改。\n"
-            "⚠️ 插件**不会**自动切换后端：操作失败就是失败，不会偷偷换一套浏览器接着做。"
+            "查看/切换用哪个浏览器后端。\n"
+            "action=status 看当前用哪个；action=use 显式切换"
+            "（extension=自己的浏览器 / headless=无头浏览器 / auto=回到配置策略）。\n"
+            "两者是两套独立浏览器：切到 headless 后，你看的是它自己打开的那个页面。\n"
+            "只有「后端策略」= auto 时才切得动（用户固定成某一类时本工具会拒绝）。"
+            "插件不会自动换后端。"
         ),
         params={"type": "object", "properties": {
             "action": {"type": "string", "enum": ["status", "use"]},
@@ -1851,53 +1843,44 @@ class BrowserPlugin(BasePlugin):
         if self.backend_strategy != "auto":
             label = {"extension": "只用扩展桥", "headless": "只用无头浏览器"}.get(
                 self.backend_strategy, self.backend_strategy)
-            return (f"🚫 不改：用户把「后端策略」固定成了「{label}」—— 那是用户的决定，"
-                    f"插件不会换后端。需要换的话，请让用户在插件配置里改「后端策略」。")
+            return f"🚫 不改：「后端策略」被用户固定成「{label}」。要换请让用户改插件配置。"
         want = (use or "").lower()
         if want == "auto":
             self._backend_override = None
             self._degrade_announced = False
-            return ("✅ 已回到配置里的「后端策略」（auto：扩展优先，扩展不可用时才用无头）。\n"
-                    + self._describe_backend_choice())
+            return "✅ 已回到配置策略（auto：扩展优先）。\n" + self._describe_backend_choice()
         if want not in ("extension", "headless"):
             return "use 只能是 extension / headless / auto"
         b = self.router.by_name(want) if self.router else None
         if b is None:
-            return (f"❌ 这个后端在插件里没启用（配置里关掉了？）：{want}。"
-                    "要启用请让用户在插件配置里改。")
+            return f"❌ 这个后端没启用（配置里关掉了？）：{want}"
         if not b.available:
             if not await self._probe(b):
                 if want == "extension":
-                    return ("❌ 切不过去：扩展还没连上。请在浏览器里打开一次你的 KiraAI 页面，"
-                            "或点扩展图标确认显示「已连接」，然后再试。")
+                    return ("❌ 切不过去：扩展没连上。打开一次你的 KiraAI 页面"
+                            "（或点扩展图标确认已连接）再试。")
                 return ("❌ 切不过去：无头浏览器起不来。"
                         "可用 browser_diag(action=\"status\") 看具体原因。")
         self._backend_override = want
         self._degrade_announced = False
-        what = ("无头浏览器（独立的一套 —— 它的页面不是用户浏览器里的那个）"
-                if want == "headless" else "用户自己的浏览器")
-        return (f"✅ 已切换：本次运行都用「{b.display}」= {what}。\n"
-                f"⚠️ 这是**运行时**切换，插件重载后回到配置里的「后端策略」。\n"
+        what = "另一套浏览器，页面不是用户那个" if want == "headless" else "用户自己的浏览器"
+        return (f"✅ 已切到「{b.display}」（{what}）。运行时生效，插件重载后回配置值。\n"
                 + self._describe_backend_choice())
 
     def _describe_backend_choice(self) -> str:
         """把"现在到底用哪一个、还能不能换"讲清楚（给 bot 和用户都看得懂）。"""
         cands = self._candidates()
         cur = cands[0] if cands else None
-        strategy_note = ("（auto = 扩展优先，扩展不可用时才落到无头）"
-                         if self.backend_strategy == "auto"
-                         else "（用户固定成这一类，插件不换后端）")
-        lines = ["🔍 后端选择",
-                 f"配置里的「后端策略」: {self.backend_strategy}{strategy_note}",
-                 f"运行时覆盖: {self._backend_override or '无'}",
-                 f"当前会用: {cur.display if cur else '没有可用的后端'}"]
-        if self.backend_strategy == "auto":
-            lines.append("切换方式: browser_backend(action=\"use\", "
-                         "use=\"extension|headless|auto\")")
-        else:
-            lines.append("切换方式: 无 —— 用户把策略固定成某一类了"
-                         "（要改请让用户在插件配置里改）")
-        return "\n".join(lines)
+        switchable = self.backend_strategy == "auto"
+        head = f"🔍 后端：{cur.display if cur else '没有可用的后端'}"
+        if self._backend_override:
+            head += f"（运行时切换：{self._backend_override}）"
+        return "\n".join([
+            head,
+            f"策略：{self.backend_strategy}｜可切换：{'是' if switchable else '否（用户固定了策略）'}",
+            ("切换：browser_backend(action=\"use\", use=\"extension|headless|auto\")"
+             if switchable else "切换：无 —— 要改请让用户改插件配置"),
+        ])
 
     @register.tool(
         name="browser_diag",

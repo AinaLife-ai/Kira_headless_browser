@@ -62,11 +62,11 @@
       "headless"
     ],
     "default": "auto",
-    "hint": "auto = prefer the extension (your own browser). If the extension is NOT connected, the plugin uses its own headless browser and tells you which one it used. The plugin never switches backends in the middle of an operation - if a call fails, it fails; switching is explicit only (the bot can call browser_backend, and only when this setting is auto). extension = only your browser, never the headless one. headless = only the plugin's own browser.",
+    "hint": "auto = prefer your browser; use the plugin's own headless browser only when the extension is not connected (the plugin says which one it used). The plugin never switches backends mid-operation - switching is explicit (the bot calls browser_backend, and only while this setting is auto). extension = only your browser. headless = only the headless browser.",
     "locales": {
       "zh": {
         "name": "后端策略",
-        "hint": "auto=优先用你的浏览器；只有扩展没连上时才用插件自带的无头浏览器（会明确告诉你这次用的是哪一套）。使用时插件不会中途自动换后端 —— 失败就是失败，要换得显式切换（bot 调 browser_backend，而且只有本项是 auto 时它才切得动）。extension=只用你的浏览器，不会用无头。headless=只用插件自己的无头浏览器。\n\n默认：auto。"
+        "hint": "auto=优先用你的浏览器；扩展没连上时才用插件自带的无头浏览器（会说明这次用的是哪一套）。插件不会中途自动换后端 —— 失败就是失败，要换得显式切换（bot 调 browser_backend，且只有本项是 auto 时它才切得动）。extension=只用你的浏览器。headless=只用无头浏览器。\n\n默认：auto。"
       },
       "en": {
         "hint": "auto = prefer the extension (your own browser, zero conflict) and fall back to the plugin's headless browser when it is not connected; extension = only your browser, never silently downgrade; headless = only the plugin's own headless browser.\n\nDefault: auto."
@@ -694,14 +694,14 @@
     "name": "Restore Window For Screenshot",
     "type": "switch",
     "default": true,
-    "hint": "When the browser window is minimized (or fully covered), briefly restore it before taking the screenshot and put it back right after. Needed because the browser cannot read a frame while the window is not visible - screenshots always fail there. With this on, the window may flash up for a moment and is minimized again immediately. Turn it off if you would rather get a plain failure than see the window pop up. Only affects the extension backend and only the visible-area screenshot.\n\nDefault: on.",
+    "hint": "Briefly restore a minimized window to take the screenshot, then put it back. The browser cannot read a frame while the window is not visible, so screenshots fail there. The window may flash for a moment.\n\nDefault: on.",
     "locales": {
       "zh": {
         "name": "截图时临时恢复窗口",
-        "hint": "浏览器窗口被最小化（或被完全挡住）时，截图前先把它临时恢复出来，截完立刻还原 —— 因为窗口不可见时浏览器读不到画面，截图必然失败。开启后窗口可能闪一下，随即恢复最小化。不想看到窗口被弹出来、宁可让截图直接失败的话，就关掉它。只影响扩展后端的「可视区域截图」。\n\n默认：开。"
+        "hint": "窗口被最小化（或被完全挡住）时，截图前先把它临时恢复出来，截完立刻还原—— 窗口不可见时浏览器读不到画面，截图必然失败。会短暂闪一下窗口；不想看到就关掉（那样截图会直接失败）。只影响扩展后端的可视区域截图。\n\n默认：开。"
       },
       "en": {
-        "hint": "When the browser window is minimized (or fully covered), briefly restore it before taking the screenshot and put it back right after. The browser cannot read a frame while the window is not visible, so screenshots always fail there. With this on the window may flash up for a moment. Default: on."
+        "hint": "Briefly restore a minimized window to take the screenshot, then put it back. The browser cannot read a frame while the window is not visible, so screenshots fail there. The window may flash for a moment.\n\nDefault: on."
       }
     }
   },
