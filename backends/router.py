@@ -85,6 +85,17 @@ class BackendRouter:
             return self._headless
         return None
 
+    def by_name(self, name: str):
+        """按后端名取（`extension` / `headless`）。
+
+        用于**显式切换**：`browser_backend` 工具只切到明确点名的那个，
+        不做任何"猜"。
+        """
+        for b in (self._ext, self._headless):
+            if b is not None and b.name == name:
+                return b
+        return None
+
     def candidates(self) -> List[Backend]:
         """按优先级列出候选后端（用于失败后重试下一个）。"""
         if self.strategy == "extension":

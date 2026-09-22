@@ -110,6 +110,8 @@ regression/
 │   └── bridge_idle.py      桥接空闲判死与半开连接自愈（“假断开”刷屏）
 │   └── ext_update.py       扩展版本提示（旧版扩展要能发现 / 前后端状态名一致）
 │   └── ext_icons.py        扩展图标（尺寸 / 格式 / 体积预算，含反向自检）
+│   └── failover_notice.py  换后端必须被 bot 感知（不许静默回退，含反自检）
+│   └── screenshot_restore.py 截图·窗口最小化自愈（用完还原窗口，含反自检）
 ├── stubs/                  让插件能被 import 的最小替身（不需要真的 KiraAI）
 │   ├── core/               框架接口的最小实现
 │   └── playwright/         **语义忠实的**假 Playwright（见下）

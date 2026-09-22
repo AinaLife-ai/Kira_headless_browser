@@ -48,7 +48,8 @@ class ExtensionBackend(Backend):
     def __init__(self, bridge, protocol, max_upload_bytes=None,
                  max_download_bytes=None, download_timeout=None,
                  content_page_size=8000,
-                 require_confirm=False, confirm_timeout=45):
+                 require_confirm=False, confirm_timeout=45,
+                 screenshot_restore_window=True):
         self._bridge = bridge
         self._P = protocol
         self.max_upload_bytes = int(max_upload_bytes or self.MAX_UPLOAD_BYTES)
@@ -59,6 +60,9 @@ class ExtensionBackend(Backend):
         # （配置项存在、扩展也实现了，但如果不在这里传下去，整套确认就是死的）
         self.require_confirm = bool(require_confirm)
         self.confirm_timeout = int(confirm_timeout or 45)
+        #: 截图时窗口最小化 → 让扩展"借窗口一瞬"（截完还原）。同 require_confirm，
+        #: 必须随命令下发，否则配置项等于不存在。
+        self.screenshot_restore_window = bool(screenshot_restore_window)
 
     # ─── Backend 接口 ────────────────────────────────────────────────
 
@@ -112,6 +116,10 @@ class ExtensionBackend(Backend):
         if self.require_confirm and cmd in (self.WRITE_CMDS | self.CONFIRM_ONLY_CMDS):
             p.setdefault("require_confirm", True)
             p.setdefault("confirm_timeout", self.confirm_timeout)
+        # 截图：窗口最小化/被遮挡时要不要"借窗口一瞬"（截完还原）。
+        # 同 require_confirm —— 不下发的话，扩展那边永远拿默认值，配置项形同虚设。
+        if cmd == self._P.CMD_SCREENSHOT:
+            p.setdefault("restore_window", self.screenshot_restore_window)
         try:
             data = await self._bridge.send_command(cmd, p,
                                                    timeout=timeout, cmd_id=cmd_id)
@@ -236,12 +244,14 @@ class ExtensionBackend(Backend):
         `full_page` / `selector` 是路由层会传下来的参数，但这里没法实现 ——
         过去是**默默忽略**它们、照样截一张视口图返回成功，
         调用方（和模型）以为拿到了整页/元素截图。这是**假成功**。
-        → 明确失败，让 BackendRouter 回退到无头后端（那边支持）。
+        → 现在明确失败，并告诉对方"想整页就显式切到无头后端"。
+        （2026-09-22 起插件**不再**自动换后端：换后端=换操作对象，
+          读/截图还会拿到另一套浏览器的画面。要换必须显式说要换。）
         """
         if full_page or selector:
             return OpResult.fail(
-                "扩展后端只支持可视区域截图（captureVisibleTab），"
-                "不支持整页/指定元素 —— 已跳过，交由无头后端处理",
+                "扩展只能截可视区域。要整页请显式切到无头"
+                "（browser_backend use=headless，那是另一个浏览器）。",
                 self.name)
         r = await self._send(self._P.CMD_SCREENSHOT, {})
         if not r.ok:
