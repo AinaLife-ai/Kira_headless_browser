@@ -540,6 +540,18 @@ python -m playwright install chromium
 <details open>
 <summary><b>2.2.x</b> — 重连风暴根治、CDP 远程调试真的来了</summary>
 
+### v2.2.2（2026-10-12）
+
+**3.0 兼容：模型展示不再显示 UUID（可读名优先）。**
+
+- 3.0 起模型的 `model_id` 是内部稳定 ID（uuid 形态），可读名挪到 `model_name`。
+  本版本把五处展示/判断改为「`model_name` 优先、`model_id` 兜底」（特征识别，不绑版本号，2.x 行为不变）：
+  面板「VLM 模型」下拉（`api_models`）、诊断输出的当前 VLM / 默认 VLM / 可选模型清单、
+  `is_vision_model` 的视觉标记过滤（3.0 下 uuid 永不命中标记、曾导致所有 LLM 被误判为视觉模型）。
+- 引用值（`id` 字段、配置里填的 `provider:model`）保持内部 ID 不动——那才是 3.0 的正确引用格式；
+  诊断清单现在同时显示可读名与可粘贴的引用值。
+- 兼容性：支持 KiraAI 2.30.0+ 与 3.0 全系列（含 v3.0.0-rc.1）。
+
 ### v2.2.1（2026-10-07）
 
 **修四处「参数到不了目的地」——第一处是用户当场踩到的 CDP 报错，

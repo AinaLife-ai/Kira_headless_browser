@@ -78,10 +78,16 @@ _NON_VISION_MARKERS = (
 
 
 def is_vision_model(model_client) -> bool:
-    """这个模型"看起来能用于视觉任务"吗（宽松判断，只排除明确不行的）。"""
+    """这个模型"看起来能用于视觉任务"吗（宽松判断，只排除明确不行的）。
+
+    3.0 起 model_id 是内部稳定 ID（uuid 形态，永不含可读标记），
+    判断源必须优先 model_name；2.x 无 model_name 自动回退 model_id。"""
     if not model_client or not getattr(model_client, "model", None):
         return False
-    model_id = str(getattr(model_client.model, "model_id", "")).lower()
+    model_id = str(
+        getattr(model_client.model, "model_name", None)
+        or getattr(model_client.model, "model_id", "")
+    ).lower()
     return not any(m in model_id for m in _NON_VISION_MARKERS)
 
 
@@ -134,7 +140,7 @@ async def get_vlm_client(ctx, configured: str = "") -> Optional[object]:
         client = ctx.provider_mgr.get_default_vlm()
         if client and is_vision_model(client):
             logger.info(
-                f"使用框架默认 VLM：{getattr(client.model, 'model_id', '?')}")
+                f"使用框架默认 VLM：{getattr(client.model, 'model_name', None) or getattr(client.model, 'model_id', '?')}")
             return client
         if client:
             tried.append("框架默认 VLM 看起来不支持视觉")
@@ -152,7 +158,7 @@ async def get_vlm_client(ctx, configured: str = "") -> Optional[object]:
         client = ctx.get_default_llm_client()
         if client and is_vision_model(client):
             logger.info(
-                f"使用默认 LLM（支持视觉）：{getattr(client.model, 'model_id', '?')}")
+                f"使用默认 LLM（支持视觉）：{getattr(client.model, 'model_name', None) or getattr(client.model, 'model_id', '?')}")
             return client
     except Exception as e:
         tried.append(f"取默认 LLM 失败：{e}")
