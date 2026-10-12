@@ -537,7 +537,7 @@ python -m playwright install chromium
 
 本插件迭代很快，完整历史收在下面（**默认折叠**）。点开对应分组即可。
 
-<details open>
+<details>
 <summary><b>2.2.x</b> — 重连风暴根治、CDP 远程调试真的来了</summary>
 
 ### v2.2.2（2026-10-12）
