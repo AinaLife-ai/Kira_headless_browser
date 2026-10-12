@@ -1957,7 +1957,9 @@ class BrowserPlugin(BasePlugin):
             ])
         else:
             m = getattr(client, "model", None)
-            mid = getattr(m, "model_id", "?")
+            # 展示名：3.0 起 model_id 是内部稳定 ID（uuid 形态），可读名在 model_name；
+            # 2.x 无 model_name 自动回退（2.x 的 model_id 即可读名），行为不变。
+            mid = getattr(m, "model_name", None) or getattr(m, "model_id", "?")
             pid = getattr(m, "provider_id", "?")
             info.append(f"  ✅ {pid}:{mid}")
             type_ok = vlm.is_vision_model(client)
@@ -1983,14 +1985,17 @@ class BrowserPlugin(BasePlugin):
                         mt = ""
                     if mt != "llm":
                         continue
+                    # 展示/过滤都用可读名（3.0 的 model_name；2.x 自动回退 model_id）。
+                    # uuid 变量保持 pid:model_id —— 它是填进「VLM 模型」配置的正确引用值。
                     uuid = f"{pid}:{mi.model_id}"
-                    lower = str(mi.model_id).lower()
+                    mname = getattr(mi, "model_name", None) or mi.model_id
+                    lower = str(mname).lower()
                     if any(x in lower for x in
                            ("embedding", "rerank", "tts", "stt", "davinci",
                             "babbage", "whisper")):
-                        others.append(f"    {uuid}")
+                        others.append(f"    {mname}（{uuid}）")
                     else:
-                        vision.append(f"  👁️ {uuid}")
+                        vision.append(f"  👁️ {mname}（填 {uuid}）")
             if vision:
                 info.append("  可能支持视觉（选其中一个填到「VLM 模型」）：")
                 info.extend(vision[:10])
@@ -2007,7 +2012,8 @@ class BrowserPlugin(BasePlugin):
         try:
             dv = self.ctx.provider_mgr.get_default_vlm()
             if dv and getattr(dv, "model", None):
-                info.append(f"  ✅ {dv.model.provider_id}:{dv.model.model_id}"
+                _dname = getattr(dv.model, "model_name", None) or getattr(dv.model, "model_id", "?")
+                info.append(f"  ✅ {dv.model.provider_id}:{_dname}"
                             f"（{type(dv).__name__}）")
             else:
                 info.append("  ⚠️ 没有配置框架默认 VLM")
@@ -2422,8 +2428,14 @@ class BrowserPlugin(BasePlugin):
                     llm = (mc.get("llm") or {})
                     pname = pcfg.get("name") or pid
                     for mid in llm:
+                        # 3.0 的条目是 dict（含 model_name/config），key 是内部 ID（uuid）；
+                        # 2.x 的条目直接是配置 dict 或字符串，key 即可读名。
+                        # id（引用值）保持 pid:mid 不动；name（给人看）优先 model_name。
+                        entry = llm[mid]
+                        mname = entry.get("model_name") if isinstance(entry, dict) else None
+                        mname = mname or mid
                         models.append({"id": f"{pid}:{mid}",
-                                       "name": f"{mid} ({pname})"})
+                                       "name": f"{mname} ({pname})"})
         except Exception as e:
             logger.warning(f"列模型失败：{type(e).__name__}: {e}")
         return {"models": models}
